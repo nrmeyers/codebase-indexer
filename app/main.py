@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .routers import health, index, search
+from .routers import context_bundle, health, index, search
 
 
 @asynccontextmanager
@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router, tags=["health"])
     app.include_router(index.router, tags=["index"])
     app.include_router(search.router, tags=["search"])
+    app.include_router(context_bundle.router, tags=["context"])
 
     @app.exception_handler(Exception)
     async def _generic_error(request, exc):  # type: ignore[override]
