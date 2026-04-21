@@ -1,7 +1,7 @@
 """Pydantic request/response models for the Code Indexer Service."""
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -44,3 +44,42 @@ class IndexStatus(BaseModel):
     node_count: int = 0
     rel_count: int = 0
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# /search/structural
+# ---------------------------------------------------------------------------
+
+
+class StructuralSearchResponse(BaseModel):
+    nodes: list[dict[str, Any]]
+    relationships: list[dict[str, Any]]
+    row_count: int
+
+
+# ---------------------------------------------------------------------------
+# /search/semantic
+# ---------------------------------------------------------------------------
+
+
+class SemanticResult(BaseModel):
+    symbol: str
+    score: float
+    type: str = ""
+
+
+class SemanticSearchResponse(BaseModel):
+    results: list[SemanticResult]
+
+
+# ---------------------------------------------------------------------------
+# /search/symbol
+# ---------------------------------------------------------------------------
+
+
+class SymbolResponse(BaseModel):
+    qualified_name: str
+    file: str
+    line_start: int | None
+    line_end: int | None
+    source: str
