@@ -222,6 +222,14 @@ async def start_index(
     # Opportunistically evict stale job records before allocating a new one.
     _prune_old_jobs()
 
+    # Reject empty or whitespace-only paths before attempting filesystem ops.
+    # Path("") resolves to cwd (a valid directory) so it must be caught early.
+    if not req.repo_path or not req.repo_path.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="repo_path must not be empty",
+        )
+
     repo_path = Path(req.repo_path)
     if not repo_path.exists():
         raise HTTPException(

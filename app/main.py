@@ -42,6 +42,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Yields:
         None: Control is yielded to FastAPI once startup finishes.
     """
+    # Ensure the parent directory for the DB file exists before migration.
+    # Without this, LadybugDB raises "No such file or directory" on a clean
+    # install where `.cgr/` has not been created yet.
+    from pathlib import Path as _Path
+
+    _Path(settings.LADYBUG_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+
     # Warm the LadybugDB schema on startup so the first /index call is faster.
     try:
         from codebase_rag.services.ladybug_schema import migrate

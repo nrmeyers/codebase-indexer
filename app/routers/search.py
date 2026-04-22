@@ -27,6 +27,18 @@ from ..models import (
 
 router = APIRouter(prefix="/search")
 
+# ---------------------------------------------------------------------------
+# Semantic search import cache
+# ---------------------------------------------------------------------------
+# The semantic search function lives inside codebase_rag, which may require
+# torch/transformers. We cache the result of the first import attempt so that:
+#   - A successful import is reused on every call (avoids repeated module init).
+#   - A failed import short-circuits immediately on subsequent calls instead of
+#     re-attempting the import each time (saves ~500ms per failed call on
+#     deployments without ML deps).
+_semantic_fn: Any = None          # cached callable when import succeeds
+_semantic_unavailable: bool = False  # True once import fails; never retried
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -197,17 +209,32 @@ def semantic_search(
         HTTPException: 503 when the semantic search dependency
             (``codebase_rag.tools.semantic_search``) is not importable —
             typically because the embedding model or VECTOR extension is
-            missing from the deployment.
+            missing from the deployment. Subsequent calls after a failed
+            import return 503 immediately without re-attempting the import
+            (fast-fail via ``_semantic_unavailable`` flag).
     """
-    try:
-        from codebase_rag.tools.semantic_search import semantic_code_search
-    except ImportError as exc:
+    global _semantic_fn, _semantic_unavailable  # noqa: PLW0603
+
+    # Fast-fail path: import previously failed — don't retry.
+    if _semantic_unavailable:
         raise HTTPException(
             status_code=503,
-            detail=f"Semantic search unavailable (missing deps): {exc}",
-        ) from exc
+            detail="Semantic search unavailable (missing deps; import failed on first attempt)",
+        )
 
-    raw = semantic_code_search(q, top_k=k)
+    # Lazy-load path: first call (or after a successful warm-up).
+    if _semantic_fn is None:
+        try:
+            from codebase_rag.tools.semantic_search import semantic_code_search  # type: ignore[import-untyped]
+            _semantic_fn = semantic_code_search
+        except ImportError as exc:
+            _semantic_unavailable = True
+            raise HTTPException(
+                status_code=503,
+                detail=f"Semantic search unavailable (missing deps): {exc}",
+            ) from exc
+
+    raw = _semantic_fn(q, top_k=k)
     return SemanticSearchResponse(
         results=[
             SemanticResult(
