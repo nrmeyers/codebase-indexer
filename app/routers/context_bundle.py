@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..config import settings
 
@@ -43,6 +43,16 @@ class ContextBundleRequest(BaseModel):
     task_description: str = Field(description="Natural-language description of the dev task")
     k: int = Field(default=10, ge=1, le=50, description="Number of seed symbols from semantic search")
     depth: int = Field(default=2, ge=0, le=4, description="Call-graph hop depth")
+
+    @field_validator("repo_path")
+    @classmethod
+    def repo_path_must_exist(cls, v: str) -> str:
+        """Reject paths that do not exist on disk early (422) rather than
+        propagating a confusing 503 from the semantic search layer.
+        """
+        if not Path(v).exists():
+            raise ValueError(f"repo_path does not exist: {v}")
+        return v
 
 
 class ContextBundleResponse(BaseModel):

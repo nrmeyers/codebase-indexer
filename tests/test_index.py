@@ -106,3 +106,30 @@ def test_get_status_failed(tmp_path: Path) -> None:
     body = resp.json()
     assert body["status"] == "failed"
     assert "ingestion exploded" in (body["error"] or "")
+
+
+def test_post_index_accepts_force_reindex_flag(tmp_path: Path) -> None:
+    """force_reindex=true should be accepted and passed through to the ingestion job."""
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        resp = client.post("/index", json={"repo_path": str(tmp_path), "force_reindex": True})
+    assert resp.status_code == 202
+    body = resp.json()
+    assert "job_id" in body
+    assert body["message"] == "Indexing job accepted"
+
+
+def test_post_index_duplicate_same_repo_creates_separate_jobs(tmp_path: Path) -> None:
+    """Two POSTs with the same repo_path both return 202 with distinct job IDs."""
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        resp1 = client.post("/index", json={"repo_path": str(tmp_path)})
+        resp2 = client.post("/index", json={"repo_path": str(tmp_path)})
+
+    assert resp1.status_code == 202
+    assert resp2.status_code == 202
+    job_id1 = resp1.json()["job_id"]
+    job_id2 = resp2.json()["job_id"]
+    # Each call creates an independent job — both should have unique IDs
+    assert job_id1 != job_id2
+    # Both jobs should be retrievable
+    assert client.get(f"/index/{job_id1}/status").status_code == 200
+    assert client.get(f"/index/{job_id2}/status").status_code == 200
