@@ -78,13 +78,13 @@ def test_structural_search_appends_limit() -> None:
 
 
 def test_semantic_search_returns_results() -> None:
-    import codebase_rag.tools.semantic_search as _sem  # ensure module is loaded
-
+    # Patch _semantic_fn directly — the module-level cache stores a function
+    # reference after first call, so patching the module attr alone is unreliable.
     mock_results = [
         {"qualified_name": "mymod.foo", "score": 0.95, "node_id": "mymod.foo", "name": "foo", "type": "Function"},
         {"qualified_name": "mymod.bar", "score": 0.80, "node_id": "mymod.bar", "name": "bar", "type": "Method"},
     ]
-    with patch.object(_sem, "semantic_code_search", return_value=mock_results):
+    with patch("app.routers.search._semantic_fn", lambda q, top_k=10: mock_results):
         resp = client.get("/search/semantic", params={"q": "find all functions", "k": 5})
     assert resp.status_code == 200
     results = resp.json()["results"]
@@ -94,9 +94,9 @@ def test_semantic_search_returns_results() -> None:
 
 
 def test_semantic_search_empty() -> None:
-    import codebase_rag.tools.semantic_search as _sem  # ensure module is loaded
-
-    with patch.object(_sem, "semantic_code_search", return_value=[]):
+    # Patch _semantic_fn directly — the module-level cache stores a function
+    # reference after first call, so patching the module attr alone is unreliable.
+    with patch("app.routers.search._semantic_fn", lambda q, top_k=10: []):
         resp = client.get("/search/semantic", params={"q": "nothing"})
     assert resp.status_code == 200
     assert resp.json()["results"] == []
