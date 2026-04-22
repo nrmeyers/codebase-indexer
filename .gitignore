@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.DS_Store
+.cgr/
+.cgr-hash-cache.json
+.planning/

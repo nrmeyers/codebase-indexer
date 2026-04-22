@@ -4,7 +4,7 @@ FastAPI HTTP gateway over [code-graph-rag](../code-graph-rag). Indexes
 repositories into LadybugDB (embedded kuzu graph + vector, no Docker) and
 exposes structural, semantic, and symbol search to TheForge's dev-agent.
 
-**Port:** 8000
+**Default Port:** 8000 (TheForge config uses `8003` via `code_indexer.base_url`)
 
 ---
 
@@ -19,6 +19,7 @@ exposes structural, semantic, and symbol search to TheForge's dev-agent.
 | `GET` | `/search/semantic` | Vector-similarity search over embeddings |
 | `GET` | `/search/symbol` | Exact FQN lookup returning source + location |
 | `POST` | `/context-bundle` | Grounded code context for the dev-agent |
+| `GET` | `/explorer/info` | Kuzu Explorer viewer availability + launch command (optional) |
 
 ---
 
@@ -32,7 +33,7 @@ uv run uvicorn app.main:app --port 8000 --log-level info
 ## Test
 
 ```bash
-uv run pytest tests/ -v
+uv run pytest tests/ -v   # 23 tests
 ```
 
 ## Install (first run)
@@ -179,3 +180,55 @@ LadybugDB (.cgr/graph.db — embedded kuzu, no Docker)
 The service imports `code-graph-rag` as a local `uv` workspace path
 dependency (`code-graph-rag @ file:///…`). Both share the same
 `LADYBUG_DB_PATH` file so indexed data is immediately visible to search.
+
+---
+
+## Visualising the graph (optional)
+
+LadybugDB is kuzu-compatible on disk, so the official
+[**Kuzu Explorer**](https://docs.kuzudb.com/visualization/kuzu-explorer/)
+opens our `.db` file read-only and gives you an interactive node/edge
+browser, a Cypher console, and schema introspection.
+
+### Option A — ask the running service for the command
+
+When the Code Indexer is up and the graph has at least one indexed repo:
+
+```bash
+curl -s http://localhost:8000/explorer/info | jq
+```
+
+```json
+{
+  "available": true,
+  "db_path": "/abs/path/to/graph.db",
+  "indexed_repos": ["myproject"],
+  "launch_command": "docker run --rm -p 7000:8000 -v /abs/path:/database -e KUZU_PATH=/database/graph.db kuzudb/explorer:latest",
+  "viewer_url": "http://localhost:7000",
+  "docs_url": "https://docs.kuzudb.com/visualization/kuzu-explorer/"
+}
+```
+
+Paste `launch_command` into a terminal and open `viewer_url` once the
+container reports ready.
+
+### Option B — one-shot helper script
+
+```bash
+./scripts/launch-explorer.sh                           # uses LADYBUG_DB_PATH env / .env
+./scripts/launch-explorer.sh /path/to/graph.db         # explicit DB
+PORT=9000 ./scripts/launch-explorer.sh                 # custom host port
+```
+
+The script queries `/explorer/info` for the authoritative command when the
+service is running; otherwise it constructs the command offline.
+
+### Notes
+
+- **Docker is only required for the viewer.** All indexing and search work
+  without Docker — the viewer is purely opt-in.
+- **Single-writer safety.** kuzu-explorer mounts the DB read-only, so it's
+  safe to open while TheForge continues to query — but do **not** run it
+  during a live `/index` job (LadybugDB serialises writers).
+- `available: false` means the viewer would open on an empty graph — index
+  a repo first.

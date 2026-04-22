@@ -63,6 +63,10 @@ class _Job:
 # Module-level store — indexed by job_id. Single-process only.
 _jobs: dict[str, _Job] = {}
 
+# Per-repo-path lock: prevents two concurrent jobs from writing to the same
+# LadybugDB instance simultaneously (single-writer constraint).
+_repo_locks: dict[str, asyncio.Lock] = {}
+
 # TTL: keep completed jobs for 1 hour so callers can poll after completion.
 _JOB_TTL_SECONDS = 3600
 
@@ -95,19 +99,30 @@ async def _run_ingestion(job: _Job, force_reindex: bool) -> None:
     pool executor so the event loop stays responsive to health and status
     polling during long ingestion runs.
 
+    A per-repo asyncio.Lock serialises concurrent jobs that target the same
+    repo_path, enforcing LadybugDB's single-writer constraint and preventing
+    graph corruption from two simultaneous ingest operations.
+
     Args:
         job: The mutable job record to update with progress and final state.
         force_reindex: When true, the underlying GraphUpdater clears the
             graph before re-ingesting.
     """
-    loop = asyncio.get_running_loop()
-    try:
-        await loop.run_in_executor(None, _blocking_index, job, force_reindex)
-    except Exception as exc:
-        # Capture failure on the job so pollers see the error reason rather
-        # than a silent stuck-running status.
-        job.status = "failed"
-        job.error = str(exc)
+    # Acquire (or create) the per-repo lock before touching the DB.
+    repo_key = str(Path(job.repo_path).resolve())
+    if repo_key not in _repo_locks:
+        _repo_locks[repo_key] = asyncio.Lock()
+    lock = _repo_locks[repo_key]
+
+    async with lock:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, _blocking_index, job, force_reindex)
+        except Exception as exc:
+            # Capture failure on the job so pollers see the error reason rather
+            # than a silent stuck-running status.
+            job.status = "failed"
+            job.error = str(exc)
 
 
 def _blocking_index(job: _Job, force_reindex: bool) -> None:

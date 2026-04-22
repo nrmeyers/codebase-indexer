@@ -147,7 +147,11 @@ def structural_search(
     # Append LIMIT to guard against runaway queries (only if not already
     # present — clients that need pagination can specify their own).
     cypher = q.strip()
-    if "LIMIT" not in cypher.upper():
+    # Detect a top-level LIMIT clause using a word-boundary regex so we don't
+    # match the word "limit" inside a string literal (e.g. WHERE n.name = "limit")
+    # or a sub-query. A simple .upper() substring check would match literals.
+    import re as _re
+    if not _re.search(r'\bLIMIT\b', cypher, _re.IGNORECASE):
         cypher = f"{cypher}\nLIMIT {limit}"
 
     try:
@@ -279,7 +283,7 @@ def symbol_lookup(
             )
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DB error: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"DB error: {exc}") from exc
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"Symbol not found: {fqn}")
@@ -308,7 +312,11 @@ def symbol_lookup(
             # end-exclusive. Using line_end directly (when set) keeps the
             # last line inclusive as users expect.
             start = max(0, line_start - 1)
-            end = line_end if line_end is not None else line_start
+            # line_end is 1-indexed inclusive; Python slice end is exclusive so
+            # line_end passes through directly. When line_end is absent (None),
+            # fall back to start+1 so we still return the single start line
+            # rather than an empty slice (lines[start:start] = []).
+            end = line_end if line_end is not None else line_start + 1
             source = "\n".join(lines[start:end])
         except Exception:
             # File may have been moved/deleted since ingestion — swallow so

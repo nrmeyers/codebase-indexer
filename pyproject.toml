@@ -12,6 +12,11 @@ dependencies = [
     "uvicorn[standard]>=0.45.0",
     "real-ladybug>=0.15.3",
     "code-graph-rag @ file:///Users/zacharymatthews/code-graph-rag",
+    # Semantic search stack — required for /search/semantic and /context-bundle
+    # to return populated results.  UniXcoder runs on CPU via torch; transformers
+    # ships the tokenizer + model loader.  ~500MB installed footprint, one-time.
+    "torch>=2.6.0",
+    "transformers>=4.0.0",
 ]
 
 [build-system]

@@ -137,3 +137,38 @@ class SymbolResponse(BaseModel):
     line_start: int | None
     line_end: int | None
     source: str
+
+
+# ---------------------------------------------------------------------------
+# /explorer/info
+# ---------------------------------------------------------------------------
+
+
+class ExplorerInfoResponse(BaseModel):
+    """Response for ``GET /explorer/info`` — graph viewer availability.
+
+    Callers (TheForge UI, developer CLIs) poll this endpoint to decide
+    whether to surface a "Visualise graph" button.  The endpoint itself
+    never launches a viewer — it only reports what is possible and returns
+    the shell command the caller can execute locally.
+
+    Attributes:
+        available: True iff the LadybugDB file exists **and** contains at
+            least one indexed project.  False means the viewer would open
+            on an empty graph, so the UI should hide/disable the button.
+        db_path: Resolved LadybugDB path (same as ``/health.db_path``).
+        indexed_repos: Project names that would be visible in the viewer.
+        launch_command: Ready-to-paste shell command that spins up the
+            official ``kuzudb/explorer`` Docker container pointed at the
+            current DB file.  Docker is **only** required for visualisation;
+            all structural and semantic search still work without it.
+        viewer_url: HTTP URL to open once the launch command is running.
+        docs_url: Upstream kuzu-explorer documentation for the UI itself.
+    """
+
+    available: bool
+    db_path: str
+    indexed_repos: list[str]
+    launch_command: str
+    viewer_url: str
+    docs_url: str
