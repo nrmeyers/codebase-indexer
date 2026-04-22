@@ -214,7 +214,10 @@ async def start_index(
         IndexAccepted: The job_id to use for subsequent status polling.
 
     Raises:
-        HTTPException: 422 when ``repo_path`` does not exist on disk.
+        HTTPException: 422 when ``repo_path`` does not exist on disk or is not
+            a directory. Passing a file path is rejected early to prevent
+            ``GraphUpdater`` from silently traversing the file's parent
+            directory and indexing unrelated content.
     """
     # Opportunistically evict stale job records before allocating a new one.
     _prune_old_jobs()
@@ -224,6 +227,11 @@ async def start_index(
         raise HTTPException(
             status_code=422,
             detail=f"repo_path does not exist: {req.repo_path}",
+        )
+    if not repo_path.is_dir():
+        raise HTTPException(
+            status_code=422,
+            detail=f"repo_path must be a directory, not a file: {req.repo_path}",
         )
 
     job_id = str(uuid.uuid4())
