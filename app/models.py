@@ -237,8 +237,10 @@ class RepoStatsResponse(BaseModel):
             which can drift on any write.
         root_path: Absolute filesystem path the repo was indexed from.
             Empty when unknown (legacy DB indexed before this field).
-        has_embeddings: True when at least one Function/Method has a
-            non-null embedding vector.
+        has_embeddings: True when the numpy embedding file exists and is
+            non-empty, indicating semantic search is available.
+        embedding_count: Number of vectors in the embedding store; None
+            when embeddings are absent or the count can't be determined.
         indexing: True when a job is currently writing to this repo.
     """
 
@@ -252,6 +254,7 @@ class RepoStatsResponse(BaseModel):
     last_indexed_at: float | None = None
     root_path: str = ""
     has_embeddings: bool
+    embedding_count: int | None = None
     indexing: bool = False
 
 

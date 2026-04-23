@@ -913,6 +913,7 @@ def repo_stats(repo: str) -> RepoStatsResponse:
     rel_breakdown: list[NodeTypeStat] = []
     total_rels = 0
     has_embeddings = False
+    _embedding_count: int | None = None
     root_path = ""
     probe_ok = False
     try:
@@ -947,9 +948,19 @@ def repo_stats(repo: str) -> RepoStatsResponse:
             # "has_embeddings" is best-effort — check for the numpy sidecar
             # written by the embedding pass (avoids any LadybugDB VECTOR dep).
             _npy = Path(db_path).with_suffix(".embeddings.npy")
+            _idx = Path(db_path).with_suffix(".embeddings_idx.json")
             has_embeddings = _npy.exists() and _npy.stat().st_size > 0
+            if has_embeddings and _idx.exists():
+                import json as _json
+                try:
+                    _embedding_count = len(_json.loads(_idx.read_text()))
+                except Exception:
+                    _embedding_count = None
+            else:
+                _embedding_count = None
         except Exception:
             has_embeddings = False
+            _embedding_count = None
 
         node_breakdown.sort(key=lambda s: s.count, reverse=True)
         rel_breakdown.sort(key=lambda s: s.count, reverse=True)
@@ -1015,6 +1026,7 @@ def repo_stats(repo: str) -> RepoStatsResponse:
         last_indexed_at=last_idx_at,
         root_path=root_path,
         has_embeddings=has_embeddings,
+        embedding_count=_embedding_count,
         indexing=is_repo_indexing(repo),
     )
 

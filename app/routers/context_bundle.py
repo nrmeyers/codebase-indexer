@@ -102,11 +102,6 @@ def _get_conn(repo: str | None = None):  # type: ignore[override]
 
     db = lb.Database(db_path)
     conn = lb.Connection(db)
-    try:
-        conn.execute("LOAD EXTENSION VECTOR")
-    except Exception:
-        # Already loaded or unavailable — both are non-fatal.
-        pass
     return conn
 
 
@@ -168,7 +163,15 @@ def _fetch_source_for_symbols(
             )
             if rows:
                 r = rows[0]
-                snippets[qn] = _fetch_source(r.get("path", ""), r.get("start_line"), r.get("end_line"))
+                file_path: str = r.get("path") or ""
+                root_path: str = r.get("root_path") or ""
+                # CYPHER_GET_FUNCTION_SOURCE_LOCATION stores module paths relative
+                # to the repo root. Resolve to absolute using root_path (stored on
+                # the Project node) before passing to _fetch_source, which checks
+                # os.path.exists().  Without this, all snippets are empty strings.
+                if file_path and root_path and not Path(file_path).is_absolute():
+                    file_path = str(Path(root_path) / file_path)
+                snippets[qn] = _fetch_source(file_path, r.get("start_line"), r.get("end_line"))
         except Exception:
             # Record an empty string so the caller can see which symbols
             # failed to resolve rather than silently dropping them.
@@ -256,6 +259,16 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         HTTPException: 503 when semantic search is unavailable.
     """
     # 1. Semantic seed — find the most task-relevant functions/methods.
+    # Point code-graph-rag at the per-repo DB *before* the semantic search
+    # so search_embeddings() reads from the correct .embeddings.npy file.
+    repo_slug = Path(req.repo_path).resolve().name
+    _repo_db = settings.db_path_for_repo(repo_slug)
+    try:
+        from codebase_rag.config import settings as _cgr_settings  # type: ignore[import-untyped]
+        _cgr_settings.LADYBUG_DB_PATH = _repo_db
+    except Exception:
+        pass  # non-fatal; falls back to default
+
     try:
         from codebase_rag.tools.semantic_search import semantic_code_search
         seed_results = semantic_code_search(req.task_description, top_k=req.k)
@@ -278,9 +291,6 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
 
     # 2. Expand call graph to pick up callees the LLM will need to reason
     #    about (default depth=2 balances breadth vs. prompt size).
-    # Repo is derived from the basename of repo_path so the bundle targets the
-    # matching per-repo DB rather than the legacy combined file.
-    repo_slug = Path(req.repo_path).resolve().name
     conn = _get_conn(repo_slug)
     all_symbols, call_graph = _expand_call_graph(conn, seed_symbols, req.depth)
 
