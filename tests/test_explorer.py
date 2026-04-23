@@ -59,6 +59,11 @@ def test_explorer_info_reports_available_when_indexed(tmp_path: Path) -> None:
          patch("app.routers.explorer._get_indexed_repos", return_value=["myproject", "other-repo"]):
         s1.LADYBUG_DB_PATH = db_path
         s2.LADYBUG_DB_PATH = db_path
+        # settings.db_path_for_repo(target) is called when a specific repo is
+        # selected. Mock it to return the real per-repo path (same file for
+        # this test) — without this, MagicMock returns a MagicMock and
+        # ExplorerInfoResponse rejects it with a string_type validation error.
+        s1.db_path_for_repo.return_value = db_path
         client = TestClient(create_app())
         resp = client.get("/explorer/info")
 
@@ -77,18 +82,26 @@ def test_explorer_info_returns_launch_command_with_db_path(tmp_path: Path) -> No
          patch("app.routers.explorer._get_indexed_repos", return_value=["proj"]):
         s1.LADYBUG_DB_PATH = db_path
         s2.LADYBUG_DB_PATH = db_path
+        s1.db_path_for_repo.return_value = db_path
         client = TestClient(create_app())
         resp = client.get("/explorer/info")
 
     body = resp.json()
     assert "docker run" in body["launch_command"]
-    assert "kuzudb/explorer" in body["launch_command"]
-    # Mount should point at the parent directory (kuzu stores DB as a directory)
+    # Service uses the ladybugdb/explorer image now (previously kuzudb/explorer
+    # before the Memgraph→LadybugDB migration).
+    assert "ladybugdb/explorer" in body["launch_command"]
+    # Mount should point at the parent directory (ladybug stores DB as a file
+    # whose parent dir is mounted as /database).
     assert str(tmp_path) in body["launch_command"]
 
 
 def test_explorer_info_viewer_url_uses_expected_port(tmp_path: Path) -> None:
-    """viewer_url must match the port inside launch_command (default 7000)."""
+    """viewer_url must match the port inside launch_command (default 7001).
+
+    Port 7001 is used instead of 7000 because macOS ControlCenter / AirPlay
+    Receiver reserves 7000 by default — see explorer.py _EXPLORER_PORT.
+    """
     db_path = str(tmp_path / "graph.db")
     Path(db_path).touch()
 
@@ -99,8 +112,8 @@ def test_explorer_info_viewer_url_uses_expected_port(tmp_path: Path) -> None:
         resp = client.get("/explorer/info")
 
     body = resp.json()
-    assert body["viewer_url"] == "http://localhost:7000"
-    assert "7000:" in body["launch_command"]
+    assert body["viewer_url"] == "http://localhost:7001"
+    assert "7001:" in body["launch_command"]
 
 
 def test_explorer_info_always_returns_docs_url(tmp_path: Path) -> None:
@@ -113,4 +126,5 @@ def test_explorer_info_always_returns_docs_url(tmp_path: Path) -> None:
 
     body = resp.json()
     assert body["docs_url"].startswith("https://")
-    assert "kuzudb" in body["docs_url"] or "kuzu" in body["docs_url"]
+    # After the Memgraph→LadybugDB migration, explorer links to LadybugDB.
+    assert "ladybugdb" in body["docs_url"].lower() or "ladybug" in body["docs_url"].lower()

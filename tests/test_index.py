@@ -118,18 +118,22 @@ def test_post_index_accepts_force_reindex_flag(tmp_path: Path) -> None:
     assert body["message"] == "Indexing job accepted"
 
 
-def test_post_index_duplicate_same_repo_creates_separate_jobs(tmp_path: Path) -> None:
-    """Two POSTs with the same repo_path both return 202 with distinct job IDs."""
+def test_post_index_duplicate_same_repo_returns_409(tmp_path: Path) -> None:
+    """Two POSTs with the same repo_path: the second returns 409 Conflict.
+
+    LadybugDB is a single-writer database, so the service enforces one
+    indexing job per repo at a time via an asyncio.Lock. A second concurrent
+    POST for the same repo must fail fast with 409 rather than queue or
+    run concurrently (which would corrupt the DB).
+    """
     with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
         resp1 = client.post("/index", json={"repo_path": str(tmp_path)})
         resp2 = client.post("/index", json={"repo_path": str(tmp_path)})
 
+    # First request accepted, second rejected while the first is still running
+    # (the mocked _run_ingestion never completes, so the lock is still held).
     assert resp1.status_code == 202
-    assert resp2.status_code == 202
+    assert resp2.status_code == 409
     job_id1 = resp1.json()["job_id"]
-    job_id2 = resp2.json()["job_id"]
-    # Each call creates an independent job — both should have unique IDs
-    assert job_id1 != job_id2
-    # Both jobs should be retrievable
+    # The first job should still be retrievable.
     assert client.get(f"/index/{job_id1}/status").status_code == 200
-    assert client.get(f"/index/{job_id2}/status").status_code == 200

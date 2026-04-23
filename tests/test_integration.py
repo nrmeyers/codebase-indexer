@@ -211,7 +211,7 @@ def test_structural_search_real_db(seeded_db: str) -> None:
 
         return lb.Connection(lb.Database(seeded_db))
 
-    with patch.object(search_mod, "_get_conn", side_effect=_conn):
+    with patch.object(search_mod, "_get_conn", side_effect=lambda repo=None: _conn()):
         from app.main import app
 
         with TestClient(app) as client:
@@ -220,7 +220,7 @@ def test_structural_search_real_db(seeded_db: str) -> None:
                 params={"q": "MATCH (f:Function) RETURN f.name AS name, f.qualified_name AS qn"},
             )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"got {resp.status_code}: {resp.text}"
     body = resp.json()
     assert body["row_count"] >= 1
     names = [n.get("name") for n in body["nodes"]]
@@ -236,13 +236,13 @@ def test_symbol_lookup_real_db(seeded_db: str, tmp_path: Path) -> None:
 
         return lb.Connection(lb.Database(seeded_db))
 
-    with patch.object(search_mod, "_get_conn", side_effect=_conn):
+    with patch.object(search_mod, "_get_conn", side_effect=lambda repo=None: _conn()):
         from app.main import app
 
         with TestClient(app) as client:
             resp = client.get("/search/symbol", params={"fqn": "myapp.utils.add"})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"got {resp.status_code}: {resp.text}"
     body = resp.json()
     assert body["qualified_name"] == "myapp.utils.add"
     assert "def add" in body["source"]

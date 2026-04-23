@@ -849,10 +849,12 @@ _STATS_NODE_LABELS = (
     "Project", "File", "Folder", "Package", "Module",
     "Class", "Function", "Method", "Interface",
     "Variable", "Struct", "Enum", "Type",
+    "ExternalPackage",
 )
 _STATS_REL_TYPES = (
-    "CONTAINS_FILE", "DEFINES", "DEFINES_METHOD",
-    "CALLS", "IMPORTS", "INHERITS",
+    "CONTAINS_FILE", "CONTAINS_FOLDER", "CONTAINS_PACKAGE", "CONTAINS_MODULE",
+    "DEFINES", "DEFINES_METHOD",
+    "CALLS", "IMPORTS", "INHERITS", "IMPLEMENTS", "OVERRIDES", "BELONGS_TO",
 )
 
 
