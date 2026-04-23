@@ -17,6 +17,7 @@ Key design decisions:
 """
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
@@ -24,7 +25,15 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .routers import context_bundle, explorer, health, index, search
+from .routers import context_bundle, explorer, github, health, index, search
+
+# Basic structured logging — without this, our logger.info/warning calls stay
+# silent under uvicorn's default handler.  Format matches uvicorn's access
+# log so mixed output stays readable.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 @asynccontextmanager
@@ -42,27 +51,68 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Yields:
         None: Control is yielded to FastAPI once startup finishes.
     """
-    # Ensure the parent directory for the DB file exists before migration.
-    # Without this, LadybugDB raises "No such file or directory" on a clean
-    # install where `.cgr/` has not been created yet.
+    # Ensure the per-repo DB directory exists so the first /index call isn't
+    # blocked by a "No such file or directory" from LadybugDB on a clean
+    # install.  Individual per-repo DB files are migrated by the ingestor
+    # on first use, so there's no eager schema warm-up here.
     from pathlib import Path as _Path
+    import logging as _logging
+    import real_ladybug as _lb
 
-    _Path(settings.LADYBUG_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    db_dir = _Path(settings.LADYBUG_DB_DIR)
+    db_dir.mkdir(parents=True, exist_ok=True)
 
-    # Warm the LadybugDB schema on startup so the first /index call is faster.
-    try:
-        from codebase_rag.services.ladybug_schema import migrate
+    # Probe each existing DB file at startup.  A corrupt WAL or shadow file
+    # (from a SIGKILL mid-write) causes every subsequent open() call to
+    # raise "Corrupted wal file" — wipe and start fresh rather than block
+    # every index job forever.
+    _log = _logging.getLogger(__name__)
+    _healed = 0
+    _probed = 0
+    for db_file in sorted(db_dir.glob("*.db")):
+        _probed += 1
+        try:
+            _conn = _lb.Connection(_lb.Database(str(db_file)))
+            del _conn
+        except Exception as _exc:
+            _msg = str(_exc)
+            # A lock-acquisition failure means *someone else* holds the file
+            # — typically a leftover subprocess from a prior crash that
+            # hasn't exited yet, or another uvicorn on the same port.  That
+            # is NOT corruption and the DB must not be deleted.  Only treat
+            # WAL / shadow / schema-level failures as heal-worthy.
+            _is_lock_failure = (
+                "Could not set lock on file" in _msg
+                or "already in use" in _msg.lower()
+            )
+            if _is_lock_failure:
+                _log.warning(
+                    "DB %s is locked by another process (%s) — skipping self-heal.",
+                    db_file.name, _exc,
+                )
+                continue
+            _log.warning(
+                "DB %s appears corrupt (%s) — removing stale files for clean restart.",
+                db_file.name, _exc,
+            )
+            _healed += 1
+            for _ext in ("", ".wal", ".shadow"):
+                _stale = db_file.with_suffix(".db" + _ext)
+                if _stale.exists():
+                    _stale.unlink(missing_ok=True)
 
-        migrate(settings.LADYBUG_DB_PATH)
-    except Exception as exc:
-        # Non-fatal — the schema may already exist or the shared package may
-        # be unavailable in some deployment contexts. Log and continue so
-        # /health still returns ok.
-        import logging
+    _log.info(
+        "Startup DB probe: %d repo(s) checked, %d self-healed.", _probed, _healed,
+    )
 
-        logging.getLogger(__name__).warning(
-            "Schema migration warning on startup: %s", exc
-        )
+    # Orphan-job sweep + stale lock cleanup so a prior crash doesn't leave
+    # the in-memory state wedged.
+    from .routers.index import sweep_orphan_jobs, cleanup_stale_locks
+    swept = sweep_orphan_jobs()
+    stale = cleanup_stale_locks()
+    if swept or stale:
+        _log.info("Reaped %d orphan job(s) and %d stale lock(s).", swept, stale)
+
     yield
 
 
@@ -88,6 +138,7 @@ def create_app() -> FastAPI:
     app.include_router(search.router, tags=["search"])
     app.include_router(context_bundle.router, tags=["context"])
     app.include_router(explorer.router, tags=["explorer"])
+    app.include_router(github.router, tags=["github"])
 
     @app.exception_handler(Exception)
     async def _generic_error(request, exc):  # type: ignore[override]

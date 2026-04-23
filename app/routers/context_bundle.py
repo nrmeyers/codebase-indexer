@@ -79,15 +79,28 @@ class ContextBundleResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _get_conn():  # type: ignore[override]
+def _get_conn(repo: str | None = None):  # type: ignore[override]
     """Open a LadybugDB connection with the VECTOR extension lazily loaded.
+
+    Args:
+        repo: Optional repo slug — when given, routes to that repo's
+            per-repo DB file.  Falls back to the first indexed DB on disk
+            or the legacy combined path.
 
     Returns:
         lb.Connection: A connection usable for Cypher queries.
     """
     import real_ladybug as lb  # type: ignore[import-untyped]
 
-    db = lb.Database(settings.LADYBUG_DB_PATH)
+    from pathlib import Path as _Path
+    if repo:
+        db_path = settings.db_path_for_repo(repo)
+    else:
+        db_dir = _Path(settings.LADYBUG_DB_DIR)
+        dbs = sorted(db_dir.glob("*.db")) if db_dir.is_dir() else []
+        db_path = str(dbs[0]) if dbs else settings.LADYBUG_DB_PATH
+
+    db = lb.Database(db_path)
     conn = lb.Connection(db)
     try:
         conn.execute("LOAD EXTENSION VECTOR")
@@ -265,7 +278,10 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
 
     # 2. Expand call graph to pick up callees the LLM will need to reason
     #    about (default depth=2 balances breadth vs. prompt size).
-    conn = _get_conn()
+    # Repo is derived from the basename of repo_path so the bundle targets the
+    # matching per-repo DB rather than the legacy combined file.
+    repo_slug = Path(req.repo_path).resolve().name
+    conn = _get_conn(repo_slug)
     all_symbols, call_graph = _expand_call_graph(conn, seed_symbols, req.depth)
 
     # 3. Fetch source snippets — sorted for deterministic output.

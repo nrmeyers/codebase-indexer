@@ -1,60 +1,199 @@
-"""GET /health — liveness + indexed-repo summary.
+"""GET /health — liveness + per-repo probe + indexed-repo summary.
 
-This router exists so orchestrators (TheForge API, k8s, developers) can both
-confirm the Code Indexer Service is reachable and discover which repositories
-are currently represented in LadybugDB without having to run a search.
+Per-repo probes are cached for a short TTL so UIs polling at 1 Hz don't
+hammer LadybugDB with a new connection per request (the probe's main cost).
+Cache keys are invalidated any time a job writes to a repo (see
+``invalidate_probe_cache``) so freshly-completed indexes always see new
+counts on the next /health call.
 """
 from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
 
 from fastapi import APIRouter
 
 from ..config import settings
-from ..models import HealthResponse
+from ..models import HealthResponse, RepoHealth
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# Probe TTL — 3s is long enough to absorb 1–3 Hz UI polling without becoming
+# user-visibly stale.  Invalidated explicitly when an index job commits so
+# the next /health call after ingestion always reports fresh data.
+_PROBE_TTL_SECONDS = 3.0
+_probe_cache: dict[str, tuple[float, RepoHealth]] = {}
+
+
+def invalidate_probe_cache(repo_name: str | None = None) -> None:
+    """Drop the cached probe(s) so the next ``/health`` call re-probes.
+
+    Args:
+        repo_name: When given, only that repo's cache entry is dropped.
+            When None (the default), the entire cache is flushed — use
+            after a bulk operation like ``cleanup_stale_locks()``.
+    """
+    if repo_name is None:
+        _probe_cache.clear()
+        return
+    _probe_cache.pop(repo_name, None)
 
 
 def _get_indexed_repos() -> list[str]:
-    """Return a deduplicated list of project names stored in LadybugDB.
+    """Return a deduplicated list of project names represented on disk.
 
-    We query the ``Project`` node table introduced by CI-3 (ladybug_schema.py).
-    If the DB file doesn't exist yet or the query fails we return an empty
-    list — the service should still report healthy so that a fresh deployment
-    without any indexed repos is not considered degraded.
+    Lists ``*.db`` files in ``LADYBUG_DB_DIR``.  Falls back to the in-memory
+    set populated by the index router for pre-DB-dir installs or when the
+    directory doesn't yet exist.
 
     Returns:
-        list[str]: Sorted, deduplicated project names. Empty list on any
-        error (missing DB file, missing extension, malformed schema).
+        list[str]: Sorted, deduplicated project slugs corresponding to
+        ``.cgr/repos/*.db`` files.  Empty list when no repos are indexed.
     """
+    from .index import indexed_repos  # local import to avoid circular deps
+
+    names: set[str] = set(indexed_repos)
+    db_dir = Path(settings.LADYBUG_DB_DIR)
+    if db_dir.is_dir():
+        for p in db_dir.glob("*.db"):
+            names.add(p.stem)
+    return sorted(names)
+
+
+def _probe_repo(name: str) -> RepoHealth:
+    """Open a per-repo DB with a short-lived connection and return its state.
+
+    TTL-cached: probes hit LadybugDB at most once per ``_PROBE_TTL_SECONDS``
+    per repo, so a 1 Hz /health poll costs one DB open per 3s (not per call).
+
+    Args:
+        name: Project slug (filename stem of ``{slug}.db``).
+
+    Returns:
+        RepoHealth: readability + size + approximate node count +
+        last_indexed_at + in-flight flag.
+    """
+    from .index import _get_last_indexed_at, _read_meta, is_repo_indexing
+
+    now = time.time()
+    cached = _probe_cache.get(name)
+    if cached and (now - cached[0]) < _PROBE_TTL_SECONDS:
+        # Refresh the live-only fields (indexing flag changes mid-window)
+        # but keep the expensive count/size readings from the cache.
+        stale = cached[1]
+        return RepoHealth(
+            name=stale.name,
+            db_path=stale.db_path,
+            size_bytes=stale.size_bytes,
+            node_count=stale.node_count,
+            readable=stale.readable,
+            last_indexed_at=_get_last_indexed_at(name) or stale.last_indexed_at,
+            indexing=is_repo_indexing(name),
+        )
+
+    db_path = settings.db_path_for_repo(name)
+    p = Path(db_path)
+    size = p.stat().st_size if p.exists() else 0
+    last_idx = _get_last_indexed_at(name)
+    indexing = is_repo_indexing(name)
+
+    if not p.exists():
+        rh = RepoHealth(
+            name=name,
+            db_path=db_path,
+            size_bytes=0,
+            node_count=None,
+            readable=False,
+            last_indexed_at=last_idx,
+            indexing=indexing,
+        )
+        _probe_cache[name] = (now, rh)
+        return rh
+
+    # Skip the live DB probe while an index job is actively writing to this
+    # repo — LadybugDB is single-writer, so opening a probe connection here
+    # would either block or trigger an internal assertion.  The sidecar
+    # (last_indexed_at, node_count) provides stale-but-safe data for the UI
+    # until the writer releases the lock.
+    if indexing:
+        meta = _read_meta(name)
+        rh = RepoHealth(
+            name=name,
+            db_path=db_path,
+            size_bytes=size,
+            node_count=meta.get("node_count"),
+            readable=True,
+            last_indexed_at=last_idx,
+            indexing=True,
+        )
+        _probe_cache[name] = (now, rh)
+        return rh
+
+    db = None
+    conn = None
+    count: int | None = None
+    readable = False
     try:
         import real_ladybug as lb  # type: ignore[import-untyped]
 
-        db = lb.Database(settings.LADYBUG_DB_PATH)
+        db = lb.Database(db_path)
         conn = lb.Connection(db)
-        # Match every Project node and project just the name column.
-        result = conn.execute("MATCH (p:Project) RETURN p.name AS name")
-        repos: list[str] = []
-        while result.has_next():
-            row = result.get_next()
-            repos.append(str(row[0]))
-        return sorted(set(repos))
-    except Exception:
-        # Swallow: /health must never raise. Empty list tells the caller the
-        # DB is not yet populated or temporarily unreachable.
-        return []
+        res = conn.execute("MATCH (n) RETURN count(n) AS cnt")
+        if res.has_next():
+            count = int(res.get_next()[0])
+        readable = True
+    except Exception as exc:
+        logger.warning("Probe failed for %s: %s", name, exc)
+    finally:
+        # Always release the DB handle, even on UNREACHABLE_CODE / lock-
+        # acquisition failure.  Without this, a failed probe pins the DB
+        # file for the remainder of the process lifetime and every
+        # subsequent probe inherits the same error.
+        conn = None
+        db = None
+
+    if not readable:
+        # Fall back to sidecar node_count (last known good) so the UI still
+        # shows something meaningful while the DB is temporarily unreadable.
+        meta = _read_meta(name)
+        count = meta.get("node_count")
+
+    rh = RepoHealth(
+        name=name,
+        db_path=db_path,
+        size_bytes=size,
+        node_count=count,
+        readable=readable,
+        last_indexed_at=last_idx,
+        indexing=indexing,
+    )
+    _probe_cache[name] = (now, rh)
+    return rh
 
 
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Readiness probe — always returns 200 with a status indicator.
+    """Readiness probe — always returns 200, flips ``status`` to ``degraded``
+    when any per-repo DB fails to open.
 
     Returns:
-        HealthResponse: ``status="ok"`` plus the resolved DB path and the
-        set of currently-indexed project names.
+        HealthResponse: ``status``, DB directory, indexed project names, a
+        probe row per repo (size, node count, readable, last_indexed_at,
+        indexing), and a count of currently-running index jobs.
     """
+    from .index import _jobs  # local import to avoid circular deps
+
     indexed = _get_indexed_repos()
+    probes = [_probe_repo(n) for n in indexed]
+    status = "ok" if all(p.readable for p in probes) else "degraded"
+    running = sum(1 for j in _jobs.values() if j.status == "running")
+
     return HealthResponse(
-        status="ok",
-        db_path=settings.LADYBUG_DB_PATH,
+        status=status,
+        db_path=settings.LADYBUG_DB_DIR,
         indexed_repos=indexed,
+        repos=probes,
+        running_jobs=running,
     )

@@ -12,7 +12,27 @@ Key design decisions:
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def slugify_repo(name: str) -> str:
+    """Normalise a repo name for use as a filename.
+
+    Replaces anything that's not alphanumeric/dash/underscore with ``_`` so
+    the result is safe to embed in a filesystem path. Collapses runs of
+    underscores and strips leading/trailing separators.
+
+    Args:
+        name: Raw repo name (typically ``Path(repo_path).name``).
+
+    Returns:
+        str: A filesystem-safe slug. Never empty; falls back to ``repo``.
+    """
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
+    return s or "repo"
 
 
 class Settings(BaseSettings):
@@ -34,8 +54,26 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # --- LadybugDB (shared with code-graph-rag) ---
+    # Per-repo DB files live under ``LADYBUG_DB_DIR`` as ``{slug}.db``.  Each
+    # indexed repository gets its own isolated graph so the LadybugDB Explorer
+    # can open one index at a time, WAL corruption in one doesn't blast others,
+    # and re-indexing is a simple unlink.  ``LADYBUG_DB_PATH`` is retained as
+    # a fallback / legacy pointer for code paths that don't yet know a repo.
+    LADYBUG_DB_DIR: str = ".cgr/repos"
     LADYBUG_DB_PATH: str = ".cgr/graph.db"
     LADYBUG_BATCH_SIZE: int = 1000
+
+    def db_path_for_repo(self, repo_name: str) -> str:
+        """Return the per-repo LadybugDB file path for ``repo_name``.
+
+        Args:
+            repo_name: Human-readable repo name — usually ``Path(repo_path).name``.
+
+        Returns:
+            str: Absolute or relative path to the repo's ``.db`` file.  Does
+            not create the file; the ingestor (or migrate) does that.
+        """
+        return str(Path(self.LADYBUG_DB_DIR) / f"{slugify_repo(repo_name)}.db")
 
     # --- Default repo to index when none is provided ---
     TARGET_REPO_PATH: str = "."
@@ -43,6 +81,14 @@ class Settings(BaseSettings):
     # --- Server ---
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+
+    # --- GitHub integration ---
+    # Personal access token used by the /github/* routes to list the
+    # authenticated user's repos and clone private repos.  Read from
+    # ``GITHUB_TOKEN`` first (TheForge convention), ``GH_TOKEN`` second
+    # (``gh`` CLI convention).  Empty string = unauthenticated mode.
+    GITHUB_TOKEN: str = ""
+    GH_TOKEN: str = ""
 
 
 # Module-level singleton — import this rather than re-instantiating Settings.

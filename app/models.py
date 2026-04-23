@@ -17,20 +17,53 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
+class RepoHealth(BaseModel):
+    """Per-repo health probe entry in ``GET /health``.
+
+    Attributes:
+        name: Project slug (matches ``indexed_repos``).
+        db_path: Filesystem path to the per-repo LadybugDB file.
+        size_bytes: Current file size; 0 when the DB has not been written.
+        node_count: Total node count across all node tables; None when the
+            probe could not open the DB (corrupted WAL, missing file).
+        readable: True iff the DB opened cleanly. A False here is a strong
+            signal that a restart self-heal cycle is needed.
+        last_indexed_at: Unix timestamp of the last successful index job for
+            this repo; None when the repo has never been indexed in this
+            service instance.  Persisted on the Project node so it survives
+            restarts.
+        indexing: True when a job is currently writing to this repo — UIs
+            should disable the re-index button and show a spinner.
+    """
+
+    name: str
+    db_path: str
+    size_bytes: int
+    node_count: int | None
+    readable: bool
+    last_indexed_at: float | None = None
+    indexing: bool = False
+
+
 class HealthResponse(BaseModel):
     """Response for ``GET /health``.
 
     Attributes:
-        status: ``ok`` when the service can reach LadybugDB, ``degraded``
-            otherwise. Callers use this for readiness probes.
-        db_path: Resolved LadybugDB path (useful for multi-env debugging).
+        status: ``ok`` when every per-repo DB is readable, ``degraded`` when
+            one or more repos are unreadable. Callers use this for readiness
+            probes and to decide whether to prompt the user to re-index.
+        db_path: Resolved LadybugDB directory (useful for multi-env debugging).
         indexed_repos: Deduplicated list of project names currently present
-            in the graph.
+            on disk.
+        repos: Detailed per-repo probe results (size, node count, readability).
+        running_jobs: Count of currently-running index jobs across all repos.
     """
 
     status: Literal["ok", "degraded"]
     db_path: str
     indexed_repos: list[str]
+    repos: list[RepoHealth] = []
+    running_jobs: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +98,9 @@ class IndexStatus(BaseModel):
         status: Current execution state.
         progress_pct: Bounded to [0, 100]; progress is best-effort and jumps
             at milestones rather than tracking every file.
+        phase: Human-readable description of the current work phase shown in
+            the UI progress bar. Milestones: ``parsing`` (0–90%),
+            ``embedding`` (90–100%).
         node_count: Final count once the job completes; 0 while running.
         rel_count: Final count once the job completes; 0 while running.
         error: Populated only on ``failed`` status.
@@ -73,6 +109,7 @@ class IndexStatus(BaseModel):
     job_id: str
     status: Literal["running", "done", "failed"]
     progress_pct: float = Field(ge=0.0, le=100.0)
+    phase: str = "parsing"
     node_count: int = 0
     rel_count: int = 0
     error: str | None = None
@@ -137,6 +174,169 @@ class SymbolResponse(BaseModel):
     line_start: int | None
     line_end: int | None
     source: str
+
+
+# ---------------------------------------------------------------------------
+# /search/files
+# ---------------------------------------------------------------------------
+
+
+class FileEntry(BaseModel):
+    """Single row in ``GET /search/files``."""
+
+    path: str
+    name: str
+    extension: str = ""
+
+
+class FileListResponse(BaseModel):
+    """Response for ``GET /search/files`` — paginated file listing."""
+
+    files: list[FileEntry]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# /search/types
+# ---------------------------------------------------------------------------
+
+
+class NodeTypeStat(BaseModel):
+    """One row of ``GET /search/types`` — node label + count."""
+
+    label: str
+    count: int
+
+
+class NodeTypesResponse(BaseModel):
+    """Response for ``GET /search/types`` — lets UIs discover Browse tabs."""
+
+    types: list[NodeTypeStat]
+
+
+# ---------------------------------------------------------------------------
+# /stats/{repo}
+# ---------------------------------------------------------------------------
+
+
+class RepoStatsResponse(BaseModel):
+    """Response for ``GET /stats/{repo}`` — per-repo graph breakdown.
+
+    Attributes:
+        repo: Project slug the stats belong to.
+        node_count: Total nodes across every node label.
+        rel_count: Total relationships across every rel type.
+        node_breakdown: Per-label node counts.
+        rel_breakdown: Per-type relationship counts.
+        db_size_bytes: DB file size on disk; 0 when the file is missing.
+        last_modified: Unix timestamp of the DB file's mtime; None when
+            the file is missing.
+        last_indexed_at: Unix timestamp of the last successful index job.
+            Persisted on the Project node via Cypher ``SET`` so it survives
+            service restarts — more authoritative than ``last_modified``
+            which can drift on any write.
+        root_path: Absolute filesystem path the repo was indexed from.
+            Empty when unknown (legacy DB indexed before this field).
+        has_embeddings: True when at least one Function/Method has a
+            non-null embedding vector.
+        indexing: True when a job is currently writing to this repo.
+    """
+
+    repo: str
+    node_count: int
+    rel_count: int
+    node_breakdown: list[NodeTypeStat]
+    rel_breakdown: list[NodeTypeStat]
+    db_size_bytes: int
+    last_modified: float | None
+    last_indexed_at: float | None = None
+    root_path: str = ""
+    has_embeddings: bool
+    indexing: bool = False
+
+
+# ---------------------------------------------------------------------------
+# /index/{repo} — admin
+# ---------------------------------------------------------------------------
+
+
+class DeleteIndexResponse(BaseModel):
+    """Response for ``DELETE /index/{repo}`` — admin wipe."""
+
+    repo: str
+    removed_files: list[str]
+    ok: bool
+
+
+# ---------------------------------------------------------------------------
+# /index/jobs — job history management
+# ---------------------------------------------------------------------------
+
+
+class JobSummary(BaseModel):
+    """Compact representation of a job record for list endpoints."""
+
+    job_id: str
+    repo_path: str
+    repo_name: str
+    status: Literal["running", "done", "failed"]
+    progress_pct: float
+    phase: str
+    node_count: int
+    rel_count: int
+    error: str | None
+    started_at: float
+    finished_at: float | None
+
+
+class JobListResponse(BaseModel):
+    """Response for ``GET /index/jobs`` — newest-first history."""
+
+    jobs: list[JobSummary]
+    total: int
+    running: int
+
+
+class JobClearResponse(BaseModel):
+    """Response for ``POST /index/jobs/clear`` and ``DELETE /index/jobs/{id}``."""
+
+    cleared: int
+    remaining: int
+
+
+# ---------------------------------------------------------------------------
+# /github/status
+# ---------------------------------------------------------------------------
+
+
+class GitHubRateLimit(BaseModel):
+    """Core GitHub REST API rate-limit snapshot."""
+
+    limit: int
+    remaining: int
+    reset_at: float | None  # unix ts when the window rolls over
+
+
+class GitHubStatusResponse(BaseModel):
+    """Response for ``GET /github/status`` — connection readiness probe.
+
+    Attributes:
+        connected: True iff a token is present AND GitHub accepted it.
+        token_source: Where the token came from (``settings``, ``env``,
+            or ``none``).  Helps developers diagnose env-var vs .env issues.
+        user: Authenticated GitHub login, or None when unauthenticated.
+        scopes: OAuth scopes the token carries (best-effort — GitHub
+            exposes these on the ``X-OAuth-Scopes`` header).
+        rate_limit: Core API rate-limit snapshot.
+        message: Human-readable status line the UI can show directly.
+    """
+
+    connected: bool
+    token_source: Literal["settings", "env", "none"]
+    user: str | None
+    scopes: list[str]
+    rate_limit: GitHubRateLimit | None
+    message: str
 
 
 # ---------------------------------------------------------------------------

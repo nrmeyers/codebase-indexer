@@ -11,12 +11,18 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "uvicorn[standard]>=0.45.0",
     "real-ladybug>=0.15.3",
-    "code-graph-rag @ file:///Users/zacharymatthews/code-graph-rag",
+    "code-graph-rag",
     # Semantic search stack — required for /search/semantic and /context-bundle
     # to return populated results.  UniXcoder runs on CPU via torch; transformers
     # ships the tokenizer + model loader.  ~500MB installed footprint, one-time.
     "torch>=2.6.0",
     "transformers>=4.0.0",
+    "tree-sitter-javascript>=0.23.1",
+    "tree-sitter-typescript>=0.23.2",
+    "tree-sitter-c-sharp>=0.23.5",
+    "tree-sitter-go>=0.23.4",
+    "tree-sitter-java>=0.23.5",
+    "tree-sitter-rust>=0.24.0",
 ]
 
 [build-system]
@@ -25,6 +31,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.uv.sources]
+code-graph-rag = { path = "/Users/zacharymatthews/code-graph-rag", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

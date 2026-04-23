@@ -3,12 +3,12 @@
 Three complementary search surfaces against LadybugDB:
 
 * ``/search/structural`` — raw Cypher passthrough for graph traversals.
-* ``/search/semantic``  — vector-similarity search over function/method
-  embeddings.
+* ``/search/semantic``  — numpy cosine-similarity search over function/method
+  embeddings stored in per-repo ``.embeddings.npy`` files.
 * ``/search/symbol``    — exact-name lookup returning source + location.
 
-All three share a single ``_get_conn`` helper that lazily loads the VECTOR
-extension so semantic search works even against a cold DB file.
+Semantic search does NOT require the LadybugDB VECTOR extension — embeddings
+are stored in numpy files alongside the ``.db`` file and searched in-process.
 """
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..config import settings
 from ..models import (
+    FileEntry,
+    FileListResponse,
+    NodeTypeStat,
+    NodeTypesResponse,
     SemanticResult,
     SemanticSearchResponse,
     StructuralSearchResponse,
@@ -26,6 +30,25 @@ from ..models import (
 )
 
 router = APIRouter(prefix="/search")
+
+# Cypher keywords that mutate graph state.  The structural endpoint is a
+# read-only query surface; any of these in a client-supplied query is
+# rejected early so a typo can't accidentally wipe or corrupt a repo's
+# graph.  Word-boundary matching means these are only blocked as top-level
+# clauses, not as substrings inside a string literal (e.g. WHERE n.name =
+# "DELETE me" stays legal).
+_WRITE_KEYWORDS = (
+    "CREATE",
+    "MERGE",
+    "DELETE",
+    "DETACH",
+    "SET",
+    "REMOVE",
+    "DROP",
+    "COPY",
+    "CALL",   # conservative: CALL procedures can mutate — use semantic endpoint instead
+    "LOAD",
+)
 
 # ---------------------------------------------------------------------------
 # Semantic search import cache
@@ -45,23 +68,55 @@ _semantic_unavailable: bool = False  # True once import fails; never retried
 # ---------------------------------------------------------------------------
 
 
-def _get_conn():  # type: ignore[override]  # returns lb.Connection
-    """Open a fresh LadybugDB connection with the VECTOR extension loaded.
+def _resolve_db_path(repo: str | None) -> str:
+    """Pick the LadybugDB file a query should run against.
+
+    Args:
+        repo: Optional repo slug.  When given, resolves to that repo's
+            per-repo DB file.  When omitted, falls back to the first indexed
+            repo on disk, or the legacy combined ``LADYBUG_DB_PATH``.
 
     Returns:
-        lb.Connection: A connection usable for Cypher queries. The VECTOR
-        extension is silently skipped if it's already loaded or unavailable —
-        semantic search will return an error at call-time in that case.
+        str: Filesystem path to the DB the caller should open.
+
+    Raises:
+        HTTPException: 404 when ``repo`` is supplied but no matching DB
+            exists — signalling the caller to index that repo first.
+    """
+    if repo:
+        path = settings.db_path_for_repo(repo)
+        if not Path(path).exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"No index found for repo '{repo}'. Run /index first.",
+            )
+        return path
+
+    # No repo specified — try the first indexed DB, else legacy combined file.
+    db_dir = Path(settings.LADYBUG_DB_DIR)
+    if db_dir.is_dir():
+        dbs = sorted(db_dir.glob("*.db"))
+        if dbs:
+            return str(dbs[0])
+    return settings.LADYBUG_DB_PATH
+
+
+def _get_conn(repo: str | None = None):  # type: ignore[override]  # returns lb.Connection
+    """Open a fresh LadybugDB connection for structural/symbol queries.
+
+    Args:
+        repo: Optional repo slug.  Routes the connection to that repo's
+            per-repo DB file.  When omitted, falls back to the first indexed
+            DB or the legacy combined path.
+
+    Returns:
+        lb.Connection: A connection usable for Cypher queries.
     """
     import real_ladybug as lb  # type: ignore[import-untyped]
 
-    db = lb.Database(settings.LADYBUG_DB_PATH)
+    db_path = _resolve_db_path(repo)
+    db = lb.Database(db_path)
     conn = lb.Connection(db)
-    try:
-        conn.execute("LOAD EXTENSION VECTOR")
-    except Exception:
-        # Already loaded or unavailable — both are non-fatal here.
-        pass
     return conn
 
 
@@ -129,6 +184,10 @@ def _clean(v: Any) -> Any:
 def structural_search(
     q: str = Query(description="Cypher query to execute against the graph"),
     limit: int = Query(default=20, ge=1, le=500),
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to scope the query to. Omit for first indexed DB.",
+    ),
 ) -> StructuralSearchResponse:
     """Execute a raw Cypher query and return matching nodes and relationships.
 
@@ -147,16 +206,34 @@ def structural_search(
     # Append LIMIT to guard against runaway queries (only if not already
     # present — clients that need pagination can specify their own).
     cypher = q.strip()
+    if not cypher:
+        raise HTTPException(status_code=422, detail="Query must not be empty")
+
+    # Strip string literals before scanning for write keywords — keywords
+    # inside quotes (e.g. n.name CONTAINS "DELETE") are not mutations.
+    import re as _re
+    scan_target = _re.sub(r"'[^']*'|\"[^\"]*\"", "''", cypher)
+    for kw in _WRITE_KEYWORDS:
+        if _re.search(rf"\b{kw}\b", scan_target, _re.IGNORECASE):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Write operations are not permitted through /search/structural "
+                    f"(keyword '{kw}' detected). Use POST /index to mutate the graph."
+                ),
+            )
+
     # Detect a top-level LIMIT clause using a word-boundary regex so we don't
     # match the word "limit" inside a string literal (e.g. WHERE n.name = "limit")
     # or a sub-query. A simple .upper() substring check would match literals.
-    import re as _re
     if not _re.search(r'\bLIMIT\b', cypher, _re.IGNORECASE):
         cypher = f"{cypher}\nLIMIT {limit}"
 
     try:
-        conn = _get_conn()
+        conn = _get_conn(repo)
         rows = _result_to_rows(conn.execute(cypher))  # type: ignore[attr-defined]
+    except HTTPException:
+        raise  # e.g. 404 from _resolve_db_path — preserve status code
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Cypher error: {exc}") from exc
 
@@ -196,6 +273,10 @@ def structural_search(
 def semantic_search(
     q: str = Query(description="Natural-language description of the code to find"),
     k: int = Query(default=10, ge=1, le=100),
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to scope the search to. Omit for first indexed DB.",
+    ),
 ) -> SemanticSearchResponse:
     """Find the top-k most semantically similar functions/methods.
 
@@ -212,7 +293,7 @@ def semantic_search(
     Raises:
         HTTPException: 503 when the semantic search dependency
             (``codebase_rag.tools.semantic_search``) is not importable —
-            typically because the embedding model or VECTOR extension is
+            typically because the embedding model (torch/transformers) is
             missing from the deployment. Subsequent calls after a failed
             import return 503 immediately without re-attempting the import
             (fast-fail via ``_semantic_unavailable`` flag).
@@ -238,6 +319,17 @@ def semantic_search(
                 detail=f"Semantic search unavailable (missing deps): {exc}",
             ) from exc
 
+    # Point code-graph-rag at the right per-repo DB before the search runs —
+    # the semantic helper reads ``cgr_settings.LADYBUG_DB_PATH`` internally.
+    try:
+        from codebase_rag.config import settings as _cgr_settings  # type: ignore[import-untyped]
+        _cgr_settings.LADYBUG_DB_PATH = _resolve_db_path(repo)
+    except HTTPException:
+        raise
+    except Exception:
+        # Non-fatal — if we can't swap the path, fall back to cgr's default.
+        pass
+
     raw = _semantic_fn(q, top_k=k)
     return SemanticSearchResponse(
         results=[
@@ -259,6 +351,10 @@ def semantic_search(
 @router.get("/symbol", response_model=SymbolResponse)
 def symbol_lookup(
     fqn: str = Query(description="Fully-qualified name of the function or method"),
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to scope the lookup to. Omit for first indexed DB.",
+    ),
 ) -> SymbolResponse:
     """Return source code and file location for a qualified symbol name.
 
@@ -276,12 +372,14 @@ def symbol_lookup(
     from codebase_rag.cypher_queries import CYPHER_GET_FUNCTION_SOURCE_LOCATION
 
     try:
-        conn = _get_conn()
+        conn = _get_conn(repo)
         rows = _result_to_rows(
             conn.execute(  # type: ignore[attr-defined]
                 CYPHER_GET_FUNCTION_SOURCE_LOCATION, {"node_id": fqn}
             )
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"DB error: {exc}") from exc
 
@@ -330,3 +428,163 @@ def symbol_lookup(
         line_end=line_end,
         source=source,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /search/files
+# ---------------------------------------------------------------------------
+
+
+@router.get("/files", response_model=FileListResponse)
+def list_files(
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to list files for. Omit for first indexed DB.",
+    ),
+    filter: str = Query(
+        default="",
+        description="Case-insensitive substring filter applied to the relative path.",
+    ),
+    extension: str = Query(
+        default="",
+        description="Optional extension filter (e.g. '.ts', 'py'). Leading dot optional.",
+    ),
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> FileListResponse:
+    """List indexed files with optional substring / extension filtering.
+
+    This is a dedicated surface so the UI doesn't have to hand-write Cypher
+    to render a file tree or search-as-you-type box.  Filtering is done in
+    Cypher when possible to avoid shipping thousands of rows over the wire.
+
+    Args:
+        repo: Repo slug to scope the listing to.
+        filter: Case-insensitive substring applied against the path column.
+        extension: Optional file extension filter.
+        limit: Max rows to return (1–5000).
+        offset: Skip N matching rows before returning results (cursor paging).
+
+    Returns:
+        FileListResponse: matching files + total match count (post-filter).
+    """
+    # Normalise extension — accept both '.ts' and 'ts'.
+    ext = extension.strip().lower()
+    if ext and not ext.startswith("."):
+        ext = "." + ext
+
+    where_parts: list[str] = []
+    params: dict[str, Any] = {}
+    if filter.strip():
+        where_parts.append("toLower(f.path) CONTAINS toLower($needle)")
+        params["needle"] = filter.strip()
+    if ext:
+        where_parts.append("toLower(f.extension) = $ext")
+        params["ext"] = ext
+
+    where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    count_cypher = f"MATCH (f:File){where_clause} RETURN count(f) AS cnt"
+    list_cypher = (
+        f"MATCH (f:File){where_clause} "
+        f"RETURN f.path AS path, f.name AS name, f.extension AS extension "
+        f"ORDER BY f.path SKIP {int(offset)} LIMIT {int(limit)}"
+    )
+
+    try:
+        conn = _get_conn(repo)
+        total = 0
+        cnt_res = conn.execute(count_cypher, params) if params else conn.execute(count_cypher)
+        if cnt_res.has_next():  # type: ignore[attr-defined]
+            total = int(cnt_res.get_next()[0])  # type: ignore[attr-defined]
+
+        rows_res = conn.execute(list_cypher, params) if params else conn.execute(list_cypher)
+        rows = _result_to_rows(rows_res)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"DB error: {exc}") from exc
+
+    return FileListResponse(
+        files=[
+            FileEntry(
+                path=str(r.get("path") or ""),
+                name=str(r.get("name") or ""),
+                extension=str(r.get("extension") or ""),
+            )
+            for r in rows
+        ],
+        total=total,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /search/types
+# ---------------------------------------------------------------------------
+
+# Node labels the schema defines.  Iterating these is far cheaper than a
+# MATCH (n) and a CASE label switch, and lets the endpoint stay correct
+# even when a label has zero rows.
+_KNOWN_LABELS = (
+    "Project",
+    "File",
+    "Folder",
+    "Package",
+    "Module",
+    "Class",
+    "Function",
+    "Method",
+    "Interface",
+    "Variable",
+    "Struct",
+    "Enum",
+    "Type",
+)
+
+
+@router.get("/types", response_model=NodeTypesResponse)
+def list_node_types(
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to scope the summary to. Omit for first indexed DB.",
+    ),
+    non_zero_only: bool = Query(
+        default=True,
+        description="Drop labels with zero rows from the response.",
+    ),
+) -> NodeTypesResponse:
+    """Return the node labels present in the graph with per-label counts.
+
+    Useful for UIs that build Browse tabs dynamically — no need to hardcode
+    which labels exist (which would miss new node types added to the schema).
+
+    Args:
+        repo: Repo slug to scope to.
+        non_zero_only: When true (default), only labels with at least one
+            row are returned.  Set false to probe the full schema.
+
+    Returns:
+        NodeTypesResponse: label + count pairs, sorted by count descending.
+    """
+    try:
+        conn = _get_conn(repo)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"DB error: {exc}") from exc
+
+    stats: list[NodeTypeStat] = []
+    for label in _KNOWN_LABELS:
+        try:
+            res = conn.execute(f"MATCH (n:{label}) RETURN count(n) AS cnt")
+            cnt = 0
+            if res.has_next():  # type: ignore[attr-defined]
+                cnt = int(res.get_next()[0])  # type: ignore[attr-defined]
+            if cnt or not non_zero_only:
+                stats.append(NodeTypeStat(label=label, count=cnt))
+        except Exception:
+            # Label may not exist in this DB (schema evolves over time) —
+            # skip it rather than 500 the whole response.
+            continue
+
+    stats.sort(key=lambda s: s.count, reverse=True)
+    return NodeTypesResponse(types=stats)
