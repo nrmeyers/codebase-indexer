@@ -443,11 +443,11 @@ dependencies = [
     { name = "huggingface-hub", extra = ["hf-xet"] },
     { name = "loguru" },
     { name = "mcp" },
+    { name = "numpy" },
     { name = "prompt-toolkit" },
     { name = "protobuf" },
     { name = "pydantic-ai" },
     { name = "pydantic-settings" },
-    { name = "pymgclient" },
     { name = "python-dotenv" },
     { name = "real-ladybug" },
     { name = "rich" },
@@ -466,11 +466,11 @@ requires-dist = [
     { name = "huggingface-hub", extras = ["hf-xet"], specifier = ">=0.36.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mcp", specifier = ">=1.21.1" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "protobuf", specifier = ">=5.27.0" },
     { name = "pydantic-ai", specifier = ">=1.27.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
-    { name = "pymgclient", specifier = ">=1.4.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.4.1" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=1.0.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0.0" },
@@ -2699,47 +2699,6 @@ crypto = [
 ]
 
 [[package]]
-name = "pymgclient"
-version = "1.5.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "networkx" },
-    { name = "pyopenssl" },
-    { name = "tzdata" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d4/b6/92ea5be27a91e28f26bf68d157e1f680d53e14ac14084181a8b03834d06a/pymgclient-1.5.2.tar.gz", hash = "sha256:0346f6225d29315228d8931239624fb47e34af3a2f9a352bce21428cfa4b0efe", size = 131194, upload-time = "2026-02-17T11:51:27.256Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2d/de/915a9f2eaa0f931a5e6db3f26b066df251ff57bc96ded3808a2e668fa2f3/pymgclient-1.5.2-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:40e06da9e78173b98b8c4b2f01629812fbbc7f9101fae9186c1187d0eda06e5a", size = 2505200, upload-time = "2026-02-17T11:51:02.243Z" },
-    { url = "https://files.pythonhosted.org/packages/c2/27/28b7f73d469984f1588438764e457dbf0b23826a172d54108925859edb34/pymgclient-1.5.2-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:c4a824485ccf6d37e08fb9df967ac43aa23648830113951d5aec49f69ad0a880", size = 2517420, upload-time = "2026-02-17T11:51:04.185Z" },
-    { url = "https://files.pythonhosted.org/packages/87/30/589b2467fb03d960bbfaa47977cf556309dfc0d6dc7390477092dcd8baf9/pymgclient-1.5.2-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:7eb0b1b448ef4787f51497d7b2edd56dc0a235a5cdcd0c8cda9e40cbb91dc500", size = 3274302, upload-time = "2026-02-17T11:51:05.499Z" },
-    { url = "https://files.pythonhosted.org/packages/35/e4/7eec6379bf150e6958924a6e0bfe4a6f98bf79c87d367ac8bc264856bc06/pymgclient-1.5.2-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:dc63b66f860a556d9b4ffda6854b7d779d54632c8440cf818af86768152c2b8e", size = 2999915, upload-time = "2026-02-17T11:51:07.517Z" },
-    { url = "https://files.pythonhosted.org/packages/30/16/91ba2152659749d2b3bc47239791394ada9bc6ff371dea67780252972134/pymgclient-1.5.2-cp312-cp312-win_amd64.whl", hash = "sha256:9a933e7162eeafd36b454fbb00c5ffcf424705937f2642bafae3154fb5723b43", size = 2414656, upload-time = "2026-02-17T11:51:09.282Z" },
-    { url = "https://files.pythonhosted.org/packages/74/5a/249de9d9d3b84b7389067197f8a9cb8faa6b8f47ca82a190090564b219bc/pymgclient-1.5.2-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:4888bc0c73665619e4769eaa1e02dc6a3b15a0b108e347627736276b47d24dc0", size = 2505197, upload-time = "2026-02-17T11:51:10.628Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/22/393b9a00d58419befae7242d4c64240a1d85ff595b11a3e64e6dfd3351aa/pymgclient-1.5.2-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:dd221309614b2a2de124fe365f7feefa877edad9b5b6000e3dd801694986cc0c", size = 2517423, upload-time = "2026-02-17T11:51:12.275Z" },
-    { url = "https://files.pythonhosted.org/packages/47/07/f70e76434d6115430119fdf111caea7460749abe482d45d90276eb932141/pymgclient-1.5.2-cp313-cp313-manylinux_2_34_aarch64.whl", hash = "sha256:cef990e32e841b86f4fafdf125fa4cc0355a21b05e01854ac94b49d8a4f73062", size = 3274594, upload-time = "2026-02-17T11:51:13.879Z" },
-    { url = "https://files.pythonhosted.org/packages/63/7a/942c62a86d0b03a76a2148b255d4f0f91cf86d7af3350097a40f3890967d/pymgclient-1.5.2-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:40b4eb82c2cc32ad3ff05ee257aaf58164c0d846a9126ca7d0d1689f2c6706ad", size = 3000242, upload-time = "2026-02-17T11:51:15.369Z" },
-    { url = "https://files.pythonhosted.org/packages/e9/49/5b339236b345092f200918243f2768aa482aafaefe64336124a8798958d6/pymgclient-1.5.2-cp313-cp313-win_amd64.whl", hash = "sha256:830bbd3017def3c561c3062c66108617d0cc3722d0bfbe682a6622b05cf9380d", size = 2415269, upload-time = "2026-02-17T11:51:16.807Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/12/7a34e9582e475e00eedaf9db620a046afb64449b6a6333d412e9fd727370/pymgclient-1.5.2-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:c153049821f81bf9b59756c5875edba6a7f2edafce6386fbaf2f01869a1bc8de", size = 2505210, upload-time = "2026-02-17T11:51:18.346Z" },
-    { url = "https://files.pythonhosted.org/packages/08/1f/7564f5ff88819241849a67314337729a9116fd9421f7e8df5810ddd39905/pymgclient-1.5.2-cp314-cp314-macosx_15_0_arm64.whl", hash = "sha256:e22473eccf2d9ca662d95e177548edb9f3d6a65bbfd8ceed6e381a14bf30f38a", size = 2517085, upload-time = "2026-02-17T11:51:20.355Z" },
-    { url = "https://files.pythonhosted.org/packages/b2/c3/65bae8eb9dd8753daf2e54c3115571f9c5260ca7ef02a7b9cc7c775af07a/pymgclient-1.5.2-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:9df71428dd5da34157ccad72d33f0d3572a9e05c558a602dde826b3e502f5a29", size = 3274543, upload-time = "2026-02-17T11:51:22.568Z" },
-    { url = "https://files.pythonhosted.org/packages/64/70/bbe8eda40db1a91bbf8f45dcac4591548904ba3fed27f71bbd3161f32329/pymgclient-1.5.2-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:8d3d0e9e6787d749d8d0ef1cde9b0f9623f1917181bd709a6f40f516bf4ca551", size = 3000339, upload-time = "2026-02-17T11:51:24.481Z" },
-    { url = "https://files.pythonhosted.org/packages/43/e3/c8e0fd846d8dfeb06dd83734e52b5ca9a3a3151d0db4be9a82138a0d60f0/pymgclient-1.5.2-cp314-cp314-win_amd64.whl", hash = "sha256:075b4027abbc24a5efa4a45addec5ebaeecc0d14036bf47fc85551a21777a984", size = 2495414, upload-time = "2026-02-17T11:51:26.01Z" },
-]
-
-[[package]]
-name = "pyopenssl"
-version = "26.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cryptography" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/11/a62e1d33b373da2b2c2cd9eb508147871c80f12b1cacde3c5d314922afdd/pyopenssl-26.0.0.tar.gz", hash = "sha256:f293934e52936f2e3413b89c6ce36df66a0b34ae1ea3a053b8c5020ff2f513fc", size = 185534, upload-time = "2026-03-15T14:28:26.353Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/7d/d4f7d908fa8415571771b30669251d57c3cf313b36a856e6d7548ae01619/pyopenssl-26.0.0-py3-none-any.whl", hash = "sha256:df94d28498848b98cc1c0ffb8ef1e71e40210d3b0a8064c9d29571ed2904bf81", size = 57969, upload-time = "2026-03-15T14:28:24.864Z" },
-]
-
-[[package]]
 name = "pyperclip"
 version = "1.11.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3648,15 +3607,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/55/e3/70399cb7dd41c10ac53367ae42139cf4b1ca5f36bb3dc6c9d33acdb43655/typing_inspection-0.4.2.tar.gz", hash = "sha256:ba561c48a67c5958007083d386c3295464928b01faa735ab8547c5692e87f464", size = 75949, upload-time = "2025-10-01T02:14:41.687Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7", size = 14611, upload-time = "2025-10-01T02:14:40.154Z" },
-]
-
-[[package]]
-name = "tzdata"
-version = "2026.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/19/f5/cd531b2d15a671a40c0f66cf06bc3570a12cd56eef98960068ebbad1bf5a/tzdata-2026.1.tar.gz", hash = "sha256:67658a1903c75917309e753fdc349ac0efd8c27db7a0cb406a25be4840f87f98", size = 197639, upload-time = "2026-04-03T11:25:22.002Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b0/70/d460bd685a170790ec89317e9bd33047988e4bce507b831f5db771e142de/tzdata-2026.1-py2.py3-none-any.whl", hash = "sha256:4b1d2be7ac37ceafd7327b961aa3a54e467efbdb563a23655fbfe0d39cfc42a9", size = 348952, upload-time = "2026-04-03T11:25:20.313Z" },
 ]
 
 [[package]]
