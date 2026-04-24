@@ -21,6 +21,9 @@ from ..config import settings
 from ..models import (
     FileEntry,
     FileListResponse,
+    GraphEdge,
+    GraphNode,
+    GraphOverviewResponse,
     NodeTypeStat,
     NodeTypesResponse,
     SemanticResult,
@@ -588,3 +591,104 @@ def list_node_types(
 
     stats.sort(key=lambda s: s.count, reverse=True)
     return NodeTypesResponse(types=stats)
+
+
+# ---------------------------------------------------------------------------
+# GET /search/graph/overview
+# ---------------------------------------------------------------------------
+
+
+def _node_stable_id(v: dict[str, Any]) -> str:
+    """Derive a stable string ID for a raw LadybugDB node dict."""
+    return str(v.get("qname") or v.get("path") or v.get("name") or id(v))
+
+
+@router.get("/graph/overview", response_model=GraphOverviewResponse)
+def graph_overview(
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to scope the graph to. Omit for first indexed DB.",
+    ),
+    max_nodes: int = Query(
+        default=300,
+        ge=1,
+        le=2000,
+        description="Maximum number of nodes to return.",
+    ),
+) -> GraphOverviewResponse:
+    """Return a compact graph (nodes + edges) for repo-wide canvas rendering.
+
+    Fetches relationships from the graph, derives stable node IDs from each
+    node's ``qname`` or ``path`` property, and caps output at ``max_nodes``.
+    Nodes with no relationships are not included (overview emphasises
+    connectivity rather than exhaustive enumeration).
+
+    Args:
+        repo: Repo slug to scope to.
+        max_nodes: Cap on unique nodes included in the response.
+
+    Returns:
+        GraphOverviewResponse: Nodes, edges, and counts.
+
+    Raises:
+        HTTPException: 503 when the DB cannot be opened.
+    """
+    try:
+        conn = _get_conn(repo)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"DB error: {exc}") from exc
+
+    # Fetch relationship triples.  We pull more than max_nodes worth so we
+    # can include nodes that appear only as targets.
+    edge_limit = max_nodes * 5
+    try:
+        cypher = f"MATCH (a)-[r]->(b) RETURN a, r, b LIMIT {edge_limit}"
+        rows = _result_to_rows(conn.execute(cypher))  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Graph query error: {exc}") from exc
+
+    nodes: dict[str, GraphNode] = {}
+    edges: list[GraphEdge] = []
+
+    for row in rows:
+        vals = list(row.values())
+        if len(vals) < 3:
+            continue
+        a_raw, r_raw, b_raw = vals[0], vals[1], vals[2]
+        if not (_is_node(a_raw) and _is_rel(r_raw) and _is_node(b_raw)):
+            continue
+
+        src_id = _node_stable_id(a_raw)
+        dst_id = _node_stable_id(b_raw)
+
+        if src_id not in nodes and len(nodes) < max_nodes:
+            nodes[src_id] = GraphNode(
+                id=src_id,
+                label=a_raw.get("_LABEL", "Node"),
+                name=str(a_raw.get("name") or a_raw.get("path") or src_id),
+                qname=a_raw.get("qname"),
+                path=a_raw.get("path"),
+            )
+        if dst_id not in nodes and len(nodes) < max_nodes:
+            nodes[dst_id] = GraphNode(
+                id=dst_id,
+                label=b_raw.get("_LABEL", "Node"),
+                name=str(b_raw.get("name") or b_raw.get("path") or dst_id),
+                qname=b_raw.get("qname"),
+                path=b_raw.get("path"),
+            )
+
+        # Only include edges where both endpoints are in our node set.
+        if src_id in nodes and dst_id in nodes:
+            rel_type = str(r_raw.get("_TYPE", "RELATES_TO"))
+            edges.append(GraphEdge(source=src_id, target=dst_id, type=rel_type))
+
+    node_list = list(nodes.values())
+    return GraphOverviewResponse(
+        nodes=node_list,
+        edges=edges,
+        node_count=len(node_list),
+        edge_count=len(edges),
+    )

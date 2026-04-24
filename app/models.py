@@ -400,3 +400,57 @@ class ExplorerInfoResponse(BaseModel):
     launch_command: str
     viewer_url: str
     docs_url: str
+
+
+
+# ---------------------------------------------------------------------------
+# Graph overview
+# ---------------------------------------------------------------------------
+
+
+class GraphNode(BaseModel):
+    """A node in the repo-wide graph overview.
+
+    Attributes:
+        id: Stable identifier derived from qname or path+name.
+        label: Node type label (Function, Class, File, etc.).
+        name: Human-readable short name.
+        qname: Fully-qualified name, if the node has one.
+        path: Source file path, if applicable.
+    """
+
+    id: str
+    label: str
+    name: str
+    qname: str | None = None
+    path: str | None = None
+
+
+class GraphEdge(BaseModel):
+    """A directed edge in the repo-wide graph overview.
+
+    Attributes:
+        source: Source node ID (matches GraphNode.id).
+        target: Target node ID (matches GraphNode.id).
+        type: Relationship type label (CALLS, CONTAINS, IMPORTS, etc.).
+    """
+
+    source: str
+    target: str
+    type: str
+
+
+class GraphOverviewResponse(BaseModel):
+    """Response for ``GET /graph/overview``.
+
+    Attributes:
+        nodes: Up to ``max_nodes`` graph nodes.
+        edges: Relationships between nodes in the result set.
+        node_count: Total nodes returned.
+        edge_count: Total edges returned.
+    """
+
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    node_count: int
+    edge_count: int
