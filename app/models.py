@@ -43,6 +43,15 @@ class RepoHealth(BaseModel):
     readable: bool
     last_indexed_at: float | None = None
     indexing: bool = False
+    repo_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute filesystem path to the source repo — consumers like the "
+            "orchestrator need this to call endpoints (e.g. /context-bundle) "
+            "that validate repo_path on disk. Null when the path wasn't captured "
+            "(e.g. DB indexed before this field existed — triggers a re-index to fix)."
+        ),
+    )
 
 
 class HealthResponse(BaseModel):

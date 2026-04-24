@@ -275,12 +275,67 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         # embeddings that score high for any query.  Fetch 500+ to guarantee
         # we reach real application code below the fixture cluster.
         seed_results = semantic_code_search(req.task_description, top_k=max(req.k * 50, 500))
+        # Drop noise: test fixtures AND anonymous inline arrows/callbacks
+        # (named `anonymous_LINE_COL` by the parser). Both have degenerate
+        # embeddings that crowd real code out of the top-k window.
         _FIXTURE_SEGMENTS = {"fixtures", "large-file", "__fixtures__"}
+        import re as _re
+        _ANON_RE = _re.compile(r"^anonymous_\d+_\d+$")
+
+        def _is_noise(sym: str) -> bool:
+            parts = sym.split(".")
+            if any(seg in _FIXTURE_SEGMENTS for seg in parts):
+                return True
+            if any(_ANON_RE.match(seg) for seg in parts):
+                return True
+            # Duplicated trailing segments from inner-scope closures.
+            if len(parts) >= 2 and parts[-1] == parts[-2]:
+                return True
+            return False
+
         seed_symbols = [
             r["qualified_name"]
             for r in seed_results
-            if not any(seg in _FIXTURE_SEGMENTS for seg in r["qualified_name"].split("."))
+            if not _is_noise(r["qualified_name"])
         ][: req.k]
+
+        # Exact-name boost: when the task description mentions a symbol name
+        # verbatim (e.g. "what does createGateStateMachine do"), force-include
+        # every indexed symbol whose trailing segment matches that word —
+        # semantic embeddings alone can miss long functions whose bodies are
+        # lexically distant from short natural-language prompts.
+        try:
+            import re as _re_name
+            _words = set(
+                _re_name.findall(
+                    r"[A-Za-z_][A-Za-z0-9_]{2,}",
+                    req.task_description,
+                )
+            )
+            if _words:
+                conn = _get_conn(repo_slug)
+                exact_rows = _result_to_rows(
+                    conn.execute(  # type: ignore[attr-defined]
+                        "MATCH (n) WHERE n.name IN $names "
+                        "RETURN DISTINCT n.qualified_name AS qn",
+                        {"names": list(_words)},
+                    )
+                )
+                exact_hits = [
+                    r["qn"] for r in exact_rows
+                    if r.get("qn") and not _is_noise(r["qn"])
+                ]
+                # Prepend exact matches; de-dupe while preserving order.
+                seen = set()
+                merged: list[str] = []
+                for qn in exact_hits + seed_symbols:
+                    if qn not in seen:
+                        seen.add(qn)
+                        merged.append(qn)
+                seed_symbols = merged[: max(req.k, len(exact_hits))]
+        except Exception:
+            # Exact-match boost is best-effort — never fail the bundle on it.
+            pass
     except Exception as exc:
         raise HTTPException(
             status_code=503,

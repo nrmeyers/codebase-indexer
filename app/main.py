@@ -113,6 +113,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if swept or stale:
         _log.info("Reaped %d orphan job(s) and %d stale lock(s).", swept, stale)
 
+    # Rehydrate the in-memory `indexed_repo_paths` map from the per-repo
+    # sidecar JSON files left behind by past index jobs.  Without this,
+    # every restart loses the repo→abs-path mapping and callers (the
+    # orchestrator's chat flow, /context-bundle validation) can no longer
+    # resolve a repo slug back to a path until a fresh index runs.
+    from .routers.index import indexed_repo_paths, indexed_repos, _read_meta
+    for db_file in sorted(db_dir.glob("*.db")):
+        _slug = db_file.stem  # "TheForge.db" → "TheForge"
+        try:
+            _meta = _read_meta(_slug)
+        except Exception:
+            _meta = {}
+        _root = _meta.get("root_path")
+        if _root and _Path(_root).exists():
+            indexed_repo_paths[_slug] = _root
+            indexed_repos.add(_slug)
+    _log.info(
+        "Rehydrated %d repo path(s) from sidecars.", len(indexed_repo_paths),
+    )
+
     yield
 
 

@@ -75,7 +75,7 @@ def _probe_repo(name: str) -> RepoHealth:
         RepoHealth: readability + size + approximate node count +
         last_indexed_at + in-flight flag.
     """
-    from .index import _get_last_indexed_at, _read_meta, is_repo_indexing
+    from .index import _get_last_indexed_at, _read_meta, is_repo_indexing, indexed_repo_paths
 
     now = time.time()
     cached = _probe_cache.get(name)
@@ -91,6 +91,7 @@ def _probe_repo(name: str) -> RepoHealth:
             readable=stale.readable,
             last_indexed_at=_get_last_indexed_at(name) or stale.last_indexed_at,
             indexing=is_repo_indexing(name),
+            repo_path=indexed_repo_paths.get(name) or stale.repo_path,
         )
 
     db_path = settings.db_path_for_repo(name)
@@ -108,6 +109,7 @@ def _probe_repo(name: str) -> RepoHealth:
             readable=False,
             last_indexed_at=last_idx,
             indexing=indexing,
+            repo_path=indexed_repo_paths.get(name),
         )
         _probe_cache[name] = (now, rh)
         return rh
@@ -127,6 +129,7 @@ def _probe_repo(name: str) -> RepoHealth:
             readable=True,
             last_indexed_at=last_idx,
             indexing=True,
+            repo_path=indexed_repo_paths.get(name),
         )
         _probe_cache[name] = (now, rh)
         return rh
@@ -168,6 +171,7 @@ def _probe_repo(name: str) -> RepoHealth:
         readable=readable,
         last_indexed_at=last_idx,
         indexing=indexing,
+        repo_path=indexed_repo_paths.get(name),
     )
     _probe_cache[name] = (now, rh)
     return rh
