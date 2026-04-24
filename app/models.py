@@ -199,6 +199,7 @@ class SymbolResponse(BaseModel):
     line_start: int | None
     line_end: int | None
     source: str
+    docstring: str | None = None
 
 
 # ---------------------------------------------------------------------------

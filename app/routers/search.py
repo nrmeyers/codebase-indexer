@@ -394,6 +394,7 @@ def symbol_lookup(
     root_path: str = row.get("root_path") or ""
     line_start: int | None = row.get("start_line")
     line_end: int | None = row.get("end_line")
+    docstring: str | None = row.get("docstring") or None
 
     # Paths stored in LadybugDB are relative to the repo root (for portability).
     # Resolve to absolute using the root_path stored on the Project node; fall
@@ -430,6 +431,7 @@ def symbol_lookup(
         line_start=line_start,
         line_end=line_end,
         source=source,
+        docstring=docstring,
     )
 
 
