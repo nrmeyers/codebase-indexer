@@ -6,7 +6,6 @@ no live kuzu-explorer required — only the info payload is under test.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import patch
 

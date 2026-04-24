@@ -1,7 +1,7 @@
 """Tests for GET /search/structural, /search/semantic, /search/symbol."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, patch as patch_obj
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient

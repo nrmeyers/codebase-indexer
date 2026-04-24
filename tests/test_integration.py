@@ -14,7 +14,7 @@ from __future__ import annotations
 import textwrap
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -71,7 +71,6 @@ def app_client(db_path: str):
     os.environ["LADYBUG_DB_PATH"] = db_path
 
     # Re-import app after env var is set so config picks it up.
-    from importlib import reload
     import app.config as cfg_mod
 
     cfg_mod.settings.__class__.model_config["env_file"] = None  # type: ignore[index]

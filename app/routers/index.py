@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel
 
 from ..config import settings
 from ..models import (
@@ -703,9 +704,6 @@ def get_index_status(job_id: str) -> IndexStatus:
 # ---------------------------------------------------------------------------
 # POST /index/embed — optional semantic embedding pass
 # ---------------------------------------------------------------------------
-
-
-from pydantic import BaseModel
 
 
 class EmbedRequest(BaseModel):
