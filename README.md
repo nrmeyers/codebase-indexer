@@ -1,14 +1,15 @@
 # Code Indexer Service
 
 FastAPI HTTP gateway over [code-graph-rag](../code-graph-rag). Indexes
-repositories into LadybugDB (embedded kuzu graph + vector, no Docker) and
-exposes structural, semantic, and symbol search to TheForge's dev-agent.
+repositories into LadybugDB (embedded kuzu graph, no Docker) with numpy
+sidecar embeddings for semantic search. Exposes structural, semantic, symbol,
+and context-bundle search to TheForge's dev-agent.
 
-**Default Port:** 8000 (TheForge config uses `8003` via `code_indexer.base_url`)
+**Default Port:** 8000
 
 ---
 
-## Endpoints
+## Endpoints (core)
 
 | Method | Path | Description |
 |---|---|---|
@@ -16,10 +17,22 @@ exposes structural, semantic, and symbol search to TheForge's dev-agent.
 | `POST` | `/index` | Start a background indexing job (202 Accepted) |
 | `GET` | `/index/{job_id}/status` | Poll job progress |
 | `GET` | `/search/structural` | Cypher passthrough against LadybugDB |
-| `GET` | `/search/semantic` | Vector-similarity search over embeddings |
+| `GET` | `/search/semantic` | Vector-similarity search over numpy embeddings |
 | `GET` | `/search/symbol` | Exact FQN lookup returning source + location |
+| `GET` | `/search/browse` | Package tree / file list browser |
+| `GET` | `/search/callers` | Upstream callers of a symbol |
+| `GET` | `/search/callees` | Downstream callees of a symbol |
 | `POST` | `/context-bundle` | Grounded code context for the dev-agent |
-| `GET` | `/explorer/info` | Kuzu Explorer viewer availability + launch command (optional) |
+| `GET` | `/stats/{repo}` | Node/rel counts + embedding count |
+| `GET` | `/repos` | List all indexed repos |
+| `DELETE` | `/repos/{repo}` | Remove a repo from the index |
+| `GET` | `/graph/neighborhood` | N-hop subgraph around a symbol |
+| `GET` | `/graph/schema` | Node labels, rel types, counts |
+| `GET` | `/jobs` | List background jobs |
+| `DELETE` | `/jobs/{job_id}` | Cancel a job |
+| `GET` | `/explorer/info` | LadybugDB Explorer launch command (optional) |
+| `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/openapi.json` | OpenAPI spec |
 
 ---
 
@@ -30,10 +43,14 @@ exposes structural, semantic, and symbol search to TheForge's dev-agent.
 uv run uvicorn app.main:app --port 8000 --log-level info
 ```
 
+TheForge auto-starts this service when you run `pnpm dev` (via
+`scripts/start-indexer.sh`). Set `CODE_INDEXER_PATH` if the service lives
+somewhere other than `~/code-indexer-service`.
+
 ## Test
 
 ```bash
-uv run pytest tests/ -v   # 23 tests
+uv run pytest tests/ -v   # 35 tests
 ```
 
 ## Install (first run)
@@ -42,11 +59,11 @@ The service depends on the local `code-graph-rag` fork as a path dependency.
 Run `uv sync` once to pull everything:
 
 ```bash
-cd code-indexer-service
+cd ~/code-indexer-service
 uv sync
 ```
 
-`real-ladybug>=0.15.3` (LadybugDB) is installed automatically.
+`real-ladybug>=0.15.3` (LadybugDB) and `numpy` are installed automatically.
 
 ---
 
@@ -86,6 +103,9 @@ Copy `.env.example` → `.env` and adjust paths for your machine.
 { "job_id": "3f2a…", "status": "running" }
 ```
 
+Returns `409 Conflict` if an index job for the same repo is already running
+(LadybugDB is single-writer; concurrent jobs serialize via `asyncio.Lock`).
+
 ### `GET /index/{job_id}/status`
 
 ```json
@@ -94,7 +114,8 @@ Copy `.env.example` → `.env` and adjust paths for your machine.
   "status": "done",
   "progress_pct": 100,
   "node_count": 1842,
-  "rel_count": 3107
+  "rel_count": 3107,
+  "embedding_count": 892
 }
 ```
 
@@ -116,7 +137,7 @@ automatically if the query does not already include one.
 
 ### `GET /search/semantic?q={text}&k=10`
 
-Vector-similarity search using UniXcoder embeddings stored in LadybugDB.
+Vector-similarity search using UniXcoder embeddings stored as numpy sidecars.
 
 ```json
 {
@@ -167,32 +188,29 @@ TheForge API (Express :3001)
         │
         │  HTTP :8000
         ▼
-Code Indexer Service (FastAPI)
+Code Indexer Service (FastAPI — this repo)
         │
         │  Python import
         ▼
-code-graph-rag (LadybugIngestor + semantic search)
+code-graph-rag (LadybugIngestor + numpy embeddings)
         │
-        ▼
-LadybugDB (.cgr/graph.db — embedded kuzu, no Docker)
+        ├─► LadybugDB (.cgr/graph.db — embedded kuzu)
+        └─► numpy sidecars (.cgr/{repo}.embeddings.npy + .json)
 ```
 
-The service imports `code-graph-rag` as a local `uv` workspace path
-dependency (`code-graph-rag @ file:///…`). Both share the same
-`LADYBUG_DB_PATH` file so indexed data is immediately visible to search.
+The service imports `code-graph-rag` as a local `uv` workspace path dependency.
+Both share the same `LADYBUG_DB_PATH` so indexed data is immediately visible
+to search.
 
 ---
 
 ## Visualising the graph (optional)
 
-LadybugDB is kuzu-compatible on disk, so the official
-[**Kuzu Explorer**](https://docs.kuzudb.com/visualization/kuzu-explorer/)
-opens our `.db` file read-only and gives you an interactive node/edge
-browser, a Cypher console, and schema introspection.
+LadybugDB is kuzu-compatible on disk. The Kuzu Explorer Docker image
+opens the `.db` file read-only for interactive node/edge browsing, a Cypher
+console, and schema introspection.
 
-### Option A — ask the running service for the command
-
-When the Code Indexer is up and the graph has at least one indexed repo:
+### Ask the running service for the command
 
 ```bash
 curl -s http://localhost:8000/explorer/info | jq
@@ -203,32 +221,19 @@ curl -s http://localhost:8000/explorer/info | jq
   "available": true,
   "db_path": "/abs/path/to/graph.db",
   "indexed_repos": ["myproject"],
-  "launch_command": "docker run --rm -p 7000:8000 -v /abs/path:/database -e KUZU_PATH=/database/graph.db kuzudb/explorer:latest",
-  "viewer_url": "http://localhost:7000",
-  "docs_url": "https://docs.kuzudb.com/visualization/kuzu-explorer/"
+  "launch_command": "docker run --rm -p 7001:8000 -v /abs/path:/database -e LADYBUG_PATH=/database/graph.db ghcr.io/ladybugdb/explorer:latest",
+  "viewer_url": "http://localhost:7001",
+  "docs_url": "https://docs.ladybugdb.com/visualization/explorer/"
 }
 ```
 
-Paste `launch_command` into a terminal and open `viewer_url` once the
-container reports ready.
-
-### Option B — one-shot helper script
-
-```bash
-./scripts/launch-explorer.sh                           # uses LADYBUG_DB_PATH env / .env
-./scripts/launch-explorer.sh /path/to/graph.db         # explicit DB
-PORT=9000 ./scripts/launch-explorer.sh                 # custom host port
-```
-
-The script queries `/explorer/info` for the authoritative command when the
-service is running; otherwise it constructs the command offline.
+Paste `launch_command` into a terminal and open `viewer_url` once ready.
 
 ### Notes
 
 - **Docker is only required for the viewer.** All indexing and search work
   without Docker — the viewer is purely opt-in.
-- **Single-writer safety.** kuzu-explorer mounts the DB read-only, so it's
-  safe to open while TheForge continues to query — but do **not** run it
-  during a live `/index` job (LadybugDB serialises writers).
-- `available: false` means the viewer would open on an empty graph — index
-  a repo first.
+- **Single-writer safety.** The Explorer mounts the DB read-only so it's safe
+  to browse while TheForge queries, but do **not** browse during a live
+  `/index` job.
+- `available: false` means no repos are indexed yet — run `POST /index` first.
