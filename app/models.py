@@ -96,22 +96,47 @@ class IndexStatus(BaseModel):
     Attributes:
         job_id: Identifier returned from ``POST /index``.
         status: Current execution state.
-        progress_pct: Bounded to [0, 100]; progress is best-effort and jumps
-            at milestones rather than tracking every file.
-        phase: Human-readable description of the current work phase shown in
-            the UI progress bar. Milestones: ``parsing`` (0–90%),
-            ``embedding`` (90–100%).
-        node_count: Final count once the job completes; 0 while running.
-        rel_count: Final count once the job completes; 0 while running.
+        phase: Current work phase — monotonically advances through the
+            pipeline. ``queued`` while the job waits for a repo lock;
+            ``discovering`` during filesystem walk; ``parsing`` during
+            tree-sitter pass; ``writing`` during LadybugDB flush;
+            ``embedding`` during UniXcoder model pass; ``finalizing``
+            for final metadata writes; ``done`` on success.
+            Set to ``"cancelled"`` when a cancel request is honoured.
+        progress_pct: Bounded to [0, 100]; monotonically non-decreasing.
+            Computed from phase + per-file counters so the bar moves
+            smoothly rather than jumping at milestones.
+        files_total: Total eligible files discovered in the repo (available
+            after the discovering phase; 0 before).
+        files_done: Files fully parsed so far (advances during parsing).
+        current_file: Relative path of the file being parsed right now;
+            None outside the parsing phase or when embedding.
+        node_count: Live graph node count during the run; final value on
+            completion.
+        rel_count: Live relationship count; final on completion.
+        started_at: Unix epoch seconds when the job was accepted.
+        elapsed_sec: Wall-clock seconds since the job started (computed
+            at response time, not stored).
+        eta_sec: Estimated seconds remaining; None until progress_pct > 10
+            (too early for a reliable estimate).
         error: Populated only on ``failed`` status.
     """
 
     job_id: str
-    status: Literal["running", "done", "failed"]
-    progress_pct: float = Field(ge=0.0, le=100.0)
-    phase: str = "parsing"
+    status: Literal["pending", "running", "done", "failed"]
+    phase: Literal[
+        "queued", "discovering", "parsing", "writing",
+        "embedding", "finalizing", "done", "cancelled",
+    ] = "queued"
+    progress_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    files_total: int = 0
+    files_done: int = 0
+    current_file: str | None = None
     node_count: int = 0
     rel_count: int = 0
+    started_at: float = 0.0
+    elapsed_sec: float = 0.0
+    eta_sec: float | None = None
     error: str | None = None
 
 

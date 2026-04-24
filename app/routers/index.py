@@ -57,6 +57,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class _IndexCancelledError(RuntimeError):
+    """Raised from the progress callback when a job receives a cancel signal."""
+
+
 # ---------------------------------------------------------------------------
 # In-memory job store
 # ---------------------------------------------------------------------------
@@ -70,13 +74,20 @@ class _Job:
         job_id: UUID4 string returned to the client.
         repo_path: Resolved absolute path to the repo being indexed.
         status: Lifecycle state — ``running`` → ``done`` | ``failed``.
-        progress_pct: Best-effort progress indicator (milestone-based).
-        phase: Current phase label shown to UIs (``parsing``, ``embedding``).
+        progress_pct: Best-effort progress indicator, monotonically
+            non-decreasing.  Derived from phase + per-file counters via
+            the progress callback rather than hard-coded milestones.
+        phase: Current phase label shown to UIs.
+        files_total: Total eligible files discovered (0 until discovering
+            phase completes).
+        files_done: Files fully scanned so far (advances during parsing).
+        current_file: Relative path of the file currently being parsed;
+            None outside the parsing phase.
         node_count: Final graph node count, populated on completion.
         rel_count: Final graph relationship count, populated on completion.
         embedded_count: Number of function/method embeddings written.
-            Zero on incremental runs when nothing new was embedded (all
-            functions were already cached from a prior index).
+        cancelled: Set to True by the cancel endpoint; the progress
+            callback raises _IndexCancelledError on the next check.
         error: Populated only when ``status == "failed"``.
         started_at: Wall-clock start time used for TTL-based pruning.
         finished_at: Wall-clock end time; None while running.
@@ -86,10 +97,16 @@ class _Job:
     repo_path: str
     status: Literal["running", "done", "failed"] = "running"
     progress_pct: float = 0.0
-    phase: str = "parsing"
+    phase: str = "queued"
+    files_total: int = 0
+    files_done: int = 0
+    current_file: str | None = None
     node_count: int = 0
     rel_count: int = 0
     embedded_count: int = 0
+    cancelled: bool = False
+    elapsed_sec: float = 0.0
+    eta_sec: float | None = None
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -247,6 +264,10 @@ async def _run_ingestion(job: _Job, force_reindex: bool) -> None:
         loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, _blocking_index, job, force_reindex)
+        except _IndexCancelledError:
+            # phase/error already set by the progress callback before raising.
+            if job.finished_at is None:
+                job.finished_at = time.time()
         except Exception as exc:
             # Capture failure on the job so pollers see the error reason rather
             # than a silent stuck-running status.
@@ -300,26 +321,80 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     )
     effective_force = force_reindex or db_was_new
 
+    # ------------------------------------------------------------------
+    # Progress callback — maps GraphUpdater events to _Job state.
+    # Called from the GraphUpdater thread; must be thread-safe for the
+    # simple field writes it performs (GIL-protected in CPython).
+    # ------------------------------------------------------------------
+    _job_start = job.started_at
+
+    def _progress_cb(event: dict) -> None:
+        # Cancel check — must happen before any state mutation so that
+        # phase/error are set consistently before raising.
+        if job.cancelled:
+            job.phase = "cancelled"
+            job.status = "failed"
+            job.error = "Cancelled by user"
+            job.finished_at = time.time()
+            raise _IndexCancelledError("Cancelled by user")
+
+        phase = event.get("phase")
+        if phase:
+            job.phase = str(phase)
+        if "files_total" in event:
+            job.files_total = int(event["files_total"])
+        if "files_done" in event:
+            job.files_done = int(event["files_done"])
+        if "current_file" in event:
+            cf = event["current_file"]
+            job.current_file = str(cf) if cf else None
+
+        # Compute progress_pct from phase + counters (monotonically non-decreasing).
+        if "progress_pct" in event:
+            pct: float = float(event["progress_pct"])
+        elif phase == "discovering":
+            pct = 2.0
+        elif phase == "parsing":
+            pct = 5.0 + (job.files_done / max(job.files_total, 1)) * 60.0
+        elif phase == "writing":
+            pct = 65.0
+        elif phase == "embedding":
+            pct = 70.0
+        elif phase == "finalizing":
+            pct = 98.0
+        elif phase == "done":
+            pct = 100.0
+        else:
+            pct = job.progress_pct  # unchanged
+
+        job.progress_pct = max(job.progress_pct, min(100.0, pct))
+
+        # Elapsed + ETA — computed at callback time (cheap, no extra polling).
+        elapsed = time.time() - _job_start
+        job.elapsed_sec = elapsed
+        if job.progress_pct > 10.0 and job.progress_pct < 100.0:
+            job.eta_sec = elapsed * (100.0 - job.progress_pct) / job.progress_pct
+        else:
+            job.eta_sec = None
+
     # LadybugIngestor is a context manager — __enter__ opens the DB connection
     # and runs schema migration; __exit__ flushes remaining buffers and closes.
     with LadybugIngestor(
         db_path=repo_db_path,
         batch_size=settings.LADYBUG_BATCH_SIZE,
     ) as ingestor:
-        # Progress updates are milestone-based rather than per-file so the
-        # status endpoint never hot-loops on a mutex.
-        job.progress_pct = 5.0
-
         updater = GraphUpdater(
             ingestor=ingestor,
             repo_path=repo,
             parsers=parsers,
             queries=queries,
+            progress_cb=_progress_cb,
         )
 
-        job.progress_pct = 10.0
         updater.run(force=effective_force)
-        job.progress_pct = 90.0
+        # GraphUpdater emits "done" at 100% at the end of run(); reset to 92%
+        # so the UI knows the embedding subprocess pass still follows.
+        job.progress_pct = min(job.progress_pct, 92.0)
 
         # Store the absolute repo root on the Project node so search endpoints
         # can resolve relative file paths back to absolute paths.  The
@@ -400,8 +475,8 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     except Exception:
         pass  # cache invalidation is best-effort
 
-    job.progress_pct = 92.0
     job.phase = "embedding"
+    job.progress_pct = max(job.progress_pct, 92.0)
 
     # -------------------------------------------------------------------
     # Pass 4: Embedding generation (subprocess-isolated, REQUIRED)
@@ -690,14 +765,79 @@ def get_index_status(job_id: str) -> IndexStatus:
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    # Compute elapsed_sec at response time so it advances even between
+    # callback fires; eta_sec is kept from the last callback update.
+    elapsed = time.time() - job.started_at if job.started_at else 0.0
+
+    # Phase on the public model uses the cancelled literal; status always
+    # reflects the job lifecycle.
+    phase_val = job.phase  # type: ignore[assignment]
+
     return IndexStatus(
         job_id=job.job_id,
         status=job.status,
+        phase=phase_val,
         progress_pct=job.progress_pct,
-        phase=job.phase,
+        files_total=job.files_total,
+        files_done=job.files_done,
+        current_file=job.current_file,
         node_count=job.node_count,
         rel_count=job.rel_count,
+        started_at=job.started_at,
+        elapsed_sec=elapsed,
+        eta_sec=job.eta_sec,
         error=job.error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /index/{job_id}/cancel
+# ---------------------------------------------------------------------------
+
+
+class CancelResponse(BaseModel):
+    """Response from ``POST /index/{job_id}/cancel``."""
+
+    job_id: str
+    cancelled: bool
+    message: str
+
+
+@router.post("/index/{job_id}/cancel", response_model=CancelResponse)
+def cancel_index(job_id: str) -> CancelResponse:
+    """Signal a running indexing job to stop at the next safe checkpoint.
+
+    The job checks ``job.cancelled`` between files during parsing and
+    between batches during embedding.  Termination typically occurs within
+    two seconds for small files; larger files may take longer to finish
+    the current unit of work.  On cancellation the job transitions to
+    ``status="failed"``, ``phase="cancelled"``, ``error="Cancelled by user"``.
+
+    Args:
+        job_id: The identifier returned from ``POST /index``.
+
+    Returns:
+        CancelResponse: Confirmation that the cancel flag was set.
+
+    Raises:
+        HTTPException: 404 when the job is unknown; 409 when the job is
+        already in a terminal state (done or failed — nothing to cancel).
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    if job.status != "running":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job {job_id} is already in terminal state '{job.status}'; nothing to cancel.",
+        )
+    job.cancelled = True
+    logger.info("Cancel requested for job %s.", job_id)
+    return CancelResponse(
+        job_id=job_id,
+        cancelled=True,
+        message="Cancel signal sent — job will stop at the next checkpoint.",
     )
 
 
