@@ -326,6 +326,26 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     )
     effective_force = force_reindex or db_was_new
 
+    # When the caller requested a full force-reindex, physically delete the
+    # per-repo DB file + WAL + hash cache.  Without this, GraphUpdater's
+    # ``force=True`` only resets the in-memory hash cache — old Function /
+    # Call / File nodes from previous ingestions REMAIN in LadybugDB and
+    # the new parse just layers fresh copies on top.  Symptoms: junk
+    # symbols persist across re-indexes, node count grows monotonically,
+    # cgrignore changes only partially take effect.
+    if force_reindex:
+        db_file = Path(repo_db_path)
+        wal_file = db_file.with_suffix(db_file.suffix + "-wal")
+        shm_file = db_file.with_suffix(db_file.suffix + "-shm")
+        hash_cache = repo / ".cgr-hash-cache.json"
+        for artifact in (db_file, wal_file, shm_file, hash_cache):
+            try:
+                artifact.unlink(missing_ok=True)
+            except OSError:
+                # Best-effort — a locked WAL file is not fatal; the ingestor
+                # will recreate what it needs.
+                pass
+
     # ------------------------------------------------------------------
     # Progress callback — maps GraphUpdater events to _Job state.
     # Called from the GraphUpdater thread; must be thread-safe for the
@@ -382,6 +402,20 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         else:
             job.eta_sec = None
 
+    # Load .cgrignore patterns from the repo root and merge with explicit
+    # exclude_paths from the POST body.  Without this the service would skip
+    # only the request's exclude_paths and ignore the user's .cgrignore file
+    # entirely (which is the expected extensibility surface for teams who
+    # can't modify the POST body — e.g. IDE integrations).
+    from codebase_rag.config import load_cgrignore_patterns
+    cgrignore = load_cgrignore_patterns(repo)
+    merged_excludes: frozenset[str] | None = None
+    if job.exclude_paths or cgrignore.exclude:
+        merged_excludes = frozenset(job.exclude_paths) | cgrignore.exclude
+    unignore_paths: frozenset[str] | None = (
+        cgrignore.unignore if cgrignore.unignore else None
+    )
+
     # LadybugIngestor is a context manager — __enter__ opens the DB connection
     # and runs schema migration; __exit__ flushes remaining buffers and closes.
     with LadybugIngestor(
@@ -394,7 +428,8 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             parsers=parsers,
             queries=queries,
             progress_cb=_progress_cb,
-            exclude_paths=job.exclude_paths if job.exclude_paths else None,
+            exclude_paths=merged_excludes,
+            unignore_paths=unignore_paths,
         )
 
         updater.run(force=effective_force)

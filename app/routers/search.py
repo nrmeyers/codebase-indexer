@@ -142,8 +142,13 @@ def _result_to_rows(result: object) -> list[dict[str, Any]]:
 
 
 def _is_node(v: Any) -> bool:
-    """Return True if ``v`` is a LadybugDB node dict (identified by ``_LABEL``)."""
-    return isinstance(v, dict) and "_LABEL" in v
+    """Return True iff ``v`` is a LadybugDB node dict.
+
+    Both nodes and relationships carry ``_LABEL``, so we must additionally
+    require the absence of ``_SRC`` (which only rels have) to avoid
+    classifying relationships as nodes.
+    """
+    return isinstance(v, dict) and "_LABEL" in v and "_SRC" not in v
 
 
 def _is_rel(v: Any) -> bool:
@@ -333,21 +338,41 @@ def semantic_search(
         # Non-fatal — if we can't swap the path, fall back to cgr's default.
         pass
 
-    # Over-fetch aggressively: fixture/generated functions can have degenerate
-    # embeddings that cluster at the top regardless of the query.  Fetch 500+
-    # to guarantee we reach real application code below the fixture cluster.
+    # Over-fetch aggressively: fixture/generated/anonymous functions can have
+    # degenerate embeddings that cluster at the top regardless of the query.
+    # Fetch 500+ to guarantee we reach real application code below the
+    # degenerate cluster.
     raw = _semantic_fn(q, top_k=max(k * 50, 500))
 
-    # Post-filter: drop results from synthetic test-fixture directories so they
-    # don't crowd out real application code.  The fixture paths are excluded
-    # during indexing for new indexes; this filter handles already-indexed DBs.
+    # Post-filter noise:
+    #   (1) synthetic test-fixture directories — same as before
+    #   (2) anonymous inline arrows/callbacks — named `anonymous_<line>_<col>`
+    #       by the tree-sitter parser when no real name is available.  Their
+    #       bodies are typically 1-3 tokens long (e.g. `() => x`) so the
+    #       embeddings are near-uniform and score high for any query.  These
+    #       are never what a human is searching for when they type a natural-
+    #       language code question.
     _FIXTURE_SEGMENTS = {"fixtures", "large-file", "__fixtures__"}
+    import re as _re
+    _ANON_RE = _re.compile(r"^anonymous_\d+_\d+$")
 
-    def _is_fixture(sym: str) -> bool:
+    def _is_noise(sym: str) -> bool:
         parts = sym.split(".")
-        return any(seg in _FIXTURE_SEGMENTS for seg in parts)
+        if any(seg in _FIXTURE_SEGMENTS for seg in parts):
+            return True
+        # Any segment matching the anonymous_LINE_COL pattern — usually the
+        # terminal segment, but also appears as middle segments in qualified
+        # names like `foo.anonymous_24_11.bar`.
+        if any(_ANON_RE.match(seg) for seg in parts):
+            return True
+        # Duplicated trailing segments (e.g. `useHook.useHook.connect.connect`)
+        # — the parser emits these for inner-scope closures and they're almost
+        # always trivial wrappers.
+        if len(parts) >= 2 and parts[-1] == parts[-2]:
+            return True
+        return False
 
-    filtered = [r for r in raw if not _is_fixture(r["qualified_name"])]
+    filtered = [r for r in raw if not _is_noise(r["qualified_name"])]
 
     return SemanticSearchResponse(
         results=[
@@ -616,8 +641,17 @@ def list_node_types(
 
 
 def _node_stable_id(v: dict[str, Any]) -> str:
-    """Derive a stable string ID for a raw LadybugDB node dict."""
-    return str(v.get("qname") or v.get("path") or v.get("name") or id(v))
+    """Derive a stable string ID for a raw LadybugDB node dict.
+
+    Prefers ``qualified_name`` (unique across Functions/Methods/Classes),
+    falls back to ``path`` (unique for Files/Folders), and finally ``name``.
+    """
+    return str(
+        v.get("qualified_name")
+        or v.get("path")
+        or v.get("name")
+        or id(v)
+    )
 
 
 @router.get("/graph/overview", response_model=GraphOverviewResponse)
@@ -632,17 +666,29 @@ def graph_overview(
         le=2000,
         description="Maximum number of nodes to return.",
     ),
+    rel_types: str = Query(
+        default="CALLS,IMPORTS,DEFINES_METHOD",
+        description=(
+            "Comma-separated relationship labels to include. Defaults to the "
+            "semantic subset (CALLS, IMPORTS, DEFINES_METHOD); excludes "
+            "structural containment edges (CONTAINS_FILE, CONTAINS_FOLDER, "
+            "DEFINES) which dominate a raw graph query but carry no "
+            "code-navigation signal."
+        ),
+    ),
 ) -> GraphOverviewResponse:
     """Return a compact graph (nodes + edges) for repo-wide canvas rendering.
 
-    Fetches relationships from the graph, derives stable node IDs from each
-    node's ``qname`` or ``path`` property, and caps output at ``max_nodes``.
-    Nodes with no relationships are not included (overview emphasises
-    connectivity rather than exhaustive enumeration).
+    Pulls relationships whose label matches ``rel_types`` (default: semantic
+    code-navigation edges), derives stable node IDs from each node's
+    ``qname`` or ``path`` property, and caps output at ``max_nodes``.
+    Nodes with no relationships in the requested set are not included —
+    overview emphasises connectivity rather than exhaustive enumeration.
 
     Args:
         repo: Repo slug to scope to.
         max_nodes: Cap on unique nodes included in the response.
+        rel_types: Comma-separated relationship labels to include.
 
     Returns:
         GraphOverviewResponse: Nodes, edges, and counts.
@@ -657,11 +703,28 @@ def graph_overview(
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"DB error: {exc}") from exc
 
+    # Parse rel_types — accept both list-style and comma-separated input.
+    wanted_types: set[str] = {
+        t.strip().upper() for t in rel_types.split(",") if t.strip()
+    }
+    if not wanted_types:
+        # Empty filter degenerates into "all rels" rather than "none".
+        wanted_types = set()
+
     # Fetch relationship triples.  We pull more than max_nodes worth so we
-    # can include nodes that appear only as targets.
+    # can include nodes that appear only as targets. When a rel-type filter is
+    # active, push it into Cypher so we don't pay the transport cost for
+    # rels we'll discard anyway.
     edge_limit = max_nodes * 5
-    try:
+    if wanted_types:
+        rel_pattern = "|".join(sorted(wanted_types))
+        cypher = (
+            f"MATCH (a)-[r:{rel_pattern}]->(b) "
+            f"RETURN a, r, b LIMIT {edge_limit}"
+        )
+    else:
         cypher = f"MATCH (a)-[r]->(b) RETURN a, r, b LIMIT {edge_limit}"
+    try:
         rows = _result_to_rows(conn.execute(cypher))  # type: ignore[attr-defined]
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Graph query error: {exc}") from exc
@@ -685,7 +748,7 @@ def graph_overview(
                 id=src_id,
                 label=a_raw.get("_LABEL", "Node"),
                 name=str(a_raw.get("name") or a_raw.get("path") or src_id),
-                qname=a_raw.get("qname"),
+                qname=a_raw.get("qualified_name"),
                 path=a_raw.get("path"),
             )
         if dst_id not in nodes and len(nodes) < max_nodes:
@@ -693,13 +756,16 @@ def graph_overview(
                 id=dst_id,
                 label=b_raw.get("_LABEL", "Node"),
                 name=str(b_raw.get("name") or b_raw.get("path") or dst_id),
-                qname=b_raw.get("qname"),
+                qname=b_raw.get("qualified_name"),
                 path=b_raw.get("path"),
             )
 
         # Only include edges where both endpoints are in our node set.
         if src_id in nodes and dst_id in nodes:
-            rel_type = str(r_raw.get("_TYPE", "RELATES_TO"))
+            # LadybugDB stores relationship type under ``_LABEL`` (same key
+            # as nodes) — not ``_TYPE``. Use ``_LABEL`` with a conservative
+            # fallback for rows where it's unexpectedly missing.
+            rel_type = str(r_raw.get("_LABEL", "RELATES_TO"))
             edges.append(GraphEdge(source=src_id, target=dst_id, type=rel_type))
 
     node_list = list(nodes.values())
