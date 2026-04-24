@@ -271,8 +271,16 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
 
     try:
         from codebase_rag.tools.semantic_search import semantic_code_search
-        seed_results = semantic_code_search(req.task_description, top_k=req.k)
-        seed_symbols = [r["qualified_name"] for r in seed_results]
+        # Over-fetch aggressively: fixture functions tend to have degenerate
+        # embeddings that score high for any query.  Fetch 500+ to guarantee
+        # we reach real application code below the fixture cluster.
+        seed_results = semantic_code_search(req.task_description, top_k=max(req.k * 50, 500))
+        _FIXTURE_SEGMENTS = {"fixtures", "large-file", "__fixtures__"}
+        seed_symbols = [
+            r["qualified_name"]
+            for r in seed_results
+            if not any(seg in _FIXTURE_SEGMENTS for seg in r["qualified_name"].split("."))
+        ][: req.k]
     except Exception as exc:
         raise HTTPException(
             status_code=503,

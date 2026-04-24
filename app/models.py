@@ -81,6 +81,13 @@ class IndexRequest(BaseModel):
         default=False,
         description="When true, clean the graph before re-indexing.",
     )
+    exclude_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Repo-relative path prefixes to skip during indexing (e.g. 'tests/fixtures'). "
+            "Defaults to an empty list; common fixture directories are excluded automatically."
+        ),
+    )
 
 
 class IndexAccepted(BaseModel):

@@ -333,7 +333,22 @@ def semantic_search(
         # Non-fatal — if we can't swap the path, fall back to cgr's default.
         pass
 
-    raw = _semantic_fn(q, top_k=k)
+    # Over-fetch aggressively: fixture/generated functions can have degenerate
+    # embeddings that cluster at the top regardless of the query.  Fetch 500+
+    # to guarantee we reach real application code below the fixture cluster.
+    raw = _semantic_fn(q, top_k=max(k * 50, 500))
+
+    # Post-filter: drop results from synthetic test-fixture directories so they
+    # don't crowd out real application code.  The fixture paths are excluded
+    # during indexing for new indexes; this filter handles already-indexed DBs.
+    _FIXTURE_SEGMENTS = {"fixtures", "large-file", "__fixtures__"}
+
+    def _is_fixture(sym: str) -> bool:
+        parts = sym.split(".")
+        return any(seg in _FIXTURE_SEGMENTS for seg in parts)
+
+    filtered = [r for r in raw if not _is_fixture(r["qualified_name"])]
+
     return SemanticSearchResponse(
         results=[
             SemanticResult(
@@ -341,7 +356,7 @@ def semantic_search(
                 score=r["score"],
                 type=r.get("type", ""),
             )
-            for r in raw
+            for r in filtered[:k]
         ]
     )
 

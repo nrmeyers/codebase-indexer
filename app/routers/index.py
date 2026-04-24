@@ -110,6 +110,7 @@ class _Job:
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    exclude_paths: frozenset[str] = field(default_factory=frozenset)
 
 
 # Module-level store — indexed by job_id. Single-process only.
@@ -263,7 +264,9 @@ async def _run_ingestion(job: _Job, force_reindex: bool) -> None:
     async with lock:
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, _blocking_index, job, force_reindex)
+            await loop.run_in_executor(
+                None, _blocking_index, job, force_reindex
+            )
         except _IndexCancelledError:
             # phase/error already set by the progress callback before raising.
             if job.finished_at is None:
@@ -285,6 +288,8 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
 
     Args:
         job: The job record to mutate with progress and final counts.
+            ``job.exclude_paths`` is forwarded to GraphUpdater to skip
+            synthetic test fixtures and other noise from the semantic index.
         force_reindex: When true, the graph is cleared before ingesting.
     """
     from codebase_rag.config import settings as cgr_settings
@@ -389,6 +394,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             parsers=parsers,
             queries=queries,
             progress_cb=_progress_cb,
+            exclude_paths=job.exclude_paths if job.exclude_paths else None,
         )
 
         updater.run(force=effective_force)
@@ -740,8 +746,13 @@ async def start_index(
                 ),
             )
 
+    # Merge caller-supplied exclude_paths with built-in defaults that keep
+    # synthetic test fixtures out of the semantic index.
+    _DEFAULT_EXCLUDE: frozenset[str] = frozenset({"tests/fixtures", "test/fixtures"})
+    effective_excludes = _DEFAULT_EXCLUDE | frozenset(req.exclude_paths)
+
     job_id = str(uuid.uuid4())
-    job = _Job(job_id=job_id, repo_path=str(repo_path))
+    job = _Job(job_id=job_id, repo_path=str(repo_path), exclude_paths=effective_excludes)
     _jobs[job_id] = job
 
     background_tasks.add_task(_run_ingestion, job, req.force_reindex)
