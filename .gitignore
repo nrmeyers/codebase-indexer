@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local config and secrets
+.env
+.env.local
+
+# Runtime artifacts
+.DS_Store
+*.log
+service.log
+.cgr/
+.cgr-hash-cache.json
+.planning/
+CLAUDE.md

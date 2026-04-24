@@ -1,6 +1,23 @@
-"""Code Indexer Service — FastAPI application factory."""
+"""Code Indexer Service — FastAPI application factory.
+
+This module owns the top-level FastAPI app construction for the Code Indexer
+Service. It wires routers for health checks, repository indexing, structural
+and semantic search, and the context-bundle endpoint used by TheForge's
+dev-agent.
+
+Key design decisions:
+    * A single ``create_app`` factory is exposed so the service can be
+      instantiated under tests with a fresh state and so ASGI servers can
+      import ``app`` directly (``app = create_app()`` at module scope).
+    * The application lifespan eagerly warms the LadybugDB schema so the first
+      ``/index`` call does not pay the migration cost.
+    * A generic exception handler converts any uncaught ``Exception`` into a
+      structured 500 JSON response so the service never leaks an HTML error
+      page.
+"""
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
@@ -8,28 +25,124 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .routers import context_bundle, health, index, search
+from .routers import context_bundle, explorer, github, health, index, search
+
+# Basic structured logging — without this, our logger.info/warning calls stay
+# silent under uvicorn's default handler.  Format matches uvicorn's access
+# log so mixed output stays readable.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan — run startup checks, then yield."""
-    # Warm the LadybugDB schema on startup so the first /index call is faster.
-    try:
-        from codebase_rag.services.ladybug_schema import migrate
+    """FastAPI lifespan hook — runs startup tasks then yields control.
 
-        migrate(settings.LADYBUG_DB_PATH)
-    except Exception as exc:
-        # Non-fatal — service still works; schema may already exist.
-        import logging
+    Runs the LadybugDB schema migration on process start so that the first
+    ``/index`` request does not have to pay for DDL. Schema migration is
+    idempotent (``IF NOT EXISTS`` guards), so repeat startups are safe.
 
-        logging.getLogger(__name__).warning(
-            "Schema migration warning on startup: %s", exc
-        )
+    Args:
+        app: The FastAPI application being started. Unused, but required by
+            the lifespan contract.
+
+    Yields:
+        None: Control is yielded to FastAPI once startup finishes.
+    """
+    # Ensure the per-repo DB directory exists so the first /index call isn't
+    # blocked by a "No such file or directory" from LadybugDB on a clean
+    # install.  Individual per-repo DB files are migrated by the ingestor
+    # on first use, so there's no eager schema warm-up here.
+    from pathlib import Path as _Path
+    import logging as _logging
+    import real_ladybug as _lb
+
+    db_dir = _Path(settings.LADYBUG_DB_DIR)
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    # Probe each existing DB file at startup.  A corrupt WAL or shadow file
+    # (from a SIGKILL mid-write) causes every subsequent open() call to
+    # raise "Corrupted wal file" — wipe and start fresh rather than block
+    # every index job forever.
+    _log = _logging.getLogger(__name__)
+    _healed = 0
+    _probed = 0
+    for db_file in sorted(db_dir.glob("*.db")):
+        _probed += 1
+        try:
+            _conn = _lb.Connection(_lb.Database(str(db_file)))
+            del _conn
+        except Exception as _exc:
+            _msg = str(_exc)
+            # A lock-acquisition failure means *someone else* holds the file
+            # — typically a leftover subprocess from a prior crash that
+            # hasn't exited yet, or another uvicorn on the same port.  That
+            # is NOT corruption and the DB must not be deleted.  Only treat
+            # WAL / shadow / schema-level failures as heal-worthy.
+            _is_lock_failure = (
+                "Could not set lock on file" in _msg
+                or "already in use" in _msg.lower()
+            )
+            if _is_lock_failure:
+                _log.warning(
+                    "DB %s is locked by another process (%s) — skipping self-heal.",
+                    db_file.name, _exc,
+                )
+                continue
+            _log.warning(
+                "DB %s appears corrupt (%s) — removing stale files for clean restart.",
+                db_file.name, _exc,
+            )
+            _healed += 1
+            for _ext in ("", ".wal", ".shadow"):
+                _stale = db_file.with_suffix(".db" + _ext)
+                if _stale.exists():
+                    _stale.unlink(missing_ok=True)
+
+    _log.info(
+        "Startup DB probe: %d repo(s) checked, %d self-healed.", _probed, _healed,
+    )
+
+    # Orphan-job sweep + stale lock cleanup so a prior crash doesn't leave
+    # the in-memory state wedged.
+    from .routers.index import sweep_orphan_jobs, cleanup_stale_locks
+    swept = sweep_orphan_jobs()
+    stale = cleanup_stale_locks()
+    if swept or stale:
+        _log.info("Reaped %d orphan job(s) and %d stale lock(s).", swept, stale)
+
+    # Rehydrate the in-memory `indexed_repo_paths` map from the per-repo
+    # sidecar JSON files left behind by past index jobs.  Without this,
+    # every restart loses the repo→abs-path mapping and callers (the
+    # orchestrator's chat flow, /context-bundle validation) can no longer
+    # resolve a repo slug back to a path until a fresh index runs.
+    from .routers.index import indexed_repo_paths, indexed_repos, _read_meta
+    for db_file in sorted(db_dir.glob("*.db")):
+        _slug = db_file.stem  # "TheForge.db" → "TheForge"
+        try:
+            _meta = _read_meta(_slug)
+        except Exception:
+            _meta = {}
+        _root = _meta.get("root_path")
+        if _root and _Path(_root).exists():
+            indexed_repo_paths[_slug] = _root
+            indexed_repos.add(_slug)
+    _log.info(
+        "Rehydrated %d repo path(s) from sidecars.", len(indexed_repo_paths),
+    )
+
     yield
 
 
 def create_app() -> FastAPI:
+    """Construct and return a fully-wired FastAPI application.
+
+    Returns:
+        FastAPI: An app with all routers registered and a catch-all exception
+        handler installed.
+    """
     app = FastAPI(
         title="Code Indexer Service",
         description=(
@@ -44,9 +157,14 @@ def create_app() -> FastAPI:
     app.include_router(index.router, tags=["index"])
     app.include_router(search.router, tags=["search"])
     app.include_router(context_bundle.router, tags=["context"])
+    app.include_router(explorer.router, tags=["explorer"])
+    app.include_router(github.router, tags=["github"])
 
     @app.exception_handler(Exception)
     async def _generic_error(request, exc):  # type: ignore[override]
+        # Catch-all fallback so any unhandled error surfaces as JSON rather
+        # than a default HTML error page. Specific handlers/HTTPException
+        # cases are still honored by FastAPI's own exception pipeline.
         return JSONResponse(
             status_code=500,
             content={"detail": str(exc)},
@@ -55,4 +173,5 @@ def create_app() -> FastAPI:
     return app
 
 
+# Module-level app instance used by ASGI servers (e.g. `uvicorn app.main:app`).
 app = create_app()
