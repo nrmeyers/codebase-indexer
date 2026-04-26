@@ -90,6 +90,21 @@ class Settings(BaseSettings):
     GITHUB_TOKEN: str = ""
     GH_TOKEN: str = ""
 
+    # Comma-separated list of owners (users or orgs) that are permitted to
+    # be cloned and indexed.  Empty list disables the guard (all owners
+    # allowed) — set this to e.g. ``"navistone"`` in production to make
+    # sure the indexer can never be tricked into cloning random public
+    # repos.  Owners are compared case-insensitively.
+    GITHUB_ALLOWED_OWNERS: str = "navistone"
+
+    @property
+    def github_allowed_owners(self) -> list[str]:
+        """Parsed allowlist as a lower-cased list. Empty = no restriction."""
+        raw = (self.GITHUB_ALLOWED_OWNERS or "").strip()
+        if not raw:
+            return []
+        return [o.strip().lower() for o in raw.split(",") if o.strip()]
+
 
 # Module-level singleton — import this rather than re-instantiating Settings.
 settings = Settings()

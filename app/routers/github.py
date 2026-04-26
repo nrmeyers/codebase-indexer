@@ -92,6 +92,36 @@ class GitHubIndexRequest(BaseModel):
 _GITHUB_API = "https://api.github.com"
 
 
+def _enforce_owner_allowlist(full_name: str) -> None:
+    """Reject ``full_name`` whose owner isn't in the configured allowlist.
+
+    The allowlist defends against an attacker (or a stray UI bug) that
+    POSTs ``full_name="random/repo"`` and tricks the indexer into cloning
+    arbitrary public repos onto local disk.  When ``GITHUB_ALLOWED_OWNERS``
+    is empty the guard is a no-op so dev installs aren't gated.
+
+    Args:
+        full_name: ``owner/repo`` identifier from the request body.
+
+    Raises:
+        HTTPException: 422 when ``full_name`` is malformed; 403 when the
+        owner is not in the allowlist.
+    """
+    owner, _, name = full_name.partition("/")
+    if not owner or not name:
+        raise HTTPException(status_code=422, detail=f"Invalid full_name: {full_name}")
+
+    allowed = settings.github_allowed_owners
+    if allowed and owner.lower() not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Owner '{owner}' is not in GITHUB_ALLOWED_OWNERS "
+                f"({', '.join(allowed)}). Refusing to clone."
+            ),
+        )
+
+
 def _github_token() -> str | None:
     """Return the GitHub PAT for upstream API calls, or None.
 
@@ -313,6 +343,12 @@ async def list_repos(
             )
         )
 
+    # Apply owner allowlist before any text filter — UI never sees repos it
+    # couldn't clone anyway, and the response shrinks for big org lists.
+    allowed = settings.github_allowed_owners
+    if allowed:
+        repos = [r for r in repos if r.owner.lower() in allowed]
+
     if q:
         needle = q.lower()
         repos = [r for r in repos if needle in r.full_name.lower()]
@@ -411,6 +447,10 @@ async def index_github_repo(
     Returns:
         IndexAccepted: Job id the UI polls via ``/index/{job_id}/status``.
     """
+    # Reject disallowed owners before doing any work — saves a network round-trip
+    # and prevents the clone token from being passed to a URL we don't trust.
+    _enforce_owner_allowlist(req.full_name)
+
     # Clone runs off-loop because subprocess.run blocks; keep the HTTP handler
     # snappy so the UI doesn't see a multi-second hang before the job id comes back.
     token = _github_token()
