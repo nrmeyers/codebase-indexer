@@ -67,6 +67,33 @@ class GitHubReposResponse(BaseModel):
     total: int
 
 
+class GitHubOrg(BaseModel):
+    """Minimal org record returned by ``GET /github/orgs``.
+
+    The Settings UI uses these to render the allowlist editor as a
+    checkbox list with the user's actual orgs (instead of forcing
+    them to type ``navistone`` from memory).
+    """
+
+    login: str = Field(description="Org slug, e.g. 'navistone'")
+    description: str | None = None
+    avatar_url: str | None = None
+    allowlisted: bool = Field(
+        default=False,
+        description="True when this org is currently in GITHUB_ALLOWED_OWNERS",
+    )
+
+
+class GitHubOrgsResponse(BaseModel):
+    """Envelope for ``GET /github/orgs``."""
+
+    orgs: list[GitHubOrg]
+    total: int
+    allowlist: list[str] = Field(
+        description="Currently configured allowlist (lower-cased) for cross-checking",
+    )
+
+
 class GitHubIndexRequest(BaseModel):
     """Body for ``POST /github/index``."""
 
@@ -282,6 +309,60 @@ async def github_status() -> GitHubStatusResponse:
             rate_limit=None,
             message=f"Could not reach api.github.com: {exc}",
         )
+
+
+# ---------------------------------------------------------------------------
+# GET /github/orgs
+# ---------------------------------------------------------------------------
+
+
+@router.get("/orgs", response_model=GitHubOrgsResponse)
+async def list_orgs() -> GitHubOrgsResponse:
+    """List orgs the authenticated user belongs to.
+
+    Powers the Settings allowlist editor: instead of asking the user to
+    type org names into a CSV string, the UI fetches this list and
+    renders checkboxes pre-checked against the current
+    ``GITHUB_ALLOWED_OWNERS`` setting.
+
+    Returns:
+        GitHubOrgsResponse: Each org includes an ``allowlisted`` flag so
+        the UI doesn't have to do its own case-insensitive comparison.
+
+    Raises:
+        HTTPException: 401 when no token is configured (the response
+        already has a richer status path via ``/github/status``, but a
+        plain 401 here keeps the contract obvious for direct callers).
+    """
+    allowed = settings.github_allowed_owners
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # ``/user/orgs`` requires the ``read:org`` scope; without it
+        # GitHub returns an empty list rather than a 403, which is fine
+        # — the UI just shows "no orgs found, add read:org scope".
+        raw = await _gh_get(client, "/user/orgs", params={"per_page": 100})
+
+    orgs_in: list[dict] = list(raw) if isinstance(raw, list) else []
+
+    # Build the response with a stable (alphabetised) ordering and an
+    # explicit allowlisted flag so the UI doesn't have to do the
+    # case-insensitive comparison itself.
+    orgs: list[GitHubOrg] = []
+    for o in orgs_in:
+        login = o.get("login")
+        if not login:
+            continue
+        orgs.append(
+            GitHubOrg(
+                login=login,
+                description=o.get("description"),
+                avatar_url=o.get("avatar_url"),
+                allowlisted=login.lower() in allowed,
+            )
+        )
+
+    orgs.sort(key=lambda o: o.login.lower())
+    return GitHubOrgsResponse(orgs=orgs, total=len(orgs), allowlist=allowed)
 
 
 # ---------------------------------------------------------------------------
