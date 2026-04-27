@@ -77,15 +77,50 @@ def test_structural_search_appends_limit() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_semantic_search_returns_results() -> None:
-    # Patch _semantic_fn directly — the module-level cache stores a function
-    # reference after first call, so patching the module attr alone is unreliable.
-    mock_results = [
-        {"qualified_name": "mymod.foo", "score": 0.95, "node_id": "mymod.foo", "name": "foo", "type": "Function"},
-        {"qualified_name": "mymod.bar", "score": 0.80, "node_id": "mymod.bar", "name": "bar", "type": "Method"},
+def _fake_search_result(qn: str, score: float):
+    """Lightweight stand-in for ``codebase_rag.storage.vector_store.SearchResult``.
+
+    The router only reads ``.qualified_name`` and ``.score`` (it mutates
+    ``.score`` during PageRank fusion), so a SimpleNamespace works without
+    importing the real dataclass.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        qualified_name=qn,
+        file_path="",
+        start_line=0,
+        end_line=0,
+        score=score,
+    )
+
+
+def test_semantic_search_returns_results(tmp_path) -> None:
+    # The semantic endpoint pipeline:  embed_query -> open_or_create(.duck)
+    # -> search_similar -> read_centrality -> response.  Mock all four,
+    # plus point the .duck path at a real (but empty) file so the
+    # Path.exists() guard passes.
+    duck = tmp_path / "fake.duck"
+    duck.write_bytes(b"")  # exists() must return True; contents unused
+
+    fake_results = [
+        _fake_search_result("mymod.foo", 0.95),
+        _fake_search_result("mymod.bar", 0.80),
     ]
-    with patch("app.routers.search._semantic_fn", lambda q, top_k=10: mock_results):
-        resp = client.get("/search/semantic", params={"q": "find all functions", "k": 5})
+
+    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
+         patch("app.routers.search._embed_unavailable", False), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)), \
+         patch("codebase_rag.storage.vector_store.open_or_create",
+               return_value=MagicMock()), \
+         patch("codebase_rag.storage.vector_store.search_similar",
+               return_value=fake_results), \
+         patch("codebase_rag.storage.vector_store.read_centrality",
+               return_value={}):
+        resp = client.get(
+            "/search/semantic",
+            params={"q": "find all functions", "k": 5, "repo": "fake"},
+        )
     assert resp.status_code == 200
     results = resp.json()["results"]
     assert len(results) == 2
@@ -93,11 +128,23 @@ def test_semantic_search_returns_results() -> None:
     assert results[0]["score"] == pytest.approx(0.95)
 
 
-def test_semantic_search_empty() -> None:
-    # Patch _semantic_fn directly — the module-level cache stores a function
-    # reference after first call, so patching the module attr alone is unreliable.
-    with patch("app.routers.search._semantic_fn", lambda q, top_k=10: []):
-        resp = client.get("/search/semantic", params={"q": "nothing"})
+def test_semantic_search_empty(tmp_path) -> None:
+    duck = tmp_path / "fake.duck"
+    duck.write_bytes(b"")
+
+    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
+         patch("app.routers.search._embed_unavailable", False), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)), \
+         patch("codebase_rag.storage.vector_store.open_or_create",
+               return_value=MagicMock()), \
+         patch("codebase_rag.storage.vector_store.search_similar",
+               return_value=[]), \
+         patch("codebase_rag.storage.vector_store.read_centrality",
+               return_value={}):
+        resp = client.get(
+            "/search/semantic", params={"q": "nothing", "repo": "fake"}
+        )
     assert resp.status_code == 200
     assert resp.json()["results"] == []
 
@@ -138,37 +185,37 @@ def test_symbol_lookup_not_found() -> None:
 
 
 def test_semantic_search_503_when_import_fails() -> None:
-    """When codebase_rag.tools.semantic_search cannot be imported (e.g. torch
-    missing), the endpoint must return 503 with a valid JSON body — not 500.
+    """When codebase_rag.embedder cannot be imported (e.g. torch missing),
+    the endpoint must return 503 with a valid JSON body — not 500.
 
     Strategy: set sys.modules entry to None which makes Python raise
-    ImportError on ``from codebase_rag.tools.semantic_search import …``.
+    ImportError on ``from codebase_rag.embedder import embed_query``.
     """
     import sys
     import app.routers.search as _search_mod
 
     # Reset cached state so the lazy-load branch is taken.
-    original_fn = _search_mod._semantic_fn
-    original_unavail = _search_mod._semantic_unavailable
-    _search_mod._semantic_fn = None
-    _search_mod._semantic_unavailable = False
+    original_fn = _search_mod._embed_fn
+    original_unavail = _search_mod._embed_unavailable
+    _search_mod._embed_fn = None
+    _search_mod._embed_unavailable = False
 
     # Save the real module so we can restore it after the test.
-    real_mod = sys.modules.get("codebase_rag.tools.semantic_search")
+    real_mod = sys.modules.get("codebase_rag.embedder")
 
     try:
         # Setting sys.modules[name] = None causes `from name import …` to
         # raise ImportError — this simulates a missing ML dependency.
-        sys.modules["codebase_rag.tools.semantic_search"] = None  # type: ignore[assignment]
+        sys.modules["codebase_rag.embedder"] = None  # type: ignore[assignment]
         resp = client.get("/search/semantic", params={"q": "retry http"})
     finally:
         # Restore everything regardless of outcome.
-        _search_mod._semantic_fn = original_fn
-        _search_mod._semantic_unavailable = original_unavail
+        _search_mod._embed_fn = original_fn
+        _search_mod._embed_unavailable = original_unavail
         if real_mod is not None:
-            sys.modules["codebase_rag.tools.semantic_search"] = real_mod
+            sys.modules["codebase_rag.embedder"] = real_mod
         else:
-            sys.modules.pop("codebase_rag.tools.semantic_search", None)
+            sys.modules.pop("codebase_rag.embedder", None)
 
     assert resp.status_code == 503
     body = resp.json()
@@ -178,22 +225,22 @@ def test_semantic_search_503_when_import_fails() -> None:
 
 
 def test_semantic_search_503_uses_fast_fail_after_first_import_failure() -> None:
-    """Once the import fails, _semantic_unavailable=True and subsequent calls
+    """Once the import fails, _embed_unavailable=True and subsequent calls
     skip the import attempt and return 503 immediately."""
     import app.routers.search as _search_mod
 
-    original_fn = _search_mod._semantic_fn
-    original_unavail = _search_mod._semantic_unavailable
+    original_fn = _search_mod._embed_fn
+    original_unavail = _search_mod._embed_unavailable
 
     # Simulate a prior import failure having set the flag
-    _search_mod._semantic_fn = None
-    _search_mod._semantic_unavailable = True
+    _search_mod._embed_fn = None
+    _search_mod._embed_unavailable = True
 
     try:
         resp = client.get("/search/semantic", params={"q": "anything"})
     finally:
-        _search_mod._semantic_fn = original_fn
-        _search_mod._semantic_unavailable = original_unavail
+        _search_mod._embed_fn = original_fn
+        _search_mod._embed_unavailable = original_unavail
 
     assert resp.status_code == 503
     body = resp.json()

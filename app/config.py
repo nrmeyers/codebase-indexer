@@ -75,6 +75,21 @@ class Settings(BaseSettings):
         """
         return str(Path(self.LADYBUG_DB_DIR) / f"{slugify_repo(repo_name)}.db")
 
+    def vec_db_path_for_repo(self, repo_name: str) -> str:
+        """Return the per-repo DuckDB vector-store file path for ``repo_name``.
+
+        The vector store lives next to the LadybugDB file with a ``.duck``
+        suffix (v5.3 §6.5), holding ``FLOAT[768]`` embeddings, per-repo
+        metadata, and PageRank centrality scores.
+
+        Args:
+            repo_name: Human-readable repo name — usually ``Path(repo_path).name``.
+
+        Returns:
+            str: Absolute or relative path to the repo's ``.duck`` file.
+        """
+        return str(Path(self.LADYBUG_DB_DIR) / f"{slugify_repo(repo_name)}.duck")
+
     # --- Default repo to index when none is provided ---
     TARGET_REPO_PATH: str = "."
 

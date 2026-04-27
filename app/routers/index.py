@@ -12,7 +12,7 @@ API responsive, this router accepts indexing requests asynchronously:
 Every index run executes two passes:
 
     Pass 1–3 (structural): tree-sitter parse → LadybugDB graph (nodes + rels)
-    Pass 4   (embedding):  UniXcoder model → numpy .npy vector store
+    Pass 4   (embedding):  CodeRankEmbed model → DuckDB (.duck, v5.3 §6.5)
 
 Embeddings are **required** — if pass 4 fails the job is marked ``failed``
 and the caller must re-index.  Structural graph data is preserved on disk so
@@ -26,7 +26,6 @@ the store to Redis or LadybugDB itself.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import subprocess
 import sys
@@ -139,48 +138,41 @@ indexed_repo_paths: dict[str, str] = {}
 _last_indexed_cache: dict[str, float] = {}
 
 
-def _meta_path_for_repo(repo_name: str) -> Path:
-    """Return the path to the sidecar metadata JSON for ``repo_name``.
-
-    The sidecar lives next to the DB file (``.cgr/repos/{slug}.meta.json``).
-    Using a sidecar instead of writing the timestamp onto the Project node
-    sidesteps LadybugDB's typed schema — adding a new column would require
-    a migration, while JSON on disk is cheap, observable, and survives
-    restarts.
-    """
-    db_path = Path(settings.db_path_for_repo(repo_name))
-    return db_path.with_suffix(".meta.json")
-
-
 def _write_meta(repo_name: str, **fields: Any) -> None:
-    """Merge ``fields`` into the per-repo sidecar JSON.
+    """Upsert ``fields`` into the per-repo DuckDB ``repo_metadata`` table.
 
-    Atomic write via tempfile + rename so a mid-write SIGKILL leaves the
-    old sidecar intact.  Missing / corrupt sidecars are treated as empty.
+    Opens the ``.duck`` file (creating it if absent), writes all key-value
+    pairs atomically, and closes the connection.  Replaces the old JSON
+    sidecar approach — DuckDB transactions provide the same atomic-write
+    guarantee.
     """
-    meta_path = _meta_path_for_repo(repo_name)
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    from codebase_rag.storage.vector_store import open_or_create, write_metadata
 
-    current: dict[str, Any] = {}
-    if meta_path.exists():
-        try:
-            current = json.loads(meta_path.read_text())
-        except Exception:
-            current = {}
-
-    current.update(fields)
-    tmp = meta_path.with_suffix(".meta.json.tmp")
-    tmp.write_text(json.dumps(current, indent=2))
-    tmp.replace(meta_path)  # atomic rename on the same filesystem
+    vec_path = settings.vec_db_path_for_repo(repo_name)
+    try:
+        conn = open_or_create(vec_path)
+        write_metadata(conn, **{k: str(v) for k, v in fields.items()})
+        conn.close()
+    except Exception:
+        pass  # metadata write is best-effort; never fail the index job
 
 
 def _read_meta(repo_name: str) -> dict[str, Any]:
-    """Return the sidecar JSON dict for ``repo_name`` (empty on miss/error)."""
-    meta_path = _meta_path_for_repo(repo_name)
-    if not meta_path.exists():
+    """Return all metadata for ``repo_name`` from the DuckDB ``repo_metadata`` table.
+
+    Falls back to an empty dict when the ``.duck`` file does not yet exist
+    (e.g. before the first successful index) or when DuckDB is unavailable.
+    """
+    from codebase_rag.storage.vector_store import open_or_create, read_all_metadata
+
+    vec_path = settings.vec_db_path_for_repo(repo_name)
+    if not Path(vec_path).exists():
         return {}
     try:
-        return json.loads(meta_path.read_text())
+        conn = open_or_create(vec_path)
+        meta = read_all_metadata(conn)
+        conn.close()
+        return meta
     except Exception:
         return {}
 
@@ -188,9 +180,8 @@ def _read_meta(repo_name: str) -> dict[str, Any]:
 def _get_last_indexed_at(repo_name: str) -> float | None:
     """Return the last successful-index timestamp for ``repo_name``.
 
-    Checks in-memory cache first, then the sidecar JSON file.  Any error
-    (missing file, unreadable JSON) returns None — callers fall back to
-    the DB file's mtime.
+    Checks the in-memory cache first, then the ``repo_metadata`` SQLite table.
+    Returns None on any miss or parse failure.
     """
     if repo_name in _last_indexed_cache:
         return _last_indexed_cache[repo_name]
@@ -430,6 +421,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             progress_cb=_progress_cb,
             exclude_paths=merged_excludes,
             unignore_paths=unignore_paths,
+            skip_embeddings=True,  # embeddings handled by DuckDB subprocess below
         )
 
         updater.run(force=effective_force)
@@ -497,11 +489,10 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         repo.name,
         last_indexed_at=_now,
         root_path=str(repo),
-        node_count=job.node_count,
-        rel_count=job.rel_count,
-        job_id=job.job_id,
-        force_reindex=force_reindex,
-        effective_force=effective_force,
+        node_count=str(job.node_count),
+        rel_count=str(job.rel_count),
+        last_job_id=job.job_id,
+        schema_version="1.5",
     )
     _last_indexed_cache[repo.name] = _now
 
@@ -522,7 +513,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # -------------------------------------------------------------------
     # Pass 4: Embedding generation (subprocess-isolated, REQUIRED)
     # -------------------------------------------------------------------
-    # Load the UniXcoder model (~400 MB) and embed every Function/Method
+    # Load the CodeRankEmbed model (~550 MB) and embed every Function/Method
     # source code so that semantic / natural-language search works.
     # Embeddings are NOT optional — if this pass fails the job is marked
     # "failed" so the caller knows to re-index rather than silently
@@ -547,6 +538,30 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
 
     _blocking_embed(embed_job)  # raises on failure → job marked "failed"
     job.embedded_count = embed_job.embedded_count
+
+    # --- Plan J: PageRank centrality (best-effort, never fail the job) ---
+    # Clear before write so qualified names from a previous indexing run don't
+    # linger after files are deleted upstream.
+    try:
+        from codebase_rag.storage.centrality import compute_pagerank
+        from codebase_rag.storage.vector_store import (
+            clear_centrality,
+            open_or_create,
+            write_centrality,
+        )
+
+        pr_scores = compute_pagerank(repo_db_path)
+        if pr_scores:
+            _vec_path_pr = settings.vec_db_path_for_repo(job.repo_path and Path(job.repo_path).name or repo.name)
+            _vec_conn_pr = open_or_create(_vec_path_pr)
+            try:
+                clear_centrality(_vec_conn_pr)
+                write_centrality(_vec_conn_pr, pr_scores)
+            finally:
+                _vec_conn_pr.close()
+            logger.info("pagerank.computed scores=%d", len(pr_scores))
+    except Exception as exc:
+        logger.warning("pagerank.failed err=%s", exc)
 
     job.progress_pct = 100.0
     job.status = "done"
@@ -608,44 +623,133 @@ def _blocking_embed(job: _EmbedJob) -> None:
     repo_path_str = job.repo_path or ""
 
     # Driver runs the embedding pass in isolation. It:
-    #   1. Opens the existing DB (no structural re-parse)
-    #   2. Loads the UniXcoder model once
-    #   3. Embeds every Function/Method that has source_code
-    #   4. Writes Embedding nodes to the DB
+    #   1. Opens the existing LadybugDB read-only to query Function/Method nodes
+    #   2. Loads the CodeRankEmbed model once in-process
+    #   3. Embeds every Function/Method that has source code on disk
+    #   4. Writes rows to the per-repo .duck file (DuckDB FLOAT[768])
     # Running in a subprocess means an OOM kill doesn't affect uvicorn.
+    vec_db_path = settings.vec_db_path_for_repo(job.repo_name)
     driver = f"""
-import os, sys
+import sys
+import time
 from pathlib import Path
 
-os.environ["LADYBUG_DB_PATH"] = {repr(repo_db_path)}
-os.environ["SKIP_EMBEDDINGS"] = "false"
+import real_ladybug as lb
+from codebase_rag.embedder import embed_code_batch
+from codebase_rag.storage.vector_store import (
+    EmbeddingRow,
+    bulk_insert,
+    open_or_create,
+    write_metadata,
+)
+from codebase_rag.storage.docstring_format import format_docstring
 
-from codebase_rag.config import settings as s
-s.LADYBUG_DB_PATH = {repr(repo_db_path)}
-s.SKIP_EMBEDDINGS = False
+# Open LadybugDB read-only to query symbol locations
+_db = lb.Database({repr(repo_db_path)})
+_conn_lb = lb.Connection(_db)
 
-from codebase_rag.services.ladybug_ingestor import LadybugIngestor
-from codebase_rag.graph_updater import GraphUpdater
-from codebase_rag.parser_loader import load_parsers
-from codebase_rag.vector_store import flush_embeddings
+_cypher = '''
+MATCH (m:Module)-[:DEFINES]->(n)
+WHERE (n:Function OR n:Method)
+OPTIONAL MATCH ()-[:CALLS]->(n)
+WITH m, n, count(*) AS caller_count, labels(n)[0] AS sym_type
+RETURN n.qualified_name AS qualified_name,
+       n.start_line     AS start_line,
+       n.end_line       AS end_line,
+       m.path           AS rel_path,
+       n.docstring      AS docstring,
+       sym_type         AS symbol_type,
+       caller_count     AS caller_count
+'''
+_result = _conn_lb.execute(_cypher)
+_col_names = _result.get_column_names()
+_rows = []
+while _result.has_next():
+    _raw = _result.get_next()
+    _rows.append(dict(zip(_col_names, _raw)))
 
-parsers, queries = load_parsers()
-repo_path = Path({repr(repo_path_str)}) if {repr(repo_path_str)} else Path.cwd()
+_conn_lb.close()
+del _conn_lb, _db
 
-with LadybugIngestor(db_path={repr(repo_db_path)}, batch_size=50) as ingestor:
-    updater = GraphUpdater(
-        ingestor=ingestor,
-        repo_path=repo_path,
-        parsers=parsers,
-        queries=queries,
+_root_path = {repr(repo_path_str)}
+
+# Open (or create) the DuckDB vector store (.duck)
+_vec_conn = open_or_create({repr(vec_db_path)})
+
+_BATCH = 50
+_embedded_count = 0
+_batch_texts: list[str] = []
+_batch_meta: list[tuple[str, str, int, int, str]] = []
+
+for _row in _rows:
+    _qname = _row.get("qualified_name")
+    _start  = _row.get("start_line")
+    _end    = _row.get("end_line")
+    _rel    = _row.get("rel_path") or ""
+    _doc    = _row.get("docstring") or ""
+    _stype  = _row.get("symbol_type") or "Function"
+    _callers = int(_row.get("caller_count") or 0)
+
+    if not _qname or _start is None or _end is None or not _rel:
+        continue
+
+    _abs = _rel if Path(_rel).is_absolute() else (
+        str(Path(_root_path) / _rel) if _root_path else _rel
     )
-    updater._generate_semantic_embeddings()
 
-# flush_embeddings is also called inside _generate_semantic_embeddings, but
-# calling it again here is a no-op when _pending is already clear — acts as
-# a safety net in case the ingestor path differs from the settings default.
-flush_embeddings(db_path={repr(repo_db_path)})
+    try:
+        _lines = Path(_abs).read_text(encoding="utf-8", errors="replace").splitlines()
+        _src = "\\n".join(_lines[max(0, int(_start) - 1):int(_end)])
+        if not _src.strip():
+            continue
+    except Exception:
+        continue
 
+    _header_parts = [f"# {_stype}: {_qname}"]
+    _mod_path = ".".join(_qname.split(".")[:-1])
+    if _mod_path:
+        _header_parts.append(f"# Module: {_mod_path}")
+    if _callers > 0:
+        _header_parts.append(f"# Callers: {_callers}")
+    _header_parts.append("# ---")
+    _formatted_doc = format_docstring(_doc)
+    if _formatted_doc:
+        _header_parts.append(_formatted_doc)
+    _header_parts.append(_src)
+    _embed_text = "\\n".join(_header_parts)
+    _batch_texts.append(_embed_text)
+    _batch_meta.append((_qname, _abs, int(_start), int(_end), _stype))
+
+    if len(_batch_texts) >= _BATCH:
+        _embs = embed_code_batch(_batch_texts)
+        _insert = [
+            EmbeddingRow(
+                qualified_name=_m[0], embedding=_e,
+                file_path=_m[1], start_line=_m[2], end_line=_m[3],
+                symbol_type=_m[4],
+            )
+            for _m, _e in zip(_batch_meta, _embs)
+        ]
+        bulk_insert(_vec_conn, _insert)
+        _embedded_count += len(_insert)
+        _batch_texts = []
+        _batch_meta = []
+
+if _batch_texts:
+    _embs = embed_code_batch(_batch_texts)
+    _insert = [
+        EmbeddingRow(
+            qualified_name=_m[0], embedding=_e,
+            file_path=_m[1], start_line=_m[2], end_line=_m[3],
+            symbol_type=_m[4],
+        )
+        for _m, _e in zip(_batch_meta, _embs)
+    ]
+    bulk_insert(_vec_conn, _insert)
+    _embedded_count += len(_insert)
+
+_vec_conn.close()
+print(f"Embedded {{_embedded_count}}")
 print("EMBED_DONE")
 """
 
@@ -922,7 +1026,7 @@ async def start_embed(
 ) -> EmbedAccepted:
     """Kick off semantic embedding for an already-indexed repository.
 
-    Embedding generation loads the UniXcoder model (~400 MB) and is
+    Embedding generation loads the CodeRankEmbed model (~550 MB) and is
     intentionally separated from the structural indexing pass so that it
     can be triggered on demand and run in an isolated subprocess (preventing
     an OOM from killing the main uvicorn process).
@@ -1131,15 +1235,21 @@ def repo_stats(repo: str) -> RepoStatsResponse:
                 continue
 
         try:
-            # "has_embeddings" is best-effort — check for the numpy sidecar
-            # written by the embedding pass (avoids any LadybugDB VECTOR dep).
-            _npy = Path(db_path).with_suffix(".embeddings.npy")
-            _idx = Path(db_path).with_suffix(".embeddings_idx.json")
-            has_embeddings = _npy.exists() and _npy.stat().st_size > 0
-            if has_embeddings and _idx.exists():
-                import json as _json
+            # "has_embeddings" is best-effort — check the DuckDB vector store
+            # written by the embedding subprocess.
+            _vec_path = Path(settings.vec_db_path_for_repo(repo))
+            has_embeddings = _vec_path.exists() and _vec_path.stat().st_size > 0
+            if has_embeddings:
                 try:
-                    _embedding_count = len(_json.loads(_idx.read_text()))
+                    from codebase_rag.storage.vector_store import (
+                        open_or_create,
+                        row_count,
+                    )
+                    _vec_conn = open_or_create(str(_vec_path))
+                    _embedding_count = row_count(_vec_conn)
+                    _vec_conn.close()
+                    if not _embedding_count:
+                        _embedding_count = None
                 except Exception:
                     _embedding_count = None
             else:
@@ -1250,14 +1360,23 @@ def delete_index(repo: str) -> DeleteIndexResponse:
 
     removed: list[str] = []
     try:
-        # Remove primary DB file + WAL/shadow sidecars + metadata JSON.
+        # Remove primary DB file + WAL/shadow sidecars + DuckDB vector store.
         # ``missing_ok`` so partial cleanup (only .db present, no .wal) still
         # succeeds rather than leaving orphan files behind on retry.
-        for ext in (".db", ".db.wal", ".db.shadow", ".meta.json", ".embeddings.npy", ".embeddings_idx.json"):
-            sidecar = p.with_suffix(ext) if ext != ".db" else p
-            if sidecar.exists():
-                sidecar.unlink(missing_ok=True)
-                removed.append(str(sidecar))
+        vec_p = Path(settings.vec_db_path_for_repo(repo))
+        # DuckDB writes a `.wal` sidecar next to the main file during writes;
+        # remove both so a future re-index starts clean.
+        vec_wal = vec_p.with_name(vec_p.name + ".wal")
+        for target in (
+            p,
+            p.with_suffix(".db.wal"),
+            p.with_suffix(".db.shadow"),
+            vec_p,
+            vec_wal,
+        ):
+            if target.exists():
+                target.unlink(missing_ok=True)
+                removed.append(str(target))
     except Exception as exc:
         raise HTTPException(
             status_code=503,

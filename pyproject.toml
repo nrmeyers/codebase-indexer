@@ -15,8 +15,20 @@ dependencies = [
     # Semantic search stack — required for /search/semantic and /context-bundle
     # to return populated results.  UniXcoder runs on CPU via torch; transformers
     # ships the tokenizer + model loader.  ~500MB installed footprint, one-time.
+    # DuckDB v5.3 §6.5: per-repo .duck files with FLOAT[768] + array_cosine_distance.
+    "duckdb>=1.1.0",
+    "bm25s>=0.2.13",
+    # Plan G + J: structured docstring extraction + PageRank centrality.
+    # Both modules live in code-graph-rag/codebase_rag/storage/ and are
+    # imported at runtime by app/routers/index.py and search.py — declare
+    # them here so they are present without needing the [semantic] extra
+    # of the editable code-graph-rag dependency.
+    "docstring-parser>=0.16",
+    "networkx>=3.2",
     "torch>=2.6.0",
     "transformers>=4.0.0",
+    # Plan F: CodeRankEmbed (nomic-ai/CodeRankEmbed) requires einops at model load time
+    "einops>=0.7.0",
     "tree-sitter-javascript>=0.23.1",
     "tree-sitter-typescript>=0.23.2",
     "tree-sitter-c-sharp>=0.23.5",
@@ -33,7 +45,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.uv.sources]
-code-graph-rag = { path = "/Users/zacharymatthews/code-graph-rag", editable = true }
+code-graph-rag = { path = "../code-graph-rag", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

@@ -3,12 +3,14 @@
 Three complementary search surfaces against LadybugDB:
 
 * ``/search/structural`` — raw Cypher passthrough for graph traversals.
-* ``/search/semantic``  — numpy cosine-similarity search over function/method
-  embeddings stored in per-repo ``.embeddings.npy`` files.
-* ``/search/symbol``    — exact-name lookup returning source + location.
+* ``/search/semantic``   — DuckDB ``array_cosine_distance`` similarity
+  search over function/method embeddings stored in per-repo ``.duck``
+  files (v5.3 §6.5 + §8.4).
+* ``/search/symbol``     — exact-name lookup returning source + location.
 
 Semantic search does NOT require the LadybugDB VECTOR extension — embeddings
-are stored in numpy files alongside the ``.db`` file and searched in-process.
+live in the per-repo DuckDB file (``.duck``) alongside the structural
+``.db`` file.
 """
 from __future__ import annotations
 
@@ -54,16 +56,12 @@ _WRITE_KEYWORDS = (
 )
 
 # ---------------------------------------------------------------------------
-# Semantic search import cache
+# Semantic search — lazy import cache
 # ---------------------------------------------------------------------------
-# The semantic search function lives inside codebase_rag, which may require
-# torch/transformers. We cache the result of the first import attempt so that:
-#   - A successful import is reused on every call (avoids repeated module init).
-#   - A failed import short-circuits immediately on subsequent calls instead of
-#     re-attempting the import each time (saves ~500ms per failed call on
-#     deployments without ML deps).
-_semantic_fn: Any = None          # cached callable when import succeeds
-_semantic_unavailable: bool = False  # True once import fails; never retried
+# embed_query lives in codebase_rag and requires torch/transformers.  Cache
+# the import result so subsequent calls avoid re-importing a 400 MB library.
+_embed_fn: Any = None            # cached embed_query callable
+_embed_unavailable: bool = False  # True once import fails; never retried
 
 
 # ---------------------------------------------------------------------------
@@ -290,96 +288,184 @@ def semantic_search(
 
     Args:
         q: Natural-language description (e.g. "function that retries HTTP
-            requests with exponential backoff"). Embedded via the same model
-            used at ingestion time and compared against the Embedding node
-            table.
+            requests with exponential backoff"). Embedded with CodeRankEmbed and
+            compared against the per-repo DuckDB vector store.
         k: Number of results to return (1–100).
 
     Returns:
         SemanticSearchResponse: Ranked list of qualified names with scores.
 
     Raises:
-        HTTPException: 503 when the semantic search dependency
-            (``codebase_rag.tools.semantic_search``) is not importable —
-            typically because the embedding model (torch/transformers) is
-            missing from the deployment. Subsequent calls after a failed
-            import return 503 immediately without re-attempting the import
-            (fast-fail via ``_semantic_unavailable`` flag).
+        HTTPException: 503 when torch/transformers are unavailable (first
+            import failed; fast-fail thereafter), or when no .duck file
+            exists for the requested repo.
     """
-    global _semantic_fn, _semantic_unavailable  # noqa: PLW0603
+    import re as _re
 
-    # Fast-fail path: import previously failed — don't retry.
-    if _semantic_unavailable:
+    global _embed_fn, _embed_unavailable  # noqa: PLW0603
+
+    if _embed_unavailable:
         raise HTTPException(
             status_code=503,
             detail="Semantic search unavailable (missing deps; import failed on first attempt)",
         )
 
-    # Lazy-load path: first call (or after a successful warm-up).
-    if _semantic_fn is None:
+    if _embed_fn is None:
         try:
-            from codebase_rag.tools.semantic_search import semantic_code_search  # type: ignore[import-untyped]
-            _semantic_fn = semantic_code_search
+            from codebase_rag.embedder import embed_query  # type: ignore[import-untyped]
+            _embed_fn = embed_query
         except ImportError as exc:
-            _semantic_unavailable = True
+            _embed_unavailable = True
             raise HTTPException(
                 status_code=503,
                 detail=f"Semantic search unavailable (missing deps): {exc}",
             ) from exc
 
-    # Point code-graph-rag at the right per-repo DB before the search runs —
-    # the semantic helper reads ``cgr_settings.LADYBUG_DB_PATH`` internally.
+    # Resolve the .duck path for the requested repo.
+    if repo:
+        vec_path = settings.vec_db_path_for_repo(repo)
+    else:
+        # No repo specified — find the first .duck on disk.
+        import os as _os
+        db_dir = Path(settings.LADYBUG_DB_DIR)
+        vec_path = ""
+        if db_dir.is_dir():
+            for f in sorted(db_dir.glob("*.duck")):
+                vec_path = str(f)
+                break
+        if not vec_path:
+            raise HTTPException(
+                status_code=503,
+                detail="No embedding store found. Run POST /index first.",
+            )
+
+    if not Path(vec_path).exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"No embedding store found for repo '{repo}'. Run POST /index first.",
+        )
+
     try:
-        from codebase_rag.config import settings as _cgr_settings  # type: ignore[import-untyped]
-        _cgr_settings.LADYBUG_DB_PATH = _resolve_db_path(repo)
-    except HTTPException:
-        raise
-    except Exception:
-        # Non-fatal — if we can't swap the path, fall back to cgr's default.
-        pass
+        from codebase_rag.storage.vector_store import open_or_create, search_similar  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"DuckDB vector store unavailable: {exc}",
+        ) from exc
 
-    # Over-fetch aggressively: fixture/generated/anonymous functions can have
-    # degenerate embeddings that cluster at the top regardless of the query.
-    # Fetch 500+ to guarantee we reach real application code below the
-    # degenerate cluster.
-    raw = _semantic_fn(q, top_k=max(k * 50, 500))
+    # Over-fetch to push past degenerate anonymous/fixture embeddings.
+    fetch_k = max(k * 50, 500)
 
-    # Post-filter noise:
-    #   (1) synthetic test-fixture directories — same as before
-    #   (2) anonymous inline arrows/callbacks — named `anonymous_<line>_<col>`
-    #       by the tree-sitter parser when no real name is available.  Their
-    #       bodies are typically 1-3 tokens long (e.g. `() => x`) so the
-    #       embeddings are near-uniform and score high for any query.  These
-    #       are never what a human is searching for when they type a natural-
-    #       language code question.
     _FIXTURE_SEGMENTS = {"fixtures", "large-file", "__fixtures__"}
-    import re as _re
     _ANON_RE = _re.compile(r"^anonymous_\d+_\d+$")
 
     def _is_noise(sym: str) -> bool:
         parts = sym.split(".")
         if any(seg in _FIXTURE_SEGMENTS for seg in parts):
             return True
-        # Any segment matching the anonymous_LINE_COL pattern — usually the
-        # terminal segment, but also appears as middle segments in qualified
-        # names like `foo.anonymous_24_11.bar`.
         if any(_ANON_RE.match(seg) for seg in parts):
             return True
-        # Duplicated trailing segments (e.g. `useHook.useHook.connect.connect`)
-        # — the parser emits these for inner-scope closures and they're almost
-        # always trivial wrappers.
         if len(parts) >= 2 and parts[-1] == parts[-2]:
             return True
         return False
 
-    filtered = [r for r in raw if not _is_noise(r["qualified_name"])]
+    _BARE_FQN_RE = _re.compile(r"^[\w][\w.]*[\w]$")
 
+    # Single vec_conn spans both cosine search and PageRank centrality read —
+    # opening one DuckDB connection per query (was three) is cheaper and avoids
+    # races when the .duck is being concurrently written by an indexer job.
+    _pr_scores: dict[str, float] = {}
+    try:
+        query_embedding = _embed_fn(q)
+        vec_conn = open_or_create(vec_path)
+        try:
+            raw = search_similar(vec_conn, query_embedding, k=fetch_k)
+
+            filtered = [r for r in raw if not _is_noise(r.qualified_name)]
+
+            # Intent routing: if query looks like a bare qualified name (e.g.
+            # "myapp.utils.retry"), pin exact / prefix matches to the top.
+            _q_stripped = q.strip()
+            if _BARE_FQN_RE.match(_q_stripped) and "." in _q_stripped:
+                _exact = [r for r in filtered if r.qualified_name == _q_stripped
+                          or r.qualified_name.endswith("." + _q_stripped)
+                          or r.qualified_name.startswith(_q_stripped + ".")]
+                _rest  = [r for r in filtered if r not in _exact]
+                filtered = _exact + _rest
+
+            # --- Plan J: PageRank fusion (read-side) ---
+            # Reuse the cosine connection for the centrality read. Best-effort:
+            # any failure here is swallowed so PageRank cannot break search.
+            try:
+                from codebase_rag.storage.vector_store import read_centrality  # type: ignore[import-untyped]
+                _pr_scores = read_centrality(
+                    vec_conn, [r.qualified_name for r in filtered]
+                )
+            except Exception:
+                _pr_scores = {}
+        finally:
+            vec_conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Semantic search failed: {exc}",
+        ) from exc
+
+    # --- Plan J: PageRank fusion (apply scores) ---
+    # final = 0.7 * cosine + 0.3 * normalised_pagerank. Outside the connection
+    # block — only needs the scores dict.
+    if _pr_scores:
+        for r in filtered:
+            pr = _pr_scores.get(r.qualified_name, 0.0)
+            r.score = 0.7 * r.score + 0.3 * pr
+        filtered.sort(key=lambda r: r.score, reverse=True)
+
+    # --- Plan E: Reciprocal Rank Fusion with BM25 lexical retrieval ---
+    # Runs AFTER FQN intent pinning and AFTER PageRank fusion so exact-symbol
+    # matches stay anchored at the top while RRF blends semantic ranks
+    # (post-PageRank) with BM25 lexical ranks across the rest of the pool.
+    # K_RRF=60 is the canonical RRF constant from Cormack et al. (2009) —
+    # empirically robust across query types and the value used by Vespa,
+    # Elasticsearch's RRF retriever, and most published RAG fusion baselines.
+    try:
+        from ..services.bm25_index import bm25_service
+        bm25_results = bm25_service.search(vec_path, q, k=max(fetch_k, 100))
+        if bm25_results:
+            K_RRF = 60
+            fused: dict[str, float] = {}
+
+            # Semantic ranks — `filtered` is already in (post-PageRank) order.
+            for rank, r in enumerate(filtered, start=1):
+                fused[r.qualified_name] = (
+                    fused.get(r.qualified_name, 0.0) + 1.0 / (K_RRF + rank)
+                )
+
+            # BM25 ranks.
+            for rank, (qn, _score) in enumerate(bm25_results, start=1):
+                fused[qn] = fused.get(qn, 0.0) + 1.0 / (K_RRF + rank)
+
+            # Reorder `filtered` by fused score; only items already in the
+            # semantic candidate set are surfaced (BM25-only hits are absorbed
+            # via tie-breaking on shared symbols, not introduced as new rows).
+            order = sorted(
+                range(len(filtered)),
+                key=lambda i: fused.get(filtered[i].qualified_name, 0.0),
+                reverse=True,
+            )
+            filtered = [filtered[i] for i in order]
+    except Exception:
+        # Best-effort fusion: never fail a search because BM25 misbehaved.
+        pass
+
+    # TODO[Plan-I]: surface search_intent in response model (CI-planned)
     return SemanticSearchResponse(
         results=[
             SemanticResult(
-                symbol=r["qualified_name"],
-                score=r["score"],
-                type=r.get("type", ""),
+                symbol=r.qualified_name,
+                score=round(r.score, 4),
+                type="",
             )
             for r in filtered[:k]
         ]
