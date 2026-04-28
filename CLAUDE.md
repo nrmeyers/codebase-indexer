@@ -13,10 +13,14 @@ TheForge API (Express :3001)
 Code Indexer Service (FastAPI — this repo)
         │  Python import
         ▼
-code-graph-rag (LadybugIngestor + numpy embeddings + MCP)
+code-graph-rag (LadybugIngestor + CodeRankEmbed + MCP)
         │
-        ▼
-LadybugDB (.cgr/graph.db — embedded kuzu, no Docker)
+        ├─► LadybugDB (.cgr/repos/{slug}.db — embedded kuzu, no Docker)
+        └─► DuckDB    (.cgr/repos/{slug}.duck — FLOAT[768] embeddings,
+                       v5.3 §6.5 + §8.4)
+
+  Optional: LM Studio (localhost) — CodeRankEmbed at query time +
+  CodeRankLLM listwise rerank (?rerank=true). Opt-in via LM_STUDIO_URL.
 ```
 
 ---
@@ -45,6 +49,8 @@ LadybugDB (.cgr/graph.db — embedded kuzu, no Docker)
 | `app/routers/search.py` | `GET /search/structural|semantic|symbol`, `POST /context-bundle` |
 | `app/routers/stats.py` | `GET /stats/{repo}` |
 | `app/routers/explorer.py` | `GET /explorer/info` — LadybugDB Explorer launcher |
+| `app/services/lm_studio.py` | OpenAI-compatible adapter for local LM Studio (embed + chat) |
+| `app/services/reranker.py` | Listwise rerank via `nomic-ai/CodeRankLLM` |
 
 ---
 
