@@ -14,13 +14,18 @@ live in the per-repo DuckDB file (``.duck``) alongside the structural
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+logger = logging.getLogger(__name__)
+
 from ..config import settings
 from ..models import (
+    CentralityResponse,
+    CentralityResult,
     FileEntry,
     FileListResponse,
     GraphEdge,
@@ -283,6 +288,16 @@ def semantic_search(
         default=None,
         description="Repo slug to scope the search to. Omit for first indexed DB.",
     ),
+    rerank: bool = Query(
+        default=False,
+        description=(
+            "When true, widen the bi-encoder fetch and rerank with "
+            "CodeRankLLM via LM Studio (two-stage retrieval). Silently "
+            "no-ops when LM Studio is unavailable — the bi-encoder order "
+            "is returned unchanged so callers see no behaviour change "
+            "beyond a small fetch-time cost."
+        ),
+    ),
 ) -> SemanticSearchResponse:
     """Find the top-k most semantically similar functions/methods.
 
@@ -291,6 +306,11 @@ def semantic_search(
             requests with exponential backoff"). Embedded with CodeRankEmbed and
             compared against the per-repo DuckDB vector store.
         k: Number of results to return (1–100).
+        rerank: Opt-in two-stage retrieval. Stage 1 is the standard
+            DuckDB ``array_cosine_distance`` bi-encoder; stage 2 runs the
+            top-50 through ``nomic-ai/CodeRankLLM`` (listwise generative
+            reranker) via LM Studio. Best-effort — falls back to the
+            bi-encoder ordering when LM Studio isn't running.
 
     Returns:
         SemanticSearchResponse: Ranked list of qualified names with scores.
@@ -304,13 +324,34 @@ def semantic_search(
 
     global _embed_fn, _embed_unavailable  # noqa: PLW0603
 
-    if _embed_unavailable:
+    # Try the LM Studio path first — when LM_STUDIO_URL is set and the
+    # CodeRankEmbed model is loaded there, we get a warm in-server embed
+    # (no torch in uvicorn's process) and the same vector LSpace as the
+    # in-process embedder. Falls back transparently on any failure.
+    from ..services import lm_studio  # local import keeps cold-start cheap
+
+    def _embed_query(text: str) -> list[float]:
+        # The bi-encoder uses the asymmetric "search_query: " prefix at
+        # query time; mismatching this with the index-time prefix
+        # silently degrades recall ~15–20%, so we always pass it
+        # explicitly rather than letting the model default kick in.
+        if vec := lm_studio.embed(text, prefix="search_query: "):
+            return vec
+        if _embed_fn is None:  # pragma: no cover — guarded by outer block
+            raise RuntimeError("in-process embedder not initialised")
+        return _embed_fn(text)
+
+    # Use can_embed() (not is_available()) — LM Studio can be running with
+    # only a chat model loaded (e.g. for rerank) while CodeRankEmbed is
+    # unloaded, in which case every embed() call returns None.  Fast-fail
+    # cleanly instead of falling into the per-query error path.
+    if _embed_unavailable and not lm_studio.can_embed():
         raise HTTPException(
             status_code=503,
             detail="Semantic search unavailable (missing deps; import failed on first attempt)",
         )
 
-    if _embed_fn is None:
+    if _embed_fn is None and not lm_studio.can_embed():
         try:
             from codebase_rag.embedder import embed_query  # type: ignore[import-untyped]
             _embed_fn = embed_query
@@ -354,7 +395,13 @@ def semantic_search(
         ) from exc
 
     # Over-fetch to push past degenerate anonymous/fixture embeddings.
+    # When rerank=true, we additionally guarantee at least 50 post-noise
+    # candidates reach the reranker (Nomic's eval sweet spot for
+    # CodeRankLLM — beyond ~30 the listwise prompt grows linearly and
+    # accuracy plateaus).
     fetch_k = max(k * 50, 500)
+    if rerank:
+        fetch_k = max(fetch_k, 500)  # guarantee post-noise headroom for top-50 rerank
 
     _FIXTURE_SEGMENTS = {"fixtures", "large-file", "__fixtures__"}
     _ANON_RE = _re.compile(r"^anonymous_\d+_\d+$")
@@ -375,8 +422,9 @@ def semantic_search(
     # opening one DuckDB connection per query (was three) is cheaper and avoids
     # races when the .duck is being concurrently written by an indexer job.
     _pr_scores: dict[str, float] = {}
+    search_intent: str = "semantic"
     try:
-        query_embedding = _embed_fn(q)
+        query_embedding = _embed_query(q)
         vec_conn = open_or_create(vec_path)
         try:
             raw = search_similar(vec_conn, query_embedding, k=fetch_k)
@@ -392,6 +440,7 @@ def semantic_search(
                           or r.qualified_name.startswith(_q_stripped + ".")]
                 _rest  = [r for r in filtered if r not in _exact]
                 filtered = _exact + _rest
+                search_intent = "fqn"
 
             # --- Plan J: PageRank fusion (read-side) ---
             # Reuse the cosine connection for the centrality read. Best-effort:
@@ -459,7 +508,64 @@ def semantic_search(
         # Best-effort fusion: never fail a search because BM25 misbehaved.
         pass
 
-    # TODO[Plan-I]: surface search_intent in response model (CI-planned)
+    # --- Stage 2: optional listwise rerank via CodeRankLLM (LM Studio) ---
+    # Runs AFTER all stage-1 fusion (PageRank + RRF/BM25) so the
+    # bi-encoder's best-fused order is what the LLM rescores.  We hand
+    # the reranker the top-50 candidates *enriched with their source
+    # snippets* (joined from LadybugDB Module nodes), get back its
+    # permutation, and slice to k.  Best-effort: any failure (LM Studio
+    # offline, parse error, timeout, source-fetch error) leaves
+    # ``filtered`` untouched.
+    if rerank:
+        try:
+            from ..services import reranker, source_fetch  # noqa: WPS433 — runtime-optional
+
+            head = filtered[: 50]
+            tail = filtered[50:]
+
+            # Resolve source snippets for the head candidates so the LLM
+            # ranks against actual code body, not just identifier names.
+            # Empirically (Nomic CodeRankLLM eval, Qwen3 internal):
+            # snippet-grounded rerank beats FQN-only by ~12-20 nDCG@10
+            # points on code-search benchmarks.  Best-effort: any DB
+            # failure leaves snippet="" and the LLM falls back to
+            # ranking on FQN alone.
+            snippets: dict[str, str] = {}
+            try:
+                snip_conn = _get_conn(repo)
+                try:
+                    snippets = source_fetch.fetch_sources_for_symbols(
+                        snip_conn, [r.qualified_name for r in head]
+                    )
+                finally:
+                    snip_conn.close()  # type: ignore[attr-defined]
+            except Exception:
+                snippets = {}
+
+            cand_dicts = [
+                {
+                    "qualified_name": r.qualified_name,
+                    "score": r.score,
+                    # Reranker reads "source" first, then "snippet" —
+                    # passing both lets us swap parsers later without
+                    # breaking the candidate schema.
+                    "source": snippets.get(r.qualified_name, ""),
+                }
+                for r in head
+            ]
+            reordered = reranker.rerank(q, cand_dicts)
+            if reordered and len(reordered) == len(cand_dicts):
+                # Map back to the original SemanticResult-shaped objects
+                # so we don't lose score/type metadata.
+                by_qn = {r.qualified_name: r for r in head}
+                filtered = [by_qn[c["qualified_name"]] for c in reordered if c["qualified_name"] in by_qn] + tail
+        except Exception:
+            # Reranker failures must never break search — keep stage-1 order.
+            pass
+    # search_intent surfaces the internal routing label ("fqn" when a bare
+    # qualified-name was detected and pinned, "semantic" otherwise) so HTTP
+    # callers can see why a particular ranking was produced without
+    # reverse-engineering the query string.
     return SemanticSearchResponse(
         results=[
             SemanticResult(
@@ -468,6 +574,162 @@ def semantic_search(
                 type="",
             )
             for r in filtered[:k]
+        ],
+        search_intent=search_intent,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /search/centrality — top-N PageRank scores (BACKEND_HANDOVER §2.8)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_vec_path(repo: str | None) -> str:
+    """Pick the ``.duck`` file (vector + centrality store) for ``repo``.
+
+    Mirrors ``_resolve_db_path`` but for the DuckDB store. Used by
+    ``/search/centrality`` and any future endpoint that reads the
+    ``centrality`` or ``embeddings`` tables directly.
+
+    Args:
+        repo: Optional repo slug.
+
+    Returns:
+        str: Filesystem path to the ``.duck`` file. Empty string when no
+        ``.duck`` files are present anywhere — callers should treat empty
+        as "no embeddings yet" and return an empty result rather than 404.
+    """
+    if repo:
+        return settings.vec_db_path_for_repo(repo)
+    db_dir = Path(settings.LADYBUG_DB_DIR)
+    if db_dir.is_dir():
+        ducks = sorted(db_dir.glob("*.duck"))
+        if ducks:
+            return str(ducks[0])
+    return ""
+
+
+def _enrich_centrality_locations(
+    repo: str | None, qnames: list[str]
+) -> dict[str, tuple[str, int, int]]:
+    """Look up ``(file_path, start_line, end_line)`` for each FQN.
+
+    Best-effort: any LadybugDB failure returns an empty dict so centrality
+    rows still ship without location metadata. The frontend renders ``—``
+    for missing line ranges.
+
+    Args:
+        repo: Repo slug for DB resolution.
+        qnames: Symbol qualified names to look up.
+
+    Returns:
+        dict[str, tuple[str, int, int]]: ``qualified_name`` →
+        ``(file_path, start_line, end_line)``. Missing keys default to
+        ``("", 0, 0)`` at the call site.
+    """
+    if not qnames:
+        return {}
+    try:
+        # Same UNION ALL pattern as /symbols/{fqn}/callers — Functions reach
+        # their Module via DEFINES, Methods via Class -[:DEFINES_METHOD].
+        cypher = """
+        MATCH (m:Module)-[:DEFINES]->(n:Function)
+        WHERE n.qualified_name IN $qnames
+        RETURN n.qualified_name AS qn, m.path AS path,
+               n.start_line AS start_line, n.end_line AS end_line
+        UNION ALL
+        MATCH (m:Module)-[:DEFINES]->(:Class)-[:DEFINES_METHOD]->(n:Method)
+        WHERE n.qualified_name IN $qnames
+        RETURN n.qualified_name AS qn, m.path AS path,
+               n.start_line AS start_line, n.end_line AS end_line
+        """
+        conn = _get_conn(repo)
+        rows = _result_to_rows(conn.execute(cypher, {"qnames": qnames}))  # type: ignore[attr-defined]
+    except Exception:
+        return {}
+
+    out: dict[str, tuple[str, int, int]] = {}
+    for r in rows:
+        qn = r.get("qn")
+        if not qn or qn in out:
+            continue
+        sl = r.get("start_line")
+        el = r.get("end_line")
+        out[qn] = (
+            r.get("path") or "",
+            int(sl) if isinstance(sl, (int, float)) else 0,
+            int(el) if isinstance(el, (int, float)) else 0,
+        )
+    return out
+
+
+@router.get("/centrality", response_model=CentralityResponse)
+def centrality_top_n(
+    limit: int = Query(default=10, ge=1, le=200),
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to scope the query to. Omit for first indexed DB.",
+    ),
+) -> CentralityResponse:
+    """Return the ``limit`` most-central symbols by PageRank score.
+
+    Reads from the per-repo ``.duck`` ``centrality`` table (populated
+    post-index by Plan J — see ``codebase_rag/services/pagerank.py``).
+    File paths and line ranges are looked up via LadybugDB best-effort —
+    a LadybugDB failure produces a degraded but still-useful response
+    (qualified_name + score, with empty ``file_path`` and ``line_range``).
+
+    Args:
+        limit: Max number of rows to return (1–200; default 10).
+        repo: Optional repo slug.
+
+    Returns:
+        CentralityResponse: Empty list when the centrality table is empty
+        (PageRank not yet computed for this repo); the FE has copy for
+        that case.
+    """
+    vec_path = _resolve_vec_path(repo)
+    if not vec_path or not Path(vec_path).exists():
+        return CentralityResponse(results=[])
+
+    try:
+        from codebase_rag.storage.vector_store import open_or_create  # type: ignore[import-untyped]
+    except ImportError:
+        return CentralityResponse(results=[])
+
+    rows: list[tuple[str, float]] = []
+    try:
+        conn = open_or_create(vec_path)
+        try:
+            res = conn.execute(
+                "SELECT qualified_name, pagerank FROM centrality "
+                "ORDER BY pagerank DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+            rows = [(r[0], float(r[1])) for r in res]
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Centrality read failed for %s: %s", repo, exc)
+        return CentralityResponse(results=[])
+
+    if not rows:
+        return CentralityResponse(results=[])
+
+    locations = _enrich_centrality_locations(repo, [qn for qn, _ in rows])
+
+    return CentralityResponse(
+        results=[
+            CentralityResult(
+                qualified_name=qn,
+                pagerank=score,
+                file_path=locations.get(qn, ("", 0, 0))[0],
+                line_range=(
+                    locations.get(qn, ("", 0, 0))[1],
+                    locations.get(qn, ("", 0, 0))[2],
+                ),
+            )
+            for qn, score in rows
         ]
     )
 

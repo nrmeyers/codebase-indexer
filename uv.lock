@@ -487,6 +487,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "protobuf", specifier = ">=5.27.0" },
+    { name = "pyarrow", marker = "extra == 'arrow'", specifier = ">=15.0" },
     { name = "pydantic-ai", specifier = ">=1.27.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.4.1" },
@@ -514,7 +515,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12.5" },
     { name = "watchdog", specifier = ">=6.0.0" },
 ]
-provides-extras = ["test", "treesitter-full", "semantic"]
+provides-extras = ["test", "treesitter-full", "semantic", "arrow"]
 
 [package.metadata.requires-dev]
 dev = [

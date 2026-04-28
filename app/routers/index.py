@@ -431,9 +431,10 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
 
         # Store the absolute repo root on the Project node so search endpoints
         # can resolve relative file paths back to absolute paths.  The
-        # last-indexed timestamp and other operational metadata live in a
-        # sidecar JSON file instead — LadybugDB's typed schema doesn't allow
-        # adding new columns without a migration, but sidecars are free.
+        # last-indexed timestamp and other operational metadata live in the
+        # ``repo_metadata`` table inside the per-repo ``.duck`` file instead —
+        # LadybugDB's typed schema doesn't allow adding new columns without a
+        # migration, while DuckDB key/value rows are free to extend.
         project_name = repo.name
         ingestor.conn.execute(  # type: ignore[union-attr]
             "MATCH (p:Project {name: $name}) SET p.root_path = $root_path",
@@ -649,16 +650,26 @@ _db = lb.Database({repr(repo_db_path)})
 _conn_lb = lb.Connection(_db)
 
 _cypher = '''
-MATCH (m:Module)-[:DEFINES]->(n)
-WHERE (n:Function OR n:Method)
-OPTIONAL MATCH ()-[:CALLS]->(n)
-WITH m, n, count(*) AS caller_count, labels(n)[0] AS sym_type
+MATCH (m:Module)-[:DEFINES]->(n:Function)
+OPTIONAL MATCH (_caller)-[:CALLS]->(n)
+WITH m, n, count(_caller) AS caller_count
 RETURN n.qualified_name AS qualified_name,
        n.start_line     AS start_line,
        n.end_line       AS end_line,
        m.path           AS rel_path,
        n.docstring      AS docstring,
-       sym_type         AS symbol_type,
+       'Function'       AS symbol_type,
+       caller_count     AS caller_count
+UNION ALL
+MATCH (m:Module)-[:DEFINES]->(_c:Class)-[:DEFINES_METHOD]->(n:Method)
+OPTIONAL MATCH (_caller)-[:CALLS]->(n)
+WITH m, n, count(_caller) AS caller_count
+RETURN n.qualified_name AS qualified_name,
+       n.start_line     AS start_line,
+       n.end_line       AS end_line,
+       m.path           AS rel_path,
+       n.docstring      AS docstring,
+       'Method'         AS symbol_type,
        caller_count     AS caller_count
 '''
 _result = _conn_lb.execute(_cypher)
@@ -705,12 +716,18 @@ for _row in _rows:
     except Exception:
         continue
 
-    _header_parts = [f"# {_stype}: {_qname}"]
+    # Double-braces below escape the OUTER f-string (this entire `driver`
+    # block is an f-string in the parent process); the subprocess sees
+    # single-brace f-strings that interpolate _stype/_qname/_mod_path/_callers
+    # in the loop-local scope. Same trick already used on the EMBED_DONE
+    # print near the bottom of this driver. Fix for the regression in
+    # commit b12df5d.
+    _header_parts = [f"# {{_stype}}: {{_qname}}"]
     _mod_path = ".".join(_qname.split(".")[:-1])
     if _mod_path:
-        _header_parts.append(f"# Module: {_mod_path}")
+        _header_parts.append(f"# Module: {{_mod_path}}")
     if _callers > 0:
-        _header_parts.append(f"# Callers: {_callers}")
+        _header_parts.append(f"# Callers: {{_callers}}")
     _header_parts.append("# ---")
     _formatted_doc = format_docstring(_doc)
     if _formatted_doc:
@@ -1177,8 +1194,9 @@ def repo_stats(repo: str) -> RepoStatsResponse:
 
     # If an index job is mid-write, opening a fresh read connection here
     # will block (single-writer) or trigger a LadybugDB internal assertion.
-    # Serve the last-known-good figures from the sidecar instead — the UI
-    # can keep polling and will see live counts once the writer releases.
+    # Serve the last-known-good figures from the per-repo ``.duck`` file's
+    # ``repo_metadata`` table instead — the UI can keep polling and will
+    # see live counts once the writer releases.
     if is_repo_indexing(repo):
         meta = _read_meta(repo)
         last_idx_at = _get_last_indexed_at(repo)
@@ -1285,17 +1303,19 @@ def repo_stats(repo: str) -> RepoStatsResponse:
         conn = None
         db = None
 
-    # ``last_indexed_at`` comes from the sidecar JSON (_get_last_indexed_at
-    # checks the in-memory cache first, then the file).  Independent from
-    # the graph so a schema-less migration isn't needed.
+    # ``last_indexed_at`` comes from the DuckDB ``repo_metadata`` table
+    # (_get_last_indexed_at checks the in-memory cache first, then the
+    # ``.duck`` file).  Independent from the graph so a schema-less
+    # migration isn't needed.
     last_idx_at = _get_last_indexed_at(repo)
 
     if not probe_ok:
         # DB exists but can't be probed right now (stale lock, transient
-        # failure).  Return sidecar figures with a 200 — the UI distinguishes
-        # "writer busy" from "permanent error" via `indexing` + staleness of
-        # last_indexed_at, and retrying /stats on the next poll usually
-        # succeeds once whatever held the lock has released.
+        # failure).  Return ``repo_metadata`` figures from the ``.duck``
+        # file with a 200 — the UI distinguishes "writer busy" from
+        # "permanent error" via `indexing` + staleness of last_indexed_at,
+        # and retrying /stats on the next poll usually succeeds once
+        # whatever held the lock has released.
         meta = _read_meta(repo)
         return RepoStatsResponse(
             repo=repo,

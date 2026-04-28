@@ -21,11 +21,32 @@ import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from .config import settings
-from .routers import context_bundle, explorer, github, health, index, search
+# Bridge .env → os.environ so modules that read os.environ directly (notably
+# ``app.services.lm_studio``, which is intentionally settings-stack-free)
+# pick up local overrides.  pydantic-settings populates the ``Settings``
+# instance from .env but does NOT push the values back into os.environ —
+# without this call, ``LM_STUDIO_*`` would silently default to "" / "CodeRankLLM"
+# under uvicorn even with a fully-populated .env.  Idempotent and side-effect
+# free when no .env exists.
+load_dotenv()
+
+from .config import settings  # noqa: E402  -- must run AFTER load_dotenv()
+from .routers import (  # noqa: E402  -- must run AFTER load_dotenv()
+    context_bundle,
+    disk,
+    explorer,
+    github,
+    health,
+    index,
+    repos,
+    search,
+    symbols,
+    websocket,
+)
 
 # Basic structured logging — without this, our logger.info/warning calls stay
 # silent under uvicorn's default handler.  Format matches uvicorn's access
@@ -114,10 +135,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _log.info("Reaped %d orphan job(s) and %d stale lock(s).", swept, stale)
 
     # Rehydrate the in-memory `indexed_repo_paths` map from the per-repo
-    # sidecar JSON files left behind by past index jobs.  Without this,
-    # every restart loses the repo→abs-path mapping and callers (the
-    # orchestrator's chat flow, /context-bundle validation) can no longer
-    # resolve a repo slug back to a path until a fresh index runs.
+    # ``.duck`` ``repo_metadata`` rows left behind by past index jobs.
+    # Without this, every restart loses the repo→abs-path mapping and
+    # callers (the orchestrator's chat flow, /context-bundle validation)
+    # can no longer resolve a repo slug back to a path until a fresh
+    # index runs.
     from .routers.index import indexed_repo_paths, indexed_repos, _read_meta
     for db_file in sorted(db_dir.glob("*.db")):
         _slug = db_file.stem  # "TheForge.db" → "TheForge"
@@ -130,7 +152,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             indexed_repo_paths[_slug] = _root
             indexed_repos.add(_slug)
     _log.info(
-        "Rehydrated %d repo path(s) from sidecars.", len(indexed_repo_paths),
+        "Rehydrated %d repo path(s) from DuckDB repo_metadata.",
+        len(indexed_repo_paths),
     )
 
     yield
@@ -159,6 +182,15 @@ def create_app() -> FastAPI:
     app.include_router(context_bundle.router, tags=["context"])
     app.include_router(explorer.router, tags=["explorer"])
     app.include_router(github.router, tags=["github"])
+    # Frontend-shape endpoints (BACKEND_HANDOVER doc):
+    #   /repos/{name}/stats, /repos/{name}/reindex     (§2.1, §2.2)
+    #   /symbols/{fqn}, /symbols/{fqn}/{callers,callees} (§2.7, §2.9)
+    #   /disk-usage                                     (§2.11)
+    #   /ws (WebSocket index.{progress,complete,failed}) (§2.3)
+    app.include_router(repos.router)
+    app.include_router(symbols.router)
+    app.include_router(disk.router)
+    app.include_router(websocket.router)
 
     @app.exception_handler(Exception)
     async def _generic_error(request, exc):  # type: ignore[override]

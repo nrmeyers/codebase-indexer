@@ -13,9 +13,11 @@ dependencies = [
     "real-ladybug>=0.15.3",
     "code-graph-rag",
     # Semantic search stack — required for /search/semantic and /context-bundle
-    # to return populated results.  UniXcoder runs on CPU via torch; transformers
+    # to return populated results.  CodeRankEmbed runs on CPU via torch; transformers
     # ships the tokenizer + model loader.  ~500MB installed footprint, one-time.
     # DuckDB v5.3 §6.5: per-repo .duck files with FLOAT[768] + array_cosine_distance.
+    # Optional listwise rerank via nomic-ai/CodeRankLLM is provided through LM Studio
+    # (see app/services/lm_studio.py) — no extra Python deps required.
     "duckdb>=1.1.0",
     "bm25s>=0.2.13",
     # Plan G + J: structured docstring extraction + PageRank centrality.

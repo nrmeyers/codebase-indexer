@@ -122,10 +122,49 @@ def test_semantic_search_returns_results(tmp_path) -> None:
             params={"q": "find all functions", "k": 5, "repo": "fake"},
         )
     assert resp.status_code == 200
-    results = resp.json()["results"]
+    body = resp.json()
+    results = body["results"]
     assert len(results) == 2
     assert results[0]["symbol"] == "mymod.foo"
     assert results[0]["score"] == pytest.approx(0.95)
+    # search_intent surfaces the internal routing label — a natural-language
+    # query ("find all functions") routes through the default semantic path.
+    assert "search_intent" in body
+    assert body["search_intent"] == "semantic"
+
+
+def test_semantic_search_surfaces_fqn_intent(tmp_path) -> None:
+    """A bare-qualified-name query (e.g. ``mymod.foo``) must trigger the
+    FQN-pinning branch and surface ``search_intent="fqn"`` in the response.
+    """
+    duck = tmp_path / "fake.duck"
+    duck.write_bytes(b"")
+
+    fake_results = [
+        _fake_search_result("mymod.foo", 0.50),
+        _fake_search_result("other.bar", 0.95),
+    ]
+
+    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
+         patch("app.routers.search._embed_unavailable", False), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)), \
+         patch("codebase_rag.storage.vector_store.open_or_create",
+               return_value=MagicMock()), \
+         patch("codebase_rag.storage.vector_store.search_similar",
+               return_value=fake_results), \
+         patch("codebase_rag.storage.vector_store.read_centrality",
+               return_value={}):
+        resp = client.get(
+            "/search/semantic",
+            params={"q": "mymod.foo", "k": 5, "repo": "fake"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["search_intent"] == "fqn"
+    # FQN-pinning must hoist the exact match to position 0 even though its
+    # raw cosine score (0.50) is lower than the unrelated hit (0.95).
+    assert body["results"][0]["symbol"] == "mymod.foo"
 
 
 def test_semantic_search_empty(tmp_path) -> None:

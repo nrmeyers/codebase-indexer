@@ -1,9 +1,13 @@
 # Code Indexer Service
 
 FastAPI HTTP gateway over [code-graph-rag](../code-graph-rag). Indexes
-repositories into LadybugDB (embedded kuzu graph, no Docker) with numpy
-sidecar embeddings for semantic search. Exposes structural, semantic, symbol,
-and context-bundle search to TheForge's dev-agent.
+repositories into LadybugDB (embedded kuzu graph, no Docker) with a
+DuckDB-backed vector store for semantic search. Exposes structural,
+semantic, symbol, and context-bundle search to TheForge's dev-agent.
+
+Per-repo storage is two sibling files under `.cgr/repos/`:
+* `<slug>.db` — LadybugDB graph (typed nodes/relationships)
+* `<slug>.duck` — DuckDB store (`embeddings` + `repo_metadata` tables)
 
 **Default Port:** 8000
 
@@ -17,7 +21,7 @@ and context-bundle search to TheForge's dev-agent.
 | `POST` | `/index` | Start a background indexing job (202 Accepted) |
 | `GET` | `/index/{job_id}/status` | Poll job progress |
 | `GET` | `/search/structural` | Cypher passthrough against LadybugDB |
-| `GET` | `/search/semantic` | Vector-similarity search over numpy embeddings |
+| `GET` | `/search/semantic` | Vector-similarity search over the DuckDB embedding store |
 | `GET` | `/search/symbol` | Exact FQN lookup returning source + location |
 | `GET` | `/search/browse` | Package tree / file list browser |
 | `GET` | `/search/callers` | Upstream callers of a symbol |
@@ -50,7 +54,7 @@ somewhere other than `~/code-indexer-service`.
 ## Test
 
 ```bash
-uv run pytest tests/ -v   # 35 tests
+uv run pytest tests/ -v   # 51 tests
 ```
 
 ## Install (first run)
@@ -63,7 +67,7 @@ cd ~/code-indexer-service
 uv sync
 ```
 
-`real-ladybug>=0.15.3` (LadybugDB) and `numpy` are installed automatically.
+`real-ladybug>=0.15.3` (LadybugDB) and `duckdb` are installed automatically.
 
 ---
 
@@ -71,7 +75,8 @@ uv sync
 
 | Env var | Default | Notes |
 |---|---|---|
-| `LADYBUG_DB_PATH` | `.cgr/graph.db` | Shared with code-graph-rag |
+| `LADYBUG_DB_DIR` | `.cgr/repos` | Per-repo `.db`+`.duck` storage root |
+| `LADYBUG_DB_PATH` | (legacy) | Single-DB fallback for code-graph-rag callers |
 | `LADYBUG_BATCH_SIZE` | `1000` | Ingestor flush batch size |
 | `TARGET_REPO_PATH` | `.` | Default repo when request omits `repo_path` |
 | `HOST` | `0.0.0.0` | Server bind address |
@@ -137,7 +142,10 @@ automatically if the query does not already include one.
 
 ### `GET /search/semantic?q={text}&k=10`
 
-Vector-similarity search using UniXcoder embeddings stored as numpy sidecars.
+Vector-similarity search using `nomic-ai/CodeRankEmbed` embeddings (FLOAT[768],
+L2-normalised) stored in the per-repo `<slug>.duck` file via `array_cosine_distance`.
+Optional listwise rerank via `nomic-ai/CodeRankLLM` (`?rerank=true`) — see
+*Two-stage retrieval* below.
 
 ```json
 {
@@ -181,6 +189,70 @@ Vector-similarity search using UniXcoder embeddings stored as numpy sidecars.
 
 ---
 
+## Two-stage retrieval (optional)
+
+`/search/semantic?rerank=true` and `POST /context-bundle` (with
+`"rerank": true`) opt into a second-stage listwise rerank using
+`nomic-ai/CodeRankLLM` served by [LM Studio](https://lmstudio.ai/).
+
+* **Stage 1 — bi-encoder.** DuckDB `array_cosine_distance` over the
+  per-repo `.duck` file widens to ~50 candidates (after PageRank +
+  RRF/BM25 fusion).
+* **Stage 2 — listwise reranker.** Those candidates are sent to
+  CodeRankLLM as a single permutation prompt; the model emits an
+  ordering like `[3] > [1] > [4]`, which the service slices to your
+  requested `k`.
+
+The reranker is **strictly opt-in and non-fatal**: if `LM_STUDIO_URL`
+is unset, the model isn't loaded, the call times out, or the response
+doesn't parse, the bi-encoder ordering is returned unchanged. There is
+no behavioural difference for callers who don't pass `rerank=true`.
+
+### Enabling LM Studio
+
+```bash
+# .env
+LM_STUDIO_URL=http://localhost:1234
+
+# Embed model — must match the model the index was built with.  The
+# default ``CodeRankEmbed`` is intentionally strict: the parent base
+# ``nomic-embed-text-v1.5`` is the same architecture but lives in a
+# DIFFERENT vector space, and using it at query time silently
+# destroys recall (~50–70% precision drop).  Override only after
+# rebuilding the index with the same backend.
+LM_STUDIO_EMBED_MODEL=CodeRankEmbed
+
+# Rerank model — substring match (case-insensitive) against the
+# /v1/models response.  Any instruction-following chat model that can
+# emit a bracketed permutation works:
+#   LM_STUDIO_RERANK_MODEL=CodeRankLLM            # reference model
+#   LM_STUDIO_RERANK_MODEL=qwen/qwen3.6-35b-a3b   # MoE — fastest
+#   LM_STUDIO_RERANK_MODEL=qwen/qwen3.6-27b       # dense — slower
+LM_STUDIO_RERANK_MODEL=CodeRankLLM
+
+# Generous timeout so a thinking-mode model (Qwen3, DeepSeek-R1) has
+# room to finish reasoning AND emit the permutation.  Plain models
+# return well inside this.
+LM_STUDIO_TIMEOUT=180
+```
+
+When `LM_STUDIO_URL` is set and the matching models are loaded, the
+service will additionally route **query-time embedding** through LM
+Studio (keeps `torch`/`transformers` out of the uvicorn process). The
+in-process embedder remains the index-time path.
+
+### Latency notes
+
+The reranker prompt format includes a `/no_think` directive that
+disables Qwen3's reasoning channel; other model families ignore it
+harmlessly. With reasoning suppressed the rerank step typically lands
+in **3–10 seconds** for an MoE-A3B model (e.g. `qwen3.6-35b-a3b`) and
+**60–120 seconds** for a dense 27B+ thinking model. The bi-encoder
+top-k path takes <500ms and is unaffected — `rerank=true` is the only
+flag that pulls in the LLM.
+
+---
+
 ## Architecture
 
 ```
@@ -192,15 +264,15 @@ Code Indexer Service (FastAPI — this repo)
         │
         │  Python import
         ▼
-code-graph-rag (LadybugIngestor + numpy embeddings)
+code-graph-rag (LadybugIngestor + DuckDB vector store)
         │
-        ├─► LadybugDB (.cgr/graph.db — embedded kuzu)
-        └─► numpy sidecars (.cgr/{repo}.embeddings.npy + .json)
+        ├─► LadybugDB (.cgr/repos/{slug}.db — embedded kuzu graph)
+        └─► DuckDB    (.cgr/repos/{slug}.duck — embeddings + repo_metadata)
 ```
 
 The service imports `code-graph-rag` as a local `uv` workspace path dependency.
-Both share the same `LADYBUG_DB_PATH` so indexed data is immediately visible
-to search.
+Both share the same `LADYBUG_DB_DIR` so indexed data is immediately visible
+to search. Each repo gets its own pair of `.db` + `.duck` files keyed by slug.
 
 ---
 

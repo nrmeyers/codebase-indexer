@@ -15,7 +15,8 @@ from pathlib import Path
 from fastapi import APIRouter
 
 from ..config import settings
-from ..models import HealthResponse, RepoHealth
+from ..models import HealthResponse, LmStudioStatus, RepoHealth
+from ..services import lm_studio
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -177,6 +178,43 @@ def _probe_repo(name: str) -> RepoHealth:
     return rh
 
 
+def _probe_lm_studio() -> LmStudioStatus:
+    """Build the ``lm_studio`` block for the health response.
+
+    Short-circuits to an all-False/None payload when LM Studio is not
+    configured (no ``LM_STUDIO_URL``), avoiding any network call. All
+    adapter probes are wrapped in a broad ``except`` so a misbehaving
+    LM Studio process can never break /health.
+    """
+    try:
+        url = lm_studio.base_url()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("LM Studio base_url() failed: %s", exc)
+        return LmStudioStatus()
+
+    if not url:
+        return LmStudioStatus()
+
+    try:
+        reachable = lm_studio.is_available()
+        embed_model = lm_studio.resolve_model(lm_studio.embed_model_hint())
+        rerank_model = lm_studio.resolve_model(lm_studio.rerank_model_hint())
+        can_embed = lm_studio.can_embed()
+        can_rerank = lm_studio.can_rerank()
+    except Exception as exc:
+        logger.warning("LM Studio probe failed in /health: %s", exc)
+        return LmStudioStatus(configured=True)
+
+    return LmStudioStatus(
+        configured=True,
+        reachable=reachable,
+        embed_model=embed_model,
+        rerank_model=rerank_model,
+        can_embed=can_embed,
+        can_rerank=can_rerank,
+    )
+
+
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """Readiness probe — always returns 200, flips ``status`` to ``degraded``
@@ -185,7 +223,8 @@ def health() -> HealthResponse:
     Returns:
         HealthResponse: ``status``, DB directory, indexed project names, a
         probe row per repo (size, node count, readable, last_indexed_at,
-        indexing), and a count of currently-running index jobs.
+        indexing), a count of currently-running index jobs, and an
+        ``lm_studio`` backend-status block.
     """
     from .index import _jobs  # local import to avoid circular deps
 
@@ -200,4 +239,5 @@ def health() -> HealthResponse:
         indexed_repos=indexed,
         repos=probes,
         running_jobs=running,
+        lm_studio=_probe_lm_studio(),
     )

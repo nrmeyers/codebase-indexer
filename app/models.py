@@ -54,6 +54,38 @@ class RepoHealth(BaseModel):
     )
 
 
+class LmStudioStatus(BaseModel):
+    """LM Studio backend status block surfaced in ``GET /health``.
+
+    Lets TheForge render a backend-availability badge without making a
+    separate probe call. All boolean fields default to ``False`` and model
+    fields to ``None`` so a "not configured" or "unreachable" payload is
+    unambiguous to the client.
+
+    Attributes:
+        configured: True when ``LM_STUDIO_URL`` is set (non-empty
+            ``base_url()``). When False, every other field is False/None
+            and the handler short-circuits without making a network call.
+        reachable: True when LM Studio responded to /v1/models with at
+            least one loaded model. Cached for 30s by the adapter.
+        embed_model: Resolved loaded-model id matching
+            ``LM_STUDIO_EMBED_MODEL``; None when no match is found.
+        rerank_model: Resolved loaded-model id matching
+            ``LM_STUDIO_RERANK_MODEL``; None when no match is found.
+        can_embed: True when the named embed model is actually loaded —
+            stricter than ``reachable``.
+        can_rerank: True when the named rerank model is actually loaded —
+            stricter than ``reachable``.
+    """
+
+    configured: bool = False
+    reachable: bool = False
+    embed_model: str | None = None
+    rerank_model: str | None = None
+    can_embed: bool = False
+    can_rerank: bool = False
+
+
 class HealthResponse(BaseModel):
     """Response for ``GET /health``.
 
@@ -66,6 +98,8 @@ class HealthResponse(BaseModel):
             on disk.
         repos: Detailed per-repo probe results (size, node count, readability).
         running_jobs: Count of currently-running index jobs across all repos.
+        lm_studio: LM Studio backend status block — always present so the
+            UI can render a backend badge without a separate probe call.
     """
 
     status: Literal["ok", "degraded"]
@@ -73,6 +107,7 @@ class HealthResponse(BaseModel):
     indexed_repos: list[str]
     repos: list[RepoHealth] = []
     running_jobs: int = 0
+    lm_studio: "LmStudioStatus" = Field(default_factory=lambda: LmStudioStatus())
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +151,7 @@ class IndexStatus(BaseModel):
             pipeline. ``queued`` while the job waits for a repo lock;
             ``discovering`` during filesystem walk; ``parsing`` during
             tree-sitter pass; ``writing`` during LadybugDB flush;
-            ``embedding`` during UniXcoder model pass; ``finalizing``
+            ``embedding`` during the CodeRankEmbed model pass; ``finalizing``
             for final metadata writes; ``done`` on success.
             Set to ``"cancelled"`` when a cancel request is honoured.
         progress_pct: Bounded to [0, 100]; monotonically non-decreasing.
@@ -188,9 +223,21 @@ class SemanticResult(BaseModel):
 
 
 class SemanticSearchResponse(BaseModel):
-    """Top-k semantic search results, ordered by score descending."""
+    """Top-k semantic search results, ordered by score descending.
+
+    Attributes:
+        results: Ranked semantic matches (descending score).
+        search_intent: Internal routing label describing how the query
+            was interpreted by the retrieval pipeline (e.g. ``"fqn"``
+            when a bare qualified-name was detected and exact/prefix
+            matches were pinned, or ``"semantic"`` for the default
+            natural-language path). ``None`` when intent classification
+            was not performed. Surfaced for observability — callers
+            should not branch on it.
+    """
 
     results: list[SemanticResult]
+    search_intent: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +345,123 @@ class RepoStatsResponse(BaseModel):
     has_embeddings: bool
     embedding_count: int | None = None
     indexing: bool = False
+
+
+# ---------------------------------------------------------------------------
+# /repos/{name}/stats — frontend-shape index facts (BACKEND_HANDOVER §2.1)
+# ---------------------------------------------------------------------------
+
+
+class RepoIndexStatsResponse(BaseModel):
+    """Frontend-facing per-repo index stats.
+
+    Shape mirrors the ``RepoIndexStats`` interface in TheForge's
+    ``web/src/components/code-indexer/types.ts`` so the IndexRunDashboard
+    sidebar can render directly off this payload. All fields are nullable
+    by design — the dashboard renders ``—`` placeholders when a field is
+    missing (e.g. embedder hasn't run yet → ``fragment_count: null``).
+
+    Attributes:
+        db_size_bytes: LadybugDB ``.db`` file size; null when missing.
+        duck_size_bytes: DuckDB ``.duck`` vector store size; null when
+            missing or pre-CodeRankEmbed (vector store not yet populated).
+        last_indexed_at: ISO 8601 UTC timestamp of the last successful
+            index. Returned as a string (not unix epoch) per FE contract.
+        indexed_commit_sha: Git commit SHA that was indexed; null when the
+            repo wasn't a clean git checkout at index time.
+        fragment_count: Number of embedding rows in the ``.duck`` file —
+            "fragments" in the FE copy.
+        edge_count: Total relationship count across all rel types.
+        node_count_by_label: Per-label node count breakdown for the
+            sidebar facts list.
+    """
+
+    db_size_bytes: int | None = None
+    duck_size_bytes: int | None = None
+    last_indexed_at: str | None = None
+    indexed_commit_sha: str | None = None
+    fragment_count: int | None = None
+    edge_count: int | None = None
+    node_count_by_label: dict[str, int] = Field(default_factory=dict)
+
+
+class ReindexRequest(BaseModel):
+    """Request body for ``POST /repos/{name}/reindex`` — force re-index."""
+
+    force: bool = Field(
+        default=True,
+        description=(
+            "When true (default), wipes both the LadybugDB ``.db`` and the "
+            "DuckDB ``.duck`` files before kicking off all 4 indexing passes. "
+            "Currently the only supported mode."
+        ),
+    )
+
+
+class ReindexAccepted(BaseModel):
+    """202 response from ``POST /repos/{name}/reindex``."""
+
+    job_id: str
+
+
+# ---------------------------------------------------------------------------
+# /disk-usage — capacity gauge (BACKEND_HANDOVER §2.11)
+# ---------------------------------------------------------------------------
+
+
+class DiskUsageResponse(BaseModel):
+    """Disk usage under ``LADYBUG_DB_DIR``.
+
+    Frontend computes ``total = used + free``, percentage, and color-codes
+    the gauge (≤75% green, 75-90% amber, >90% red).
+
+    Attributes:
+        used_bytes: Bytes occupied by ``.cgr/repos/`` and its children.
+        free_bytes: Free bytes available on the filesystem hosting that
+            directory (``shutil.disk_usage`` ``free`` field).
+    """
+
+    used_bytes: int
+    free_bytes: int
+
+
+# ---------------------------------------------------------------------------
+# /search/centrality — PageRank top-N (BACKEND_HANDOVER §2.8)
+# ---------------------------------------------------------------------------
+
+
+class CentralityResult(BaseModel):
+    """Single row in a centrality result set."""
+
+    qualified_name: str
+    pagerank: float
+    file_path: str = ""
+    line_range: tuple[int, int] = (0, 0)
+
+
+class CentralityResponse(BaseModel):
+    """Top-N most-central symbols ordered by PageRank descending."""
+
+    results: list[CentralityResult] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# /symbols/{fqn}/callers + /symbols/{fqn}/callees (BACKEND_HANDOVER §2.9)
+# ---------------------------------------------------------------------------
+
+
+class CallSiteResult(BaseModel):
+    """One caller (or callee) entry for the symbol detail panel."""
+
+    qualified_name: str
+    file_path: str = ""
+    line_number: int = 0
+
+
+class CallSiteResponse(BaseModel):
+    """Response wrapper for /callers and /callees."""
+
+    results: list[CallSiteResult] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

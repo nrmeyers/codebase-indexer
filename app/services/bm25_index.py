@@ -52,10 +52,9 @@ class BM25Service:
         Returns ``(None, [])`` when the table is empty so callers can short-
         circuit without a useless retriever object in the cache.
 
-        Reads from the per-repo ``.duck`` file via DuckDB.  The vector_store
-        module exposes the same ``open_or_create`` callable on top of the
-        DuckDB backend so this importer is unchanged from the previous
-        sqlite-vec implementation.
+        Reads from the per-repo ``.duck`` file via DuckDB (v5.3 §6.5 + §8.4).
+        The ``embeddings`` table holds ``qualified_name`` + ``symbol_type``
+        alongside the FLOAT[768] vector; BM25 only needs the text columns.
         """
         import bm25s
         from codebase_rag.storage.vector_store import open_or_create

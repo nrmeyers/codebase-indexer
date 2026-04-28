@@ -22,6 +22,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from ..config import settings
+# Source-fetch helpers live in ``app.services.source_fetch`` so the
+# /search/semantic rerank path can share the same FQN→snippet pipeline.
+# Aliased to its old private name so existing call sites in this module
+# (``_fetch_source_for_symbols``) keep working.
+from ..services.source_fetch import (
+    fetch_sources_for_symbols as _fetch_source_for_symbols,
+)
 
 router = APIRouter()
 
@@ -29,6 +36,16 @@ router = APIRouter()
 # mixes. Good enough for prompt-window budgeting; exact tokenization varies
 # per model and is not worth pulling in a tokenizer dependency for.
 _CHARS_PER_TOKEN = 4
+
+# Soft cap on the bundle's total source-snippet token estimate.  Matches
+# TheForge's tier-2 prompt cap (10k tokens) with headroom for the
+# system prompt + skill fragments + user message that get prepended on
+# the orchestrator side.  When the BFS expansion produces more, we
+# truncate from the deepest hop inward — see ``_truncate_to_budget``.
+# Set to 12_000 (vs 10_000) so the LLM gets useful context even when
+# the orchestrator's other inputs are minimal; the orchestrator tier
+# cap itself does the final hard clip.
+_TOKEN_BUDGET = 12_000
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +71,17 @@ class ContextBundleRequest(BaseModel):
             "entry-point boosting on top of conceptual. When omitted the "
             "endpoint classifies from task_description. Invalid values fall "
             "through to the default (symbol) rather than erroring."
+        ),
+    )
+    rerank: bool = Field(
+        default=False,
+        description=(
+            "When true, run the merged seed list through CodeRankLLM "
+            "(via LM Studio) before BFS expansion. Sharpens the seed "
+            "set's relevance ordering so the BFS spends its hop budget "
+            "on the highest-signal symbols. Best-effort — falls back "
+            "silently to the bi-encoder + boost order when LM Studio "
+            "isn't running."
         ),
     )
 
@@ -128,73 +156,14 @@ def _result_to_rows(result: object) -> list[dict]:
     return rows
 
 
-def _fetch_source(file_path: str, line_start: int | None, line_end: int | None) -> str:
-    """Read a source slice from disk between 1-indexed start/end lines.
-
-    Args:
-        file_path: Absolute path to the file.
-        line_start: 1-indexed start line; defaults to 1 when ``None``.
-        line_end: 1-indexed inclusive end line; defaults to one line past
-            ``line_start`` when ``None``.
-
-    Returns:
-        str: The joined source lines, or empty string on any read failure.
-    """
-    if not file_path or not Path(file_path).exists():
-        return ""
-    try:
-        lines = Path(file_path).read_text(encoding="utf-8", errors="replace").splitlines()
-        # 1-indexed → 0-indexed slice start; fall back to line 1 when unset.
-        start = max(0, (line_start or 1) - 1)
-        end = line_end or (start + 1)
-        return "\n".join(lines[start:end])
-    except Exception:
-        # Swallow — the bundle is still useful without one file's source.
-        return ""
-
-
-def _fetch_source_for_symbols(
-    conn: object, qualified_names: list[str]
-) -> dict[str, str]:
-    """Return ``{qualified_name → source_snippet}`` for a list of symbols.
-
-    Args:
-        conn: An open LadybugDB connection.
-        qualified_names: The symbols whose source should be read.
-
-    Returns:
-        dict[str, str]: Per-symbol source snippets. Missing or unreadable
-        symbols map to an empty string rather than being omitted.
-    """
-    from codebase_rag.cypher_queries import CYPHER_GET_FUNCTION_SOURCE_LOCATION
-
-    snippets: dict[str, str] = {}
-    for qn in qualified_names:
-        try:
-            rows = _result_to_rows(
-                conn.execute(CYPHER_GET_FUNCTION_SOURCE_LOCATION, {"node_id": qn})  # type: ignore[attr-defined]
-            )
-            if rows:
-                r = rows[0]
-                file_path: str = r.get("path") or ""
-                root_path: str = r.get("root_path") or ""
-                # CYPHER_GET_FUNCTION_SOURCE_LOCATION stores module paths relative
-                # to the repo root. Resolve to absolute using root_path (stored on
-                # the Project node) before passing to _fetch_source, which checks
-                # os.path.exists().  Without this, all snippets are empty strings.
-                if file_path and root_path and not Path(file_path).is_absolute():
-                    file_path = str(Path(root_path) / file_path)
-                snippets[qn] = _fetch_source(file_path, r.get("start_line"), r.get("end_line"))
-        except Exception:
-            # Record an empty string so the caller can see which symbols
-            # failed to resolve rather than silently dropping them.
-            snippets[qn] = ""
-    return snippets
+# Source-fetch helpers are imported at the top of the module — see
+# ``..services.source_fetch`` for the implementation shared with the
+# /search/semantic rerank path.
 
 
 def _expand_call_graph(
     conn: object, seed_symbols: list[str], depth: int
-) -> tuple[set[str], dict[str, list[str]]]:
+) -> tuple[set[str], dict[str, list[str]], dict[str, int]]:
     """BFS over the CALLS graph up to ``depth`` hops from the seed symbols.
 
     Args:
@@ -207,14 +176,18 @@ def _expand_call_graph(
             * all_symbols: every symbol encountered (seeds + reachable).
             * call_graph: ``{caller → [callee, ...]}`` for every edge
               traversed during BFS.
+            * symbol_depth: ``{symbol → depth}`` where seeds = 0,
+              direct callees = 1, etc.  Lets the caller apply a
+              token-budget truncation that drops the deepest hops first.
     """
     call_graph: dict[str, list[str]] = {}
     all_symbols: set[str] = set(seed_symbols)
+    symbol_depth: dict[str, int] = {s: 0 for s in seed_symbols}
     frontier: set[str] = set(seed_symbols)
 
     # Standard BFS: expand one hop per iteration, tracking only newly-reached
     # symbols in next_frontier to avoid revisiting.
-    for _ in range(depth):
+    for hop in range(depth):
         if not frontier:
             break
         next_frontier: set[str] = set()
@@ -238,10 +211,92 @@ def _expand_call_graph(
             for c in callees:
                 if c not in all_symbols:
                     all_symbols.add(c)
+                    symbol_depth[c] = hop + 1
                     next_frontier.add(c)
         frontier = next_frontier
 
-    return all_symbols, call_graph
+    return all_symbols, call_graph, symbol_depth
+
+
+def _truncate_to_budget(
+    *,
+    all_symbols: set[str],
+    source_snippets: dict[str, str],
+    call_graph: dict[str, list[str]],
+    symbol_depth: dict[str, int],
+    budget: int,
+) -> tuple[set[str], dict[str, str], dict[str, list[str]], int]:
+    """Drop symbols from deepest BFS hops first until the snippet token
+    estimate fits inside ``budget``.
+
+    Algorithm:
+        1. Group symbols by depth (0 = seed, 1 = direct callee, …).
+        2. Starting from the maximum depth, drop entire layers until the
+           token estimate is under budget OR only seeds remain.
+        3. If seeds alone still exceed the budget, drop seeds one at a
+           time in reverse-rank order (the merged seed list is already
+           ranked, so trailing seeds are the lowest-priority).
+
+    Args:
+        all_symbols: Full symbol set from BFS.
+        source_snippets: ``{symbol → source}`` for every member.
+        call_graph: ``{caller → [callees]}`` from BFS.
+        symbol_depth: ``{symbol → depth}`` from BFS.
+        budget: Max permitted token estimate.
+
+    Returns:
+        ``(symbols, snippets, call_graph, total_tokens)`` after truncation.
+        ``symbols`` is a set; the caller is responsible for sorting if
+        deterministic output is desired.
+    """
+    if not symbol_depth:
+        total = sum(len(s) for s in source_snippets.values()) // _CHARS_PER_TOKEN
+        return all_symbols, source_snippets, call_graph, total
+
+    # Working copies — we mutate these in the loop.
+    kept = set(all_symbols)
+    snippets = dict(source_snippets)
+
+    # Drop deepest layers until under budget or only seeds remain.
+    max_depth = max(symbol_depth.get(s, 0) for s in kept)
+    current = sum(len(snippets.get(s, "")) for s in kept) // _CHARS_PER_TOKEN
+
+    while current > budget and max_depth > 0:
+        layer = {s for s in kept if symbol_depth.get(s, 0) == max_depth}
+        kept -= layer
+        for s in layer:
+            snippets.pop(s, None)
+        current = sum(len(snippets.get(s, "")) for s in kept) // _CHARS_PER_TOKEN
+        max_depth -= 1
+
+    # If seeds alone still bust the budget, drop trailing seeds.  Seeds
+    # are kept in ``kept`` but we need a deterministic order to drop —
+    # sort by qualified_name length descending (longer = more specific
+    # / often less central) as a cheap heuristic.
+    if current > budget:
+        seeds = sorted(
+            (s for s in kept if symbol_depth.get(s, 0) == 0),
+            key=lambda s: (-len(s), s),
+        )
+        for s in seeds:
+            if current <= budget:
+                break
+            kept.discard(s)
+            removed = snippets.pop(s, "")
+            current -= len(removed) // _CHARS_PER_TOKEN
+
+    # Prune call_graph entries that reference dropped symbols.  Keep an
+    # edge only when BOTH endpoints survived; otherwise the LLM would
+    # see an arrow pointing into a black hole.
+    pruned_graph: dict[str, list[str]] = {}
+    for caller, callees in call_graph.items():
+        if caller not in kept:
+            continue
+        kept_callees = [c for c in callees if c in kept]
+        if kept_callees:
+            pruned_graph[caller] = kept_callees
+
+    return kept, snippets, pruned_graph, current
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +452,139 @@ def _extract_module_keywords(task_description: str) -> list[str]:
     return out[:12]
 
 
+def _score_modules_by_keyword_coverage(
+    conn: object,
+    keywords: list[str],
+) -> list[tuple[str, int]]:
+    """Return ``[(module_qn, hit_count)]`` ranked by how many distinct query
+    keywords each module's qualified_name contains.
+
+    A module that mentions ``orchestrator`` AND ``compose`` AND ``prompt``
+    is far more likely the answer to "how does the orchestrator compose
+    prompts?" than one that only mentions ``orchestrator`` (which alone
+    matches ``cleanup-orchestrator`` too).  This boost rescues precision
+    when a single keyword is over-broad.
+
+    Implementation: pull every module whose qualified_name contains AT
+    LEAST ONE keyword (cheap UNWIND over a <10k-row table), then count
+    matches in Python.  We score in Python rather than building a
+    multi-keyword Cypher because LadybugDB doesn't have a native
+    "count of true predicates" reducer and chained ``OR`` matches
+    would re-explode the row count.
+
+    Args:
+        conn: Open LadybugDB connection.
+        keywords: Lowercase keyword tokens (already de-stopworded /
+            stemmed by ``_extract_module_keywords``).
+
+    Returns:
+        List of ``(module_qn, hit_count)`` sorted by hit_count descending.
+        Empty on query failure or empty keyword list.
+    """
+    if not keywords or len(keywords) < 2:
+        # Single-keyword queries can't benefit from co-occurrence scoring;
+        # the caller handles them via the standard one-pass path.
+        return []
+    try:
+        cypher = (
+            "UNWIND $kws AS kw "
+            "MATCH (m:Module) "
+            "WHERE toLower(m.name) CONTAINS kw "
+            "   OR toLower(m.qualified_name) CONTAINS ('.' + kw + '.') "
+            "   OR toLower(m.qualified_name) CONTAINS ('.' + kw) "
+            "RETURN DISTINCT m.qualified_name AS qn"
+        )
+        rows = _result_to_rows(conn.execute(cypher, {"kws": keywords}))  # type: ignore[attr-defined]
+    except Exception:
+        return []
+    scored: list[tuple[str, int]] = []
+    for r in rows:
+        qn = r.get("qn") or ""
+        if not qn:
+            continue
+        lower_qn = qn.lower()
+        # Apply the same noise filters used elsewhere — there's no point
+        # ranking test/fixture modules even if they match many keywords.
+        if ".test" in lower_qn or "tests." in lower_qn or ".web." in lower_qn:
+            continue
+        hits = sum(1 for kw in keywords if kw in lower_qn)
+        if hits >= 2:
+            scored.append((qn, hits))
+    # Highest-hit-count first; ties broken by shorter qualified_name
+    # (heuristic: shallower modules are usually more authoritative than
+    # deeply-nested helpers).
+    scored.sort(key=lambda t: (-t[1], len(t[0])))
+    return scored
+
+
+def _rank_and_cap_module_hits(
+    hits: list[str],
+    cooccur_modules: list[str],
+    per_module_cap: int,
+    limit: int,
+) -> list[str]:
+    """Rank module-function hits by co-occurrence + apply per-module cap.
+
+    Two-step transform:
+        1. Bucket each hit by its source module (everything before the
+           trailing function/method segment of its qualified_name).
+        2. Order buckets so co-occurring-keyword modules come first,
+           preserving original order otherwise.
+        3. Round-robin through buckets emitting up to ``per_module_cap``
+           hits per module until ``limit`` is reached.
+
+    The round-robin step is what enforces breadth — without it, a single
+    module that happened to be enumerated first would consume the entire
+    ``limit`` even if 10 other equally-relevant modules also matched.
+
+    Args:
+        hits: Module-function qualified names from the Cypher query.
+        cooccur_modules: Module qualified names ranked by multi-keyword
+            co-occurrence; empty when the query has only one keyword.
+        per_module_cap: Max functions emitted per source module.
+        limit: Total cap on returned items.
+
+    Returns:
+        A re-ranked, capped list of qualified names.
+    """
+    if not hits:
+        return []
+
+    # Bucket by source module.  ``module_qn`` is everything up to the
+    # last dot in the function qualified_name (parser convention).
+    buckets: dict[str, list[str]] = {}
+    bucket_order: list[str] = []  # original first-seen order
+    for qn in hits:
+        idx = qn.rfind(".")
+        module_qn = qn[:idx] if idx > 0 else qn
+        if module_qn not in buckets:
+            buckets[module_qn] = []
+            bucket_order.append(module_qn)
+        buckets[module_qn].append(qn)
+
+    # Move co-occurrence-ranked modules to the front of bucket_order
+    # while preserving their relative ranking.  Anything not in
+    # cooccur_modules keeps its original first-seen position.
+    if cooccur_modules:
+        cooccur_set = set(cooccur_modules)
+        ranked_front = [m for m in cooccur_modules if m in buckets]
+        rest = [m for m in bucket_order if m not in cooccur_set]
+        bucket_order = ranked_front + rest
+
+    # Round-robin emit up to per_module_cap from each bucket.  Each
+    # iteration of the outer loop yields at most one item per bucket;
+    # we run min(per_module_cap, max_bucket_len) outer passes.
+    out: list[str] = []
+    for slot in range(per_module_cap):
+        for module_qn in bucket_order:
+            if len(out) >= limit:
+                return out
+            funcs = buckets[module_qn]
+            if slot < len(funcs):
+                out.append(funcs[slot])
+    return out
+
+
 def _module_level_symbols(
     conn: object,
     keywords: list[str],
@@ -423,6 +611,24 @@ def _module_level_symbols(
     """
     if not keywords:
         return []
+
+    # Per-module fairness cap: keep at most this many functions from any
+    # single source module.  Without this, a query whose top keyword
+    # appears in one giant module (e.g. ``cleanup-orchestrator`` has 25+
+    # ``buildXCategory`` helpers) consumes the entire ``limit`` and
+    # starves other relevant modules from the bundle.
+    PER_MODULE_CAP = 5
+
+    # When the query has 2+ keywords, surface modules that contain
+    # MULTIPLE of them first.  This is the precision booster — it
+    # promotes ``src.services.orchestrator`` (matches "orchestrator" +
+    # "compose" + "prompt") above ``src.services.cleanup.cleanup-orchestrator``
+    # (matches only "orchestrator").
+    cooccur_modules: list[str] = []
+    if len(keywords) >= 2:
+        scored = _score_modules_by_keyword_coverage(conn, keywords)
+        cooccur_modules = [qn for qn, _ in scored]
+
     try:
         # LadybugDB/kuzu quirks this query has to sidestep:
         #   - `any(kw IN $list WHERE ...)` is rejected (LIST_CONTAINS
@@ -486,6 +692,17 @@ def _module_level_symbols(
         )
         backend_hits = [r["qn"] for r in backend_rows if r.get("qn")]
 
+        # Apply both fairness cap AND co-occurrence ranking before
+        # truncating to ``limit``.  The cap spreads coverage across more
+        # source modules; the ranking promotes co-occurring-keyword
+        # modules to the top of each bucket.
+        backend_hits = _rank_and_cap_module_hits(
+            backend_hits,
+            cooccur_modules=cooccur_modules,
+            per_module_cap=PER_MODULE_CAP,
+            limit=limit,
+        )
+
         # Short-circuit when backend alone filled the limit.
         if len(backend_hits) >= limit:
             return backend_hits[:limit]
@@ -493,9 +710,19 @@ def _module_level_symbols(
         fallback_rows = _result_to_rows(
             conn.execute(fallback_cypher, {"kws": keywords})  # type: ignore[attr-defined]
         )
+        fallback_hits = [r["qn"] for r in fallback_rows if r.get("qn")]
+        # Reapply both ranking + cap to the fallback rows, then merge —
+        # otherwise frontend/test slots dominate even with the backend
+        # check above (e.g. when backend yielded only 3 hits, we still
+        # want fairness in the fallback set).
+        fallback_hits = _rank_and_cap_module_hits(
+            fallback_hits,
+            cooccur_modules=cooccur_modules,
+            per_module_cap=PER_MODULE_CAP,
+            limit=limit,
+        )
         seen = set(backend_hits)
-        for r in fallback_rows:
-            qn = r.get("qn")
+        for qn in fallback_hits:
             if qn and qn not in seen:
                 seen.add(qn)
                 backend_hits.append(qn)
@@ -619,7 +846,9 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
 
     # 1. Semantic seed — find the most task-relevant functions/methods.
     # Point code-graph-rag at the per-repo DB *before* the semantic search
-    # so search_embeddings() reads from the correct .embeddings.npy file.
+    # so the vector_store shim resolves to the correct ``<slug>.duck`` file.
+    # (Historical note: this used to read from ``<slug>.embeddings.npy``
+    # before the DuckDB swap retired the numpy backend.)
     repo_slug = Path(req.repo_path).resolve().name
     _repo_db = settings.db_path_for_repo(repo_slug)
     try:
@@ -733,6 +962,23 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         # how many boosts fired.
         seed_cap = max(effective_k, len(exact_hits) + len(module_hits) + len(entrypoint_hits))
         seed_symbols = merged[: min(seed_cap, effective_k * 2)]
+
+        # Optional listwise rerank of the merged seed set via CodeRankLLM
+        # (LM Studio).  Runs BEFORE BFS expansion so the call-graph walk
+        # spends its hop budget on the most-relevant seeds; reordering
+        # after expansion would already have wasted hops on weak seeds.
+        # Best-effort — any failure leaves seed_symbols in the merged
+        # boost+semantic order.
+        if req.rerank and seed_symbols:
+            try:
+                from ..services import reranker  # noqa: WPS433
+                cand = [{"qualified_name": qn} for qn in seed_symbols]
+                reordered = reranker.rerank(req.task_description, cand)
+                if reordered and len(reordered) == len(cand):
+                    seed_symbols = [c["qualified_name"] for c in reordered]
+            except Exception:
+                # Non-fatal — preserve merged order on any rerank failure.
+                pass
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -754,15 +1000,30 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     #    (we already have whole modules via the boost) while symbol and
     #    howto queries dig deeper into callee chains.
     conn = _get_conn(repo_slug)
-    all_symbols, call_graph = _expand_call_graph(conn, seed_symbols, effective_depth)
+    all_symbols, call_graph, symbol_depth = _expand_call_graph(
+        conn, seed_symbols, effective_depth,
+    )
 
     # 3. Fetch source snippets — sorted for deterministic output.
     source_snippets = _fetch_source_for_symbols(conn, sorted(all_symbols))
 
-    # 4. Token estimate — char-count / 4 is accurate within ~20% for mixed
-    #    code/English content and avoids pulling in a tokenizer.
+    # 4. Token-budget truncation — drop deepest-hop symbols first when
+    #    the bundle would exceed ``_TOKEN_BUDGET``.  Seeds (depth 0) are
+    #    always preserved; we shrink from the deepest hop inward,
+    #    re-counting after each layer is dropped.  Without this, a
+    #    repo with high call-graph fan-out can return 60k+ tokens for
+    #    a single bundle, blowing past the orchestrator's 10k tier-2
+    #    cap and forcing every caller to truncate downstream anyway.
     total_chars = sum(len(s) for s in source_snippets.values())
     total_tokens = total_chars // _CHARS_PER_TOKEN
+    if total_tokens > _TOKEN_BUDGET and symbol_depth:
+        all_symbols, source_snippets, call_graph, total_tokens = _truncate_to_budget(
+            all_symbols=all_symbols,
+            source_snippets=source_snippets,
+            call_graph=call_graph,
+            symbol_depth=symbol_depth,
+            budget=_TOKEN_BUDGET,
+        )
 
     return ContextBundleResponse(
         symbols=sorted(all_symbols),

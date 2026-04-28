@@ -120,6 +120,22 @@ class Settings(BaseSettings):
             return []
         return [o.strip().lower() for o in raw.split(",") if o.strip()]
 
+    # --- LM Studio adapter (opt-in, best-effort) ---
+    # When LM_STUDIO_URL is set and the named models are loaded, the
+    # /search/semantic and /context-bundle endpoints will:
+    #   * use CodeRankEmbed at LM Studio for query embedding (avoids
+    #     loading torch into uvicorn's process)
+    #   * use CodeRankLLM at LM Studio for listwise rerank when the
+    #     ?rerank=true flag is set
+    # These are READ DIRECTLY by app.services.lm_studio (which has no
+    # pydantic-settings dependency), so duplicating them here is purely
+    # for documentation / IDE discoverability.  Keep names in sync with
+    # lm_studio._env() default values.
+    LM_STUDIO_URL: str = ""                       # e.g. http://localhost:1234
+    LM_STUDIO_EMBED_MODEL: str = "CodeRankEmbed"  # substring hint
+    LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint
+    LM_STUDIO_TIMEOUT: float = 30.0
+
 
 # Module-level singleton — import this rather than re-instantiating Settings.
 settings = Settings()
