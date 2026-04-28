@@ -120,3 +120,33 @@ def test_context_bundle_depth_zero(tmp_path: Path) -> None:
     # No CALLS query should have been made
     for call in conn.execute.call_args_list:
         assert "CALLS" not in (call[0][0] if call[0] else "")
+
+
+def test_context_bundle_rejects_nonexistent_repo() -> None:
+    """POST /context-bundle with a path that does not exist should return 422."""
+    resp = client.post(
+        "/context-bundle",
+        json={
+            "repo_path": "/this/path/absolutely/does/not/exist/on/disk",
+            "task_description": "retry HTTP requests",
+        },
+    )
+    assert resp.status_code == 422
+    # Pydantic wraps field_validator errors in the standard 422 detail array
+    detail = resp.json().get("detail", "")
+    detail_str = str(detail)
+    assert "does not exist" in detail_str or "repo_path" in detail_str
+
+
+def test_context_bundle_503_when_semantic_search_unavailable(tmp_path: Path) -> None:
+    """When semantic_code_search raises, the endpoint returns 503."""
+    import codebase_rag.tools.semantic_search as _sem
+
+    with patch.object(_sem, "semantic_code_search", side_effect=RuntimeError("model not loaded")):
+        resp = client.post(
+            "/context-bundle",
+            json={"repo_path": str(tmp_path), "task_description": "anything"},
+        )
+
+    assert resp.status_code == 503
+    assert "unavailable" in resp.json()["detail"].lower()

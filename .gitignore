@@ -8,3 +8,18 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local config and secrets
+.env
+.env.local
+
+# Runtime artifacts
+.DS_Store
+*.log
+service.log
+.cgr/
+.cgr-hash-cache.json
+# .planning/ holds team deliverables (DEVOPS_REQUEST, FRONTEND_AGENT_BRIEF,
+# TEAM_DEPLOYMENT_PLAN, phase-plans/) — track those; only the archive is local.
+.planning/_archive/
+CLAUDE.md
