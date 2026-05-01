@@ -367,7 +367,6 @@ def semantic_search(
         vec_path = settings.vec_db_path_for_repo(repo)
     else:
         # No repo specified — find the first .duck on disk.
-        import os as _os
         db_dir = Path(settings.LADYBUG_DB_DIR)
         vec_path = ""
         if db_dir.is_dir():
