@@ -21,12 +21,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
-import time
 from collections import deque
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Iterable, Optional
 
 from fastapi import FastAPI
 
@@ -64,18 +61,18 @@ _INDEX_BUCKETS = (1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.
 # Singleton metrics — populated by ``setup_metrics`` so the import path is
 # safe when prometheus_client is unavailable.
 # ---------------------------------------------------------------------------
-_REGISTRY: Optional["CollectorRegistry"] = None
-_search_duration: Optional["Histogram"] = None
-_search_requests: Optional["Counter"] = None
-_index_job_duration: Optional["Histogram"] = None
-_index_jobs_total: Optional["Counter"] = None
-_index_job_progress: Optional["Gauge"] = None
-_lm_studio_up: Optional["Gauge"] = None
-_lm_studio_can_rerank: Optional["Gauge"] = None
-_embeddings_count: Optional["Gauge"] = None
-_disk_bytes: Optional["Gauge"] = None
-_jobs_active: Optional["Gauge"] = None
-_jobs_dedupe_409: Optional["Counter"] = None
+_REGISTRY: "CollectorRegistry | None" = None
+_search_duration: "Histogram | None" = None
+_search_requests: "Counter | None" = None
+_index_job_duration: "Histogram | None" = None
+_index_jobs_total: "Counter | None" = None
+_index_job_progress: "Gauge | None" = None
+_lm_studio_up: "Gauge | None" = None
+_lm_studio_can_rerank: "Gauge | None" = None
+_embeddings_count: "Gauge | None" = None
+_disk_bytes: "Gauge | None" = None
+_jobs_active: "Gauge | None" = None
+_jobs_dedupe_409: "Counter | None" = None
 
 _state_lock = Lock()
 _initialised = False

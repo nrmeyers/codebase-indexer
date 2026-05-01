@@ -7,8 +7,6 @@ once the router refactor wires the store into the lifespan.
 """
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 import pytest

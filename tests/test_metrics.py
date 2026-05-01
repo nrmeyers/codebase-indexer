@@ -6,9 +6,6 @@ in the /metrics output once setup_metrics has been called.
 """
 from __future__ import annotations
 
-import os
-from typing import Iterable
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
