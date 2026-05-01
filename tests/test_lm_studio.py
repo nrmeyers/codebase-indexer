@@ -230,3 +230,120 @@ def test_chat_complete_returns_none_on_empty_choices(monkeypatch: pytest.MonkeyP
     )
     monkeypatch.setattr(lm_studio, "_post_json", lambda *a, **k: {"choices": []})
     assert lm_studio.chat_complete([{"role": "user", "content": "x"}]) is None
+
+
+# ---------------------------------------------------------------------------
+# HTTP error diagnostics (regression: rerank fallbacks were silent)
+# ---------------------------------------------------------------------------
+
+
+def test_post_json_includes_response_body_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 4xx/5xx response from LM Studio surfaces its body in the RuntimeError.
+
+    Without the body, rerank failures used to log only "HTTP 400: Bad Request"
+    which is unactionable.  LM Studio's error JSON typically explains the
+    actual problem (context overflow, unknown chat_template_kwargs, etc.).
+    """
+    import io
+    import urllib.error
+
+    from app.services import lm_studio
+
+    err_payload = (
+        b'{"error":{"message":"This model\'s maximum context length is 4096 '
+        b'tokens. However, your messages resulted in 6231 tokens."}}'
+    )
+    http_err = urllib.error.HTTPError(
+        url="http://localhost:9999/v1/chat/completions",
+        code=400,
+        msg="Bad Request",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=io.BytesIO(err_payload),
+    )
+
+    def boom(_req, timeout):  # noqa: ARG001
+        raise http_err
+
+    monkeypatch.setattr(lm_studio.urllib.request, "urlopen", boom)
+
+    with pytest.raises(RuntimeError) as ei:
+        lm_studio._post_json(
+            "http://localhost:9999/v1/chat/completions",
+            {"model": "x", "messages": []},
+            5.0,
+        )
+    msg = str(ei.value)
+    assert "HTTP 400" in msg
+    assert "Bad Request" in msg
+    # The actionable detail must be present — that is the entire fix.
+    assert "maximum context length" in msg
+
+
+def test_post_json_truncates_long_error_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Very large error bodies are truncated so logs stay readable."""
+    import io
+    import urllib.error
+
+    from app.services import lm_studio
+
+    long_body = ("X" * 5000).encode("utf-8")
+    http_err = urllib.error.HTTPError(
+        url="http://localhost:9999/v1/chat/completions",
+        code=500,
+        msg="Internal Server Error",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=io.BytesIO(long_body),
+    )
+
+    def boom(_req, timeout):  # noqa: ARG001
+        raise http_err
+
+    monkeypatch.setattr(lm_studio.urllib.request, "urlopen", boom)
+
+    with pytest.raises(RuntimeError) as ei:
+        lm_studio._post_json("http://x/", {}, 5.0)
+    # The body suffix is capped at 400 chars; the full message stays bounded.
+    msg = str(ei.value)
+    assert "HTTP 500" in msg
+    # Cap is 400 chars of body, so the rendered message must not contain
+    # 1000 consecutive Xs (which the un-truncated body would).
+    assert "X" * 1000 not in msg
+
+
+def test_post_json_handles_unreadable_error_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If reading the error body itself fails, we still raise a clean message."""
+    import urllib.error
+
+    from app.services import lm_studio
+
+    class _BadFp:
+        def read(self) -> bytes:
+            raise OSError("socket already closed")
+
+        def close(self) -> None:
+            return None
+
+    http_err = urllib.error.HTTPError(
+        url="http://x/",
+        code=502,
+        msg="Bad Gateway",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=_BadFp(),  # type: ignore[arg-type]
+    )
+
+    def boom(_req, timeout):  # noqa: ARG001
+        raise http_err
+
+    monkeypatch.setattr(lm_studio.urllib.request, "urlopen", boom)
+
+    with pytest.raises(RuntimeError) as ei:
+        lm_studio._post_json("http://x/", {}, 5.0)
+    msg = str(ei.value)
+    assert "HTTP 502" in msg
+    assert "Bad Gateway" in msg
