@@ -20,6 +20,12 @@ Each plan covers goals, file inventory, sample code, test plan, rollout, and tra
 | 2 | `phase-plans/PHASE_2_PERSISTENT_JOBS.md` | SQLite-backed job state (WAL mode), restart recovery via `interrupted` status, dedupe-409 on concurrent `POST /index`. |
 | 3 | `phase-plans/PHASE_3_DOCKER.md` | Multi-stage Dockerfiles, docker-compose stack at `forge.navistone.com`, Caddy reverse proxy with Let's Encrypt + WS upgrade, GHCR CI/CD. |
 | 4 | `phase-plans/PHASE_4_GRAFANA.md` | `prometheus_client` (Python) + `prom-client` (Node) `/metrics` endpoints, audit-event → counter bridge, Grafana dashboard + 4 alerts. |
+| 5 | `phase-plans/PHASE_5_REALTIME_UPDATER.md` | Watchdog file-watcher per repo, 1.5 s asyncio debounce, partial re-index via Phase 2 `kind='watch_partial'` jobs, opt-in `POST /repos/{slug}/watch`. |
+| 8 | `phase-plans/PHASE_8_HNSW_VSS.md` | DuckDB VSS extension HNSW index, trigger-gated activation runbook (p95 > 200 ms or > 50k symbols), per-repo flag rollout, recall@20 ≥ 98% gate. |
+| 9 | `phase-plans/PHASE_9_CROSS_REPO_RANK.md` | RRF (rank-based) cross-repo result merging in TheForge, two-stage 9a-eval / 9b-ship, env-flag rollout, ADR-0006 supersedes ADR-0003 on ship. |
+
+> Phases 6 (codebase cleanup) and 7 (doc rewrite) are meta-phases ongoing
+> through routine engineering work; they have no separate plan file.
 
 ## Top-level project docs (not in this folder)
 
