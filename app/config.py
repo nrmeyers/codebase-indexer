@@ -90,6 +90,17 @@ class Settings(BaseSettings):
         """
         return str(Path(self.LADYBUG_DB_DIR) / f"{slugify_repo(repo_name)}.duck")
 
+    # --- Persistent job store (Phase 2) ---
+    # SQLite file backing the persistent job store. Created on first startup.
+    # Use ``:memory:`` in tests via environment override.
+    JOBS_DB_PATH: str = ".cgr/jobs.sqlite"
+
+    # --- Prometheus metrics (Phase 4) ---
+    METRICS_ENABLED: bool = True
+    METRICS_PATH: str = "/metrics"
+    # Top-level data dir for disk-usage gauges (defaults to .cgr).
+    CGR_DATA_DIR: str = ".cgr"
+
     # --- Default repo to index when none is provided ---
     TARGET_REPO_PATH: str = "."
 

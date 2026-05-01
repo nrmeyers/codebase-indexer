@@ -174,7 +174,7 @@ class IndexStatus(BaseModel):
     """
 
     job_id: str
-    status: Literal["pending", "running", "done", "failed"]
+    status: Literal["pending", "running", "done", "failed", "interrupted"]
     phase: Literal[
         "queued", "discovering", "parsing", "writing",
         "embedding", "finalizing", "done", "cancelled",
@@ -488,7 +488,7 @@ class JobSummary(BaseModel):
     job_id: str
     repo_path: str
     repo_name: str
-    status: Literal["running", "done", "failed"]
+    status: Literal["running", "done", "failed", "interrupted", "cancelled", "queued"]
     progress_pct: float
     phase: str
     node_count: int
