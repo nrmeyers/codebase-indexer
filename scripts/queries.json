@@ -1,0 +1,461 @@
+[
+  {
+    "id": "tf-sem-001",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "q": "where is bearer token validation done",
+    "expected_topk_substrings": ["jwt-validator", "validateBearer", "require-bearer", "bearerToken"],
+    "k": 10
+  },
+  {
+    "id": "tf-sem-002",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "q": "find the gate state machine approval transition logic",
+    "expected_topk_substrings": ["gate-state-machine", "gateTransition", "approve", "GateState"],
+    "k": 10
+  },
+  {
+    "id": "tf-sem-003",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "q": "where does index progress get broadcast over websocket",
+    "expected_topk_substrings": ["activity-feed", "broadcastActivity", "WebSocket", "notification-service"],
+    "k": 10
+  },
+  {
+    "id": "tf-sem-004",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "q": "how is the orchestrator prompt assembled and capped",
+    "expected_topk_substrings": ["orchestrator", "composePrompt", "PROMPT_FORMATTING_GUIDE", "prompt-assembly"],
+    "k": 10
+  },
+  {
+    "id": "tf-sem-005",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "q": "AAD groups to role mapping for authorization",
+    "expected_topk_substrings": ["aad-provider", "m365-auth", "groupsToRoles", "RoleMapping"],
+    "k": 10
+  },
+  {
+    "id": "tf-sem-006",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "q": "error envelope creation and result pattern usage",
+    "expected_topk_substrings": ["createErrorEnvelope", "errors.ts", "result.ts", "ErrorEnvelope"],
+    "k": 10
+  },
+  {
+    "id": "tf-sem-007",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "q": "linear issue sync and project milestone creation",
+    "expected_topk_substrings": ["linear.ts", "LinearSync", "syncLinear", "linearIssue"],
+    "k": 10
+  },
+  {
+    "id": "tf-str-001",
+    "repo": "TheForge",
+    "intent": "structural",
+    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'validateBearer' RETURN f.qualified_name LIMIT 10",
+    "expected_min_results": 1
+  },
+  {
+    "id": "tf-str-002",
+    "repo": "TheForge",
+    "intent": "structural",
+    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'createErrorEnvelope' RETURN f.qualified_name, f.file_path LIMIT 20",
+    "expected_min_results": 1
+  },
+  {
+    "id": "tf-str-003",
+    "repo": "TheForge",
+    "intent": "structural",
+    "q": "MATCH (m:Module)-[:IMPORTS]->(n:Module) WHERE n.name CONTAINS 'result' RETURN m.name, n.name LIMIT 15",
+    "expected_min_results": 1
+  },
+  {
+    "id": "tf-str-004",
+    "repo": "TheForge",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'gate-state-machine' RETURN f.name, f.qualified_name LIMIT 20",
+    "expected_min_results": 1
+  },
+  {
+    "id": "tf-str-005",
+    "repo": "TheForge",
+    "intent": "structural",
+    "q": "MATCH (c:Class)-[:HAS_METHOD]->(m:Function) WHERE c.file_path CONTAINS 'orchestrator' RETURN c.name, m.name LIMIT 15",
+    "expected_min_results": 0
+  },
+  {
+    "id": "tf-str-006",
+    "repo": "TheForge",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'api-server' RETURN f.name, f.line_start LIMIT 20",
+    "expected_min_results": 1
+  },
+  {
+    "id": "tf-str-007",
+    "repo": "TheForge",
+    "intent": "structural",
+    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name CONTAINS 'broadcast' RETURN f.qualified_name LIMIT 10",
+    "expected_min_results": 0
+  },
+  {
+    "id": "tf-sym-001",
+    "repo": "TheForge",
+    "intent": "symbol",
+    "q": "createErrorEnvelope",
+    "expected_topk_substrings": ["errors.ts", "createErrorEnvelope"],
+    "k": 5
+  },
+  {
+    "id": "tf-sym-002",
+    "repo": "TheForge",
+    "intent": "symbol",
+    "q": "validateBearer",
+    "expected_topk_substrings": ["jwt-validator", "require-bearer", "validateBearer"],
+    "k": 5
+  },
+  {
+    "id": "tf-sym-003",
+    "repo": "TheForge",
+    "intent": "symbol",
+    "q": "composePrompt",
+    "expected_topk_substrings": ["orchestrator", "prompt-assembly", "composePrompt"],
+    "k": 5
+  },
+  {
+    "id": "tf-sym-004",
+    "repo": "TheForge",
+    "intent": "symbol",
+    "q": "invalidateProbeCache",
+    "expected_topk_substrings": ["invalidate_probe_cache", "health.ts", "invalidateProbeCache"],
+    "k": 5
+  },
+  {
+    "id": "tf-sym-005",
+    "repo": "TheForge",
+    "intent": "symbol",
+    "q": "buildContextBundle",
+    "expected_topk_substrings": ["build_context_bundle", "context_bundle", "buildContextBundle"],
+    "k": 5
+  },
+  {
+    "id": "tf-sym-006",
+    "repo": "TheForge",
+    "intent": "symbol",
+    "q": "gateStateMachine",
+    "expected_topk_substrings": ["gate-state-machine", "GateStateMachine", "gateStateMachine"],
+    "k": 5
+  },
+  {
+    "id": "ci-sem-001",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "q": "where does the lifespan startup configure prometheus metrics",
+    "expected_topk_substrings": ["lifespan", "setup_metrics", "main.py", "metrics.py"],
+    "k": 10
+  },
+  {
+    "id": "ci-sem-002",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "q": "how does the reranker fallback when LM Studio is unavailable",
+    "expected_topk_substrings": ["reranker", "lm_studio", "rerank"],
+    "k": 10
+  },
+  {
+    "id": "ci-sem-003",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "q": "where are index progress events streamed over websocket",
+    "expected_topk_substrings": ["websocket", "index_progress", "routers/index"],
+    "k": 10
+  },
+  {
+    "id": "ci-sem-004",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "q": "health probe TTL cache for per-repo DB connections",
+    "expected_topk_substrings": ["health", "_probe_cache", "_PROBE_TTL", "invalidate_probe_cache"],
+    "k": 10
+  },
+  {
+    "id": "ci-sem-005",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "q": "semantic search cosine distance embedding query flow",
+    "expected_topk_substrings": ["search.py", "array_cosine_distance", "_embed_fn", "semantic"],
+    "k": 10
+  },
+  {
+    "id": "ci-sem-006",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "q": "context bundle keyword module ranking and budget truncation",
+    "expected_topk_substrings": ["context_bundle", "_classify_intent", "_truncate_to_budget", "_score_modules"],
+    "k": 10
+  },
+  {
+    "id": "ci-sem-007",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "q": "write keyword guard preventing Cypher mutations in structural search",
+    "expected_topk_substrings": ["search.py", "_WRITE_KEYWORDS", "structural"],
+    "k": 10
+  },
+  {
+    "id": "ci-str-001",
+    "repo": "code-indexer-service",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.name = 'setup_metrics' RETURN f.qualified_name, f.file_path",
+    "expected_min_results": 1
+  },
+  {
+    "id": "ci-str-002",
+    "repo": "code-indexer-service",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.name = 'lifespan' RETURN f.qualified_name, f.file_path",
+    "expected_min_results": 1
+  },
+  {
+    "id": "ci-str-003",
+    "repo": "code-indexer-service",
+    "intent": "structural",
+    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'invalidate_probe_cache' RETURN f.qualified_name LIMIT 10",
+    "expected_min_results": 0
+  },
+  {
+    "id": "ci-str-004",
+    "repo": "code-indexer-service",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'reranker' RETURN f.name, f.line_start ORDER BY f.line_start LIMIT 15",
+    "expected_min_results": 1
+  },
+  {
+    "id": "ci-str-005",
+    "repo": "code-indexer-service",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'context_bundle' RETURN f.name, f.line_start LIMIT 20",
+    "expected_min_results": 1
+  },
+  {
+    "id": "ci-str-006",
+    "repo": "code-indexer-service",
+    "intent": "structural",
+    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name CONTAINS 'embed' RETURN f.qualified_name, g.name LIMIT 15",
+    "expected_min_results": 0
+  },
+  {
+    "id": "ci-str-007",
+    "repo": "code-indexer-service",
+    "intent": "structural",
+    "q": "MATCH (m:Module) WHERE m.name CONTAINS 'services' RETURN m.name, m.file_path LIMIT 10",
+    "expected_min_results": 1
+  },
+  {
+    "id": "ci-sym-001",
+    "repo": "code-indexer-service",
+    "intent": "symbol",
+    "q": "setup_metrics",
+    "expected_topk_substrings": ["metrics.py", "setup_metrics"],
+    "k": 5
+  },
+  {
+    "id": "ci-sym-002",
+    "repo": "code-indexer-service",
+    "intent": "symbol",
+    "q": "lifespan",
+    "expected_topk_substrings": ["main.py", "lifespan"],
+    "k": 5
+  },
+  {
+    "id": "ci-sym-003",
+    "repo": "code-indexer-service",
+    "intent": "symbol",
+    "q": "invalidate_probe_cache",
+    "expected_topk_substrings": ["health.py", "invalidate_probe_cache"],
+    "k": 5
+  },
+  {
+    "id": "ci-sym-004",
+    "repo": "code-indexer-service",
+    "intent": "symbol",
+    "q": "build_context_bundle",
+    "expected_topk_substrings": ["context_bundle.py", "build_context_bundle"],
+    "k": 5
+  },
+  {
+    "id": "ci-sym-005",
+    "repo": "code-indexer-service",
+    "intent": "symbol",
+    "q": "_blocking_index",
+    "expected_topk_substrings": ["routers/index.py", "_blocking_index", "index.py"],
+    "k": 5
+  },
+  {
+    "id": "ci-sym-006",
+    "repo": "code-indexer-service",
+    "intent": "symbol",
+    "q": "_WRITE_KEYWORDS",
+    "expected_topk_substrings": ["search.py", "_WRITE_KEYWORDS"],
+    "k": 5
+  },
+  {
+    "id": "cgr-sem-001",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "q": "Arrow bulk insert for DuckDB embedding rows",
+    "expected_topk_substrings": ["bulk_insert_arrow", "vector_store_arrow", "EmbeddingRow"],
+    "k": 10
+  },
+  {
+    "id": "cgr-sem-002",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "q": "PageRank centrality computation over the call graph",
+    "expected_topk_substrings": ["compute_pagerank", "centrality.py", "pagerank"],
+    "k": 10
+  },
+  {
+    "id": "cgr-sem-003",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "q": "embed_query interface for semantic code search",
+    "expected_topk_substrings": ["embed_query", "embedder.py", "Embedder"],
+    "k": 10
+  },
+  {
+    "id": "cgr-sem-004",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "q": "tree-sitter parser loader for multiple programming languages",
+    "expected_topk_substrings": ["parser_loader", "language_spec", "ParserLoader"],
+    "k": 10
+  },
+  {
+    "id": "cgr-sem-005",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "q": "dependency parser for pyproject.toml and requirements.txt files",
+    "expected_topk_substrings": ["dependency_parser", "PyProjectTomlParser", "RequirementsTxtParser"],
+    "k": 10
+  },
+  {
+    "id": "cgr-sem-006",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "q": "upsert PageRank scores into centrality DuckDB table",
+    "expected_topk_substrings": ["vector_store.py", "upsert_pagerank", "centrality", "pagerank"],
+    "k": 10
+  },
+  {
+    "id": "cgr-sem-007",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "q": "stdlib extractor resolving standard library module paths",
+    "expected_topk_substrings": ["StdlibExtractor", "stdlib_extractor", "extract_module_path"],
+    "k": 10
+  },
+  {
+    "id": "cgr-str-001",
+    "repo": "code-graph-rag",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.name = 'bulk_insert_arrow' RETURN f.qualified_name, f.file_path",
+    "expected_min_results": 1
+  },
+  {
+    "id": "cgr-str-002",
+    "repo": "code-graph-rag",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.name = 'compute_pagerank' RETURN f.qualified_name, f.file_path",
+    "expected_min_results": 1
+  },
+  {
+    "id": "cgr-str-003",
+    "repo": "code-graph-rag",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.name = 'embed_query' RETURN f.qualified_name, f.file_path LIMIT 5",
+    "expected_min_results": 1
+  },
+  {
+    "id": "cgr-str-004",
+    "repo": "code-graph-rag",
+    "intent": "structural",
+    "q": "MATCH (c:Class)-[:HAS_METHOD]->(m:Function) WHERE c.name CONTAINS 'Parser' RETURN c.name, m.name LIMIT 20",
+    "expected_min_results": 1
+  },
+  {
+    "id": "cgr-str-005",
+    "repo": "code-graph-rag",
+    "intent": "structural",
+    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'bulk_insert_arrow' RETURN f.qualified_name LIMIT 10",
+    "expected_min_results": 1
+  },
+  {
+    "id": "cgr-str-006",
+    "repo": "code-graph-rag",
+    "intent": "structural",
+    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'centrality' RETURN f.name, f.line_start ORDER BY f.line_start LIMIT 10",
+    "expected_min_results": 1
+  },
+  {
+    "id": "cgr-str-007",
+    "repo": "code-graph-rag",
+    "intent": "structural",
+    "q": "MATCH (c:Class) WHERE c.file_path CONTAINS 'dependency_parser' RETURN c.name, c.file_path LIMIT 15",
+    "expected_min_results": 1
+  },
+  {
+    "id": "cgr-sym-001",
+    "repo": "code-graph-rag",
+    "intent": "symbol",
+    "q": "bulk_insert_arrow",
+    "expected_topk_substrings": ["vector_store_arrow", "bulk_insert_arrow"],
+    "k": 5
+  },
+  {
+    "id": "cgr-sym-002",
+    "repo": "code-graph-rag",
+    "intent": "symbol",
+    "q": "compute_pagerank",
+    "expected_topk_substrings": ["centrality.py", "compute_pagerank"],
+    "k": 5
+  },
+  {
+    "id": "cgr-sym-003",
+    "repo": "code-graph-rag",
+    "intent": "symbol",
+    "q": "embed_query",
+    "expected_topk_substrings": ["embedder.py", "embed_query"],
+    "k": 5
+  },
+  {
+    "id": "cgr-sym-004",
+    "repo": "code-graph-rag",
+    "intent": "symbol",
+    "q": "StdlibExtractor",
+    "expected_topk_substrings": ["stdlib_extractor", "StdlibExtractor"],
+    "k": 5
+  },
+  {
+    "id": "cgr-sym-005",
+    "repo": "code-graph-rag",
+    "intent": "symbol",
+    "q": "PyProjectTomlParser",
+    "expected_topk_substrings": ["dependency_parser", "PyProjectTomlParser"],
+    "k": 5
+  },
+  {
+    "id": "cgr-sym-006",
+    "repo": "code-graph-rag",
+    "intent": "symbol",
+    "q": "bulk_insert",
+    "expected_topk_substrings": ["vector_store.py", "bulk_insert"],
+    "k": 5
+  }
+]
