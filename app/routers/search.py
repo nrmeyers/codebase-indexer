@@ -15,10 +15,13 @@ live in the per-repo DuckDB file (``.duck``) alongside the structural
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+
+from .. import metrics as _metrics
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +217,24 @@ def structural_search(
     Raises:
         HTTPException: 422 when the Cypher query is malformed.
     """
+    _t0 = time.monotonic()
+    _status_code = 200
+    try:
+        return _structural_search_impl(q=q, limit=limit, repo=repo)
+    except HTTPException as _e:
+        _status_code = _e.status_code
+        raise
+    finally:
+        _metrics.record_search("structural", reranked=False, duration_seconds=time.monotonic() - _t0, status_code=_status_code)
+
+
+def _structural_search_impl(
+    *,
+    q: str,
+    limit: int,
+    repo: str | None,
+) -> StructuralSearchResponse:
+    """Inner implementation for structural_search (extracted for metrics wrapping)."""
     # Append LIMIT to guard against runaway queries (only if not already
     # present — clients that need pagination can specify their own).
     cypher = q.strip()
@@ -320,6 +341,30 @@ def semantic_search(
             import failed; fast-fail thereafter), or when no .duck file
             exists for the requested repo.
     """
+    _t0 = time.monotonic()
+    _status_code = 200
+    try:
+        return _semantic_search_impl(q=q, k=k, repo=repo, rerank=rerank)
+    except HTTPException as _e:
+        _status_code = _e.status_code
+        raise
+    finally:
+        _metrics.record_search(
+            "semantic",
+            reranked=bool(rerank),
+            duration_seconds=time.monotonic() - _t0,
+            status_code=_status_code,
+        )
+
+
+def _semantic_search_impl(
+    *,
+    q: str,
+    k: int,
+    repo: str | None,
+    rerank: bool,
+) -> SemanticSearchResponse:
+    """Inner implementation for semantic_search (extracted for metrics wrapping)."""
     import re as _re
 
     global _embed_fn, _embed_unavailable  # noqa: PLW0603
@@ -759,6 +804,19 @@ def symbol_lookup(
         HTTPException: 404 when no node with that qualified name exists,
             500 on unexpected DB errors.
     """
+    _t0 = time.monotonic()
+    _status_code = 200
+    try:
+        return _symbol_lookup_impl(fqn=fqn, repo=repo)
+    except HTTPException as _e:
+        _status_code = _e.status_code
+        raise
+    finally:
+        _metrics.record_search("symbol", reranked=False, duration_seconds=time.monotonic() - _t0, status_code=_status_code)
+
+
+def _symbol_lookup_impl(*, fqn: str, repo: str | None) -> SymbolResponse:
+    """Inner implementation for symbol_lookup (extracted for metrics wrapping)."""
     from codebase_rag.cypher_queries import CYPHER_GET_FUNCTION_SOURCE_LOCATION
 
     try:

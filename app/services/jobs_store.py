@@ -618,3 +618,29 @@ def journal_mode() -> str:
 def db_path() -> str:
     """Return the path the store was initialised against."""
     return _db_path
+
+
+# ---------------------------------------------------------------------------
+# Test helpers (never call from production code)
+# ---------------------------------------------------------------------------
+
+
+def _reset_for_tests(new_db_path: str = ":memory:") -> None:
+    """Tear down the module-level connection and reinitialise against ``new_db_path``.
+
+    Only for use in test fixtures — never call in production code. Allows each
+    test to get a clean isolated store without restarting the process.
+
+    Args:
+        new_db_path: SQLite path for the fresh store.  Defaults to ``:memory:``.
+    """
+    global _conn, _db_path  # noqa: PLW0603
+    with _lock:
+        if _conn is not None:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+        _conn = None
+        _db_path = ""
+    init(new_db_path)

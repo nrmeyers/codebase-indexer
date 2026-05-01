@@ -9,14 +9,17 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.routers.index import _jobs
+from app.services import jobs_store
 
 client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
 def clear_jobs() -> None:
-    """Isolate tests by clearing the in-memory job store."""
+    """Isolate tests by clearing the in-memory job store and resetting jobs_store."""
     _jobs.clear()
+    # Reset and re-init jobs_store against in-memory SQLite for each test.
+    jobs_store._reset_for_tests(":memory:")
     yield
     _jobs.clear()
 
@@ -136,6 +139,77 @@ def test_post_index_duplicate_same_repo_returns_409(tmp_path: Path) -> None:
     job_id1 = resp1.json()["job_id"]
     # The first job should still be retrievable.
     assert client.get(f"/index/{job_id1}/status").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 integration tests — jobs_store persistence
+# ---------------------------------------------------------------------------
+
+
+def test_restart_recovery_marks_jobs_interrupted(tmp_path: Path) -> None:
+    """Should mark running jobs as 'interrupted' when swept by a different worker token.
+
+    Simulates a service restart by writing a running job into jobs_store with
+    worker_token='old-worker', then calling sweep_interrupted with a new token.
+    The job should transition to 'interrupted' — visible via GET /index/{job_id}/status
+    once the in-memory _jobs dict is cleared (simulating the restart).
+    """
+    # Write a running job directly to the persistent store.
+    old_token = "old-worker-token"
+    persisted = jobs_store.create_job(
+        kind="index",
+        actor_oid="",
+        actor_email="",
+        repo_path=str(tmp_path),
+        force_reindex=False,
+        exclude_paths=frozenset(),
+        worker_token=old_token,
+        initial_status="running",
+        initial_phase="parsing",
+    )
+
+    # Simulate restart: sweep with a new token.
+    swept = jobs_store.sweep_interrupted("new-worker-token")
+    assert swept == 1, f"Expected 1 swept job, got {swept}"
+
+    # The _jobs dict is empty (restart cleared it).
+    assert persisted.job_id not in _jobs
+
+    # GET /index/{job_id}/status should now return 'interrupted' from the store.
+    resp = client.get(f"/index/{persisted.job_id}/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "interrupted", f"Expected 'interrupted', got {body['status']!r}"
+    assert body["job_id"] == persisted.job_id
+
+
+def test_concurrent_post_same_repo_returns_409_via_store(tmp_path: Path) -> None:
+    """Should return 409 when jobs_store shows an active job for the same repo.
+
+    Writes an active job directly into jobs_store (simulating the state after
+    a POST /index that is still running). A new POST /index for the same repo
+    path must be rejected with 409 via the store check, before the in-memory
+    _jobs scan even runs.
+    """
+    # Simulate an already-running job in the persistent store.
+    jobs_store.create_job(
+        kind="index",
+        actor_oid="",
+        actor_email="",
+        repo_path=str(tmp_path),
+        force_reindex=False,
+        exclude_paths=frozenset(),
+        worker_token="some-worker-token",
+        initial_status="running",
+        initial_phase="parsing",
+    )
+
+    # POST /index for the same repo — should be rejected by store check.
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        resp = client.post("/index", json={"repo_path": str(tmp_path)})
+
+    assert resp.status_code == 409
+    assert "already running" in resp.json()["detail"].lower()
 
 
 # ---------------------------------------------------------------------------

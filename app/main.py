@@ -17,7 +17,9 @@ Key design decisions:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
@@ -126,6 +128,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "Startup DB probe: %d repo(s) checked, %d self-healed.", _probed, _healed,
     )
 
+    # --- Phase 2: Persistent job store ---
+    # Generate a fresh per-process worker token so sweep_interrupted() can
+    # distinguish rows owned by *this* process from orphans of a prior one.
+    from .services import jobs_store as _jobs_store
+    _worker_token = os.urandom(8).hex()
+    _jobs_store.init(settings.JOBS_DB_PATH)
+    _interrupted = _jobs_store.sweep_interrupted(_worker_token)
+    if _interrupted:
+        _log.warning(
+            "jobs_store: swept %d interrupted job(s) from prior worker", _interrupted
+        )
+
     # Orphan-job sweep + stale lock cleanup so a prior crash doesn't leave
     # the in-memory state wedged.
     from .routers.index import sweep_orphan_jobs, cleanup_stale_locks
@@ -156,7 +170,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         len(indexed_repo_paths),
     )
 
+    # --- Phase 4: Prometheus metrics ---
+    # setup_metrics mounts /metrics and wires HTTP auto-instrumentation.
+    # start_background_collectors polls LM Studio health + disk usage every 30 s.
+    _metrics_task: asyncio.Task | None = None
+    if settings.METRICS_ENABLED:
+        from . import metrics as _metrics
+        from .services.lm_studio import is_available as _lm_available, can_rerank as _lm_can_rerank
+
+        def _lm_health() -> tuple[bool, bool]:
+            return _lm_available(), _lm_can_rerank()
+
+        _metrics.setup_metrics(app)
+        _metrics_task = asyncio.create_task(
+            _metrics.start_background_collectors(
+                lm_studio_health_fn=_lm_health,
+                cgr_data_dir=settings.CGR_DATA_DIR,
+            )
+        )
+        _log.info("metrics: background collectors started")
+
     yield
+
+    # Shutdown: cancel the metrics background task gracefully.
+    if _metrics_task is not None:
+        _metrics_task.cancel()
+        try:
+            await _metrics_task
+        except asyncio.CancelledError:
+            pass
 
 
 def create_app() -> FastAPI:
