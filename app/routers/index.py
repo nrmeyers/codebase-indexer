@@ -346,10 +346,30 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # cgrignore changes only partially take effect.
     if force_reindex:
         db_file = Path(repo_db_path)
-        wal_file = db_file.with_suffix(db_file.suffix + "-wal")
-        shm_file = db_file.with_suffix(db_file.suffix + "-shm")
+        # LadybugDB artefacts (kuzu naming: .db-wal, .db-shm)
+        ladybug_wal = db_file.with_suffix(db_file.suffix + "-wal")
+        ladybug_shm = db_file.with_suffix(db_file.suffix + "-shm")
+        # DuckDB artefacts live alongside the .duck file derived from the
+        # same stem — DuckDB names its journal `<file>.wal` (dot, not dash)
+        # and may leave a `<file>.tmp` from interrupted writes.
+        duck_file = db_file.with_suffix(".duck")
+        duck_wal = db_file.with_name(db_file.stem + ".duck.wal")
+        duck_tmp = db_file.with_name(db_file.stem + ".duck.tmp")
+        # Belt-and-braces: also catch the ".db.wal" form that DuckDB has
+        # been observed to construct when its connection path got the
+        # LadybugDB extension by mistake.
+        belt_db_dot_wal = db_file.with_name(db_file.name + ".wal")
         hash_cache = repo / ".cgr-hash-cache.json"
-        for artifact in (db_file, wal_file, shm_file, hash_cache):
+        for artifact in (
+            db_file,
+            ladybug_wal,
+            ladybug_shm,
+            duck_file,
+            duck_wal,
+            duck_tmp,
+            belt_db_dot_wal,
+            hash_cache,
+        ):
             try:
                 artifact.unlink(missing_ok=True)
             except OSError:
