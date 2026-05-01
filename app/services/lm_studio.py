@@ -119,7 +119,19 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, A
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"LM Studio HTTP {exc.code}: {exc.reason}") from exc
+        # LM Studio returns a JSON body on 4xx/5xx that explains *why* the
+        # request was rejected (e.g. context-window overflow, unknown
+        # ``chat_template_kwargs``, malformed messages).  The default
+        # ``HTTPError`` repr drops that body, so callers see only "HTTP 400:
+        # Bad Request" and have nothing actionable to debug.  Surface up to
+        # the first 400 chars of the response body so the rerank-fallback
+        # log line is useful instead of opaque.
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")[:400]
+        except Exception:
+            err_body = ""
+        suffix = f" — {err_body}" if err_body else ""
+        raise RuntimeError(f"LM Studio HTTP {exc.code}: {exc.reason}{suffix}") from exc
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"LM Studio request failed: {exc}") from exc
 

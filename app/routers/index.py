@@ -645,8 +645,19 @@ from codebase_rag.storage.vector_store import (
 )
 from codebase_rag.storage.docstring_format import format_docstring
 
-# Open LadybugDB read-only to query symbol locations
-_db = lb.Database({repr(repo_db_path)})
+# Open LadybugDB read-only to query symbol locations.
+#
+# ``read_only=True`` is critical here: when /index/embed is invoked
+# while uvicorn is also live, the parent process already holds the DB
+# file open via the count-query block above (and FastAPI tooling can
+# also keep handles around).  LadybugDB takes a write lock by default
+# (``IO exception: Could not set lock on file: …``) and the embed
+# subprocess fails with exit 1 before the user ever sees progress.
+# Read-only opens skip the write lock and multiple readers can coexist
+# with the live indexer — exactly what we want here, since the embed
+# pass only QUERIES the graph and writes vectors to a separate .duck
+# file.
+_db = lb.Database({repr(repo_db_path)}, read_only=True)
 _conn_lb = lb.Connection(_db)
 
 _cypher = '''

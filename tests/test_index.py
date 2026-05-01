@@ -136,3 +136,64 @@ def test_post_index_duplicate_same_repo_returns_409(tmp_path: Path) -> None:
     job_id1 = resp1.json()["job_id"]
     # The first job should still be retrievable.
     assert client.get(f"/index/{job_id1}/status").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Embed-pass lock-conflict regression
+# ---------------------------------------------------------------------------
+
+
+def test_blocking_embed_opens_ladybug_read_only(tmp_path: Path) -> None:
+    """The embed subprocess driver MUST open LadybugDB with ``read_only=True``.
+
+    Without this flag the subprocess takes a write lock on the same .db
+    file the live indexer is already holding open, causing the embed pass
+    to die with ``IO exception: Could not set lock on file: ...`` almost
+    immediately after start.  This test pins the contract so a future
+    refactor of the driver string can't silently regress it.
+    """
+    import subprocess
+    from unittest.mock import MagicMock, patch
+
+    from app.routers.index import _EmbedJob, _blocking_embed
+
+    from app.routers import index as index_mod
+
+    # Make the configured per-repo .db live under tmp_path so the
+    # FileNotFoundError early-exit doesn't trip.
+    db_dir = tmp_path
+    repo_name = "fakerepo"
+    fake_db = Path(index_mod.settings.db_path_for_repo(repo_name))
+    # Redirect LADYBUG_DB_DIR to tmp_path; db_path_for_repo recomputes
+    # from this attribute on every call so this is enough.
+    orig_dir = index_mod.settings.LADYBUG_DB_DIR
+    object.__setattr__(index_mod.settings, "LADYBUG_DB_DIR", str(db_dir))
+    try:
+        fake_db = Path(index_mod.settings.db_path_for_repo(repo_name))
+        fake_db.parent.mkdir(parents=True, exist_ok=True)
+        fake_db.write_bytes(b"\x00" * 8)
+
+        captured: dict[str, str] = {}
+
+        def fake_run(cmd, *args, **kwargs):  # noqa: ARG001
+            captured["driver"] = cmd[2]
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
+        job = _EmbedJob(
+            job_id="t1", repo_name=repo_name, repo_path=str(tmp_path),
+        )
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            _blocking_embed(job)
+    finally:
+        object.__setattr__(index_mod.settings, "LADYBUG_DB_DIR", orig_dir)
+
+    driver = captured["driver"]
+    # The exact call site the production fix targets.
+    assert "lb.Database(" in driver
+    assert "read_only=True" in driver, (
+        "Embed subprocess must open LadybugDB read-only to avoid lock "
+        "conflicts with the live FastAPI process."
+    )
