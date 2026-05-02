@@ -39,6 +39,77 @@ def _mock_conn(rows: list[dict]) -> MagicMock:
     return conn
 
 
+# ---------------------------------------------------------------------------
+# _rewrite_descriptive_query — descriptive→tighter rewrite + outcome label
+# ---------------------------------------------------------------------------
+
+
+def test_rewrite_descriptive_query_strips_filler_words() -> None:
+    from app.routers.search import _rewrite_descriptive_query as rw
+    # 4+ tokens, no symbol-name signal → stop-words drop, outcome=applied.
+    assert rw("how do AAD groups map to Forge roles") == (
+        "AAD groups map Forge roles", "applied",
+    )
+    assert rw("JWT validation against AAD JWKS") == (
+        "JWT validation AAD JWKS", "applied",
+    )
+    # CamelCase common nouns (WebSocket / MSAL) do NOT short-circuit.
+    assert rw("WebSocket reconnect with fresh token") == (
+        "WebSocket reconnect fresh token", "applied",
+    )
+
+
+def test_rewrite_descriptive_query_outcome_short_token_count() -> None:
+    from app.routers.search import _rewrite_descriptive_query as rw
+    assert rw("createIdentityProvider") == ("createIdentityProvider", "skip-short")
+    assert rw("rate limit") == ("rate limit", "skip-short")
+    assert rw("error envelope construction") == (
+        "error envelope construction", "skip-short",
+    )
+
+
+def test_rewrite_descriptive_query_outcome_dotted_or_snake() -> None:
+    from app.routers.search import _rewrite_descriptive_query as rw
+    # ≥4 tokens with a dotted FQN present — preserve verbatim, the
+    # dotted token is an explicit symbol-name signal that overrides
+    # rewriting.
+    assert rw("look up module.path.fnName in current scope") == (
+        "look up module.path.fnName in current scope", "skip-symbol-like",
+    )
+    # snake_case symbol — same skip path.
+    assert rw("set up setup_test_env helper for new tests") == (
+        "set up setup_test_env helper for new tests", "skip-symbol-like",
+    )
+    # Hyphenated identifier-shape token — same skip path.
+    assert rw("verify aad-provider integration with JWKS cache") == (
+        "verify aad-provider integration with JWKS cache", "skip-symbol-like",
+    )
+
+
+def test_rewrite_descriptive_query_outcome_overstrip_falls_back() -> None:
+    from app.routers.search import _rewrite_descriptive_query as rw
+    # 4+ tokens, no symbol-shape, but everything is a stop-word →
+    # rewriter would leave 0-1 tokens; safer to return original.
+    rewritten, outcome = rw("the of a an")
+    assert rewritten == "the of a an"
+    assert outcome in {"skip-short", "skip-overstrip"}
+
+
+def test_rewrite_descriptive_query_outcomes_are_exclusive() -> None:
+    from app.routers.search import _rewrite_descriptive_query as rw
+    # Every outcome must be one of the four documented labels — Prometheus
+    # counter cardinality stays bounded at 4 × intent count.
+    valid = {"applied", "skip-short", "skip-symbol-like", "skip-overstrip"}
+    for q in [
+        "createIdentityProvider",                       # short
+        "module.path.fn name with extra words",         # symbol-like
+        "how do AAD groups map to Forge roles",         # applied
+        "the of a an",                                  # short
+    ]:
+        _, outcome = rw(q)
+        assert outcome in valid, f"unknown outcome {outcome!r} for {q!r}"
+
+
 def test_structural_search_returns_rows() -> None:
     rows = [{"name": "foo", "qualified_name": "mymod.foo"}]
     with patch("app.routers.search._get_conn", return_value=_mock_conn(rows)):

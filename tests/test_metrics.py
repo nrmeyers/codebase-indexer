@@ -27,6 +27,7 @@ _DASHBOARD_METRIC_NAMES = (
     "forge_indexer_disk_bytes",
     "forge_indexer_jobs_active",
     "forge_indexer_jobs_dedupe_409_total",
+    "forge_indexer_query_rewriter_applied_total",
 )
 
 
@@ -56,6 +57,7 @@ def _reset_metrics_state() -> None:
     metrics._disk_bytes = None
     metrics._jobs_active = None
     metrics._jobs_dedupe_409 = None
+    metrics._query_rewriter_applied = None
     metrics._repo_cap = None
 
 
@@ -90,6 +92,8 @@ def test_dashboard_metric_contract(metrics_app: FastAPI) -> None:
     metrics.set_jobs_active("index", 1)
     metrics.record_dedupe_409()
     metrics.update_index_progress_gauge("job-abc", 4.2)
+    metrics.record_query_rewriter("semantic", "applied")
+    metrics.record_query_rewriter("semantic", "skip-short")
 
     client = TestClient(metrics_app)
     body = client.get("/metrics").text
@@ -117,3 +121,30 @@ def test_top_n_repo_label_caps_to_other(monkeypatch: pytest.MonkeyPatch) -> None
     # "d" / "e" have lower frequency → "other" once N hot repos established.
     label = metrics._clamp_repo_label("d")
     assert label in {"d", "other"}  # eviction is rolling — accept both
+
+
+def test_query_rewriter_counter_emits_outcome_labels(metrics_app: FastAPI) -> None:
+    """All four outcomes hit by the rewriter must show up as distinct
+    label-tuples on the counter."""
+    for outcome in ("applied", "skip-short", "skip-symbol-like", "skip-overstrip"):
+        metrics.record_query_rewriter("semantic", outcome)
+
+    body = TestClient(metrics_app).get("/metrics").text
+    for outcome in ("applied", "skip-short", "skip-symbol-like", "skip-overstrip"):
+        line = (
+            'forge_indexer_query_rewriter_applied_total'
+            f'{{intent="semantic",outcome="{outcome}"}} 1.0'
+        )
+        assert line in body, f"missing line for outcome={outcome}: {line!r}"
+
+
+def test_query_rewriter_metric_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`record_query_rewriter` must never raise even when metrics are off —
+    the rewriter call site is on the hot path; it can't depend on
+    Prometheus being initialised."""
+    monkeypatch.setenv("METRICS_ENABLED", "false")
+    _reset_metrics_state()
+    app = FastAPI()
+    metrics.setup_metrics(app)
+    # Should silently no-op, not raise AttributeError on the global counter.
+    metrics.record_query_rewriter("semantic", "applied")

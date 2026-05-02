@@ -73,6 +73,7 @@ _embeddings_count: "Gauge | None" = None
 _disk_bytes: "Gauge | None" = None
 _jobs_active: "Gauge | None" = None
 _jobs_dedupe_409: "Counter | None" = None
+_query_rewriter_applied: "Counter | None" = None
 
 _state_lock = Lock()
 _initialised = False
@@ -146,6 +147,26 @@ def record_dedupe_409() -> None:
     _jobs_dedupe_409.inc()  # type: ignore[union-attr]
 
 
+def record_query_rewriter(intent: str, outcome: str) -> None:
+    """Record one call into ``/search/semantic``'s query-rewriter stage.
+
+    Args:
+        intent: The query category — typically ``"semantic"``. Reserved
+            label dimension for future routing variants (e.g. context-bundle
+            queries that hit a different rewriter shape).
+        outcome: One of ``"applied"``, ``"skip-short"``,
+            ``"skip-symbol-like"``, ``"skip-overstrip"``. See
+            ``app/routers/search.py:_rewrite_descriptive_query``.
+
+    A/B observability lets us see the rewriter's hit-rate live without
+    changing traffic. ``rate(forge_indexer_query_rewriter_applied_total
+    {outcome="applied"}[5m]) / rate(...{}[5m])`` is the headline metric.
+    """
+    if not is_enabled():
+        return
+    _query_rewriter_applied.labels(intent=intent, outcome=outcome).inc()  # type: ignore[union-attr]
+
+
 def set_jobs_active(kind: str, value: int) -> None:
     if not is_enabled():
         return
@@ -197,6 +218,7 @@ def setup_metrics(app: FastAPI) -> None:
     global _lm_studio_up, _lm_studio_can_rerank
     global _embeddings_count, _disk_bytes
     global _jobs_active, _jobs_dedupe_409
+    global _query_rewriter_applied
 
     enabled = os.environ.get("METRICS_ENABLED", "true").lower() in ("1", "true", "yes", "on")
     if not enabled:
@@ -265,6 +287,12 @@ def setup_metrics(app: FastAPI) -> None:
         _jobs_dedupe_409 = Counter(
             "forge_indexer_jobs_dedupe_409_total",
             "POST /index requests rejected as duplicates of an active job.",
+        )
+        _query_rewriter_applied = Counter(
+            "forge_indexer_query_rewriter_applied_total",
+            "Query-rewriter outcomes per /search/semantic call. "
+            "outcome ∈ {applied, skip-short, skip-symbol-like, skip-overstrip}.",
+            labelnames=("intent", "outcome"),
         )
 
         # HTTP middleware via prometheus-fastapi-instrumentator + the
