@@ -236,7 +236,12 @@ def _extract_top_k(intent: str, body: Any) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
-def _score_indexing(index_results: list[dict[str, Any]]) -> dict[str, float]:
+def _score_indexing(index_results: list[dict[str, Any]]) -> dict[str, float | None]:
+    # If every entry is `skipped=True` (cycle ran with --skip-indexing
+    # against pre-existing data), there's nothing to measure → return None
+    # so the SLO row renders as SKIP rather than a misleading 0 → FAIL.
+    if index_results and all(r.get("skipped") for r in index_results):
+        return {"indexing_rate_symbols_per_s": None}
     total_symbols = sum((r.get("node_count") or 0) + (r.get("embedding_count") or 0) for r in index_results)
     total_seconds = sum(r.get("elapsed_s") or 0 for r in index_results) or 1e-9
     return {
@@ -343,24 +348,37 @@ async def main_async(args: argparse.Namespace) -> int:
 
         # Stage 2 — indexing
         index_results = []
+        existing_phase_times = out_dir / "index_phase_times.json"
         if args.skip_indexing:
-            log.info("--skip-indexing: assuming repos already indexed; reading /repos health")
-            try:
-                repos = (await client.get(f"{args.service_url}/repos", timeout=10.0)).json()
-                seen = {r.get("name"): r for r in repos.get("repos", [])}
-                for repo_name in repo_paths:
-                    r = seen.get(repo_name) or {}
-                    index_results.append({
-                        "repo": repo_name,
-                        "status": "done" if r.get("readable") else "missing",
-                        "elapsed_s": 0,
-                        "node_count": r.get("node_count") or 0,
-                        "rel_count": r.get("rel_count") or 0,
-                        "embedding_count": r.get("embedding_count") or 0,
-                        "skipped": True,
-                    })
-            except Exception as e:
-                log.error("--skip-indexing health probe failed: %s", e)
+            # If a previous (full) run on this same out_dir already wrote
+            # index_phase_times.json with real elapsed/node data, preserve it
+            # rather than overwriting with the no-op skip-indexing snapshot.
+            if existing_phase_times.exists():
+                try:
+                    prev = json.loads(existing_phase_times.read_text())
+                    if any((r.get("elapsed_s") or 0) > 0 for r in prev):
+                        log.info("--skip-indexing: preserving existing real index_phase_times.json")
+                        index_results = prev
+                except Exception:
+                    pass
+            if not index_results:
+                log.info("--skip-indexing: querying /health for current repo state")
+                try:
+                    health = (await client.get(f"{args.service_url}/health", timeout=10.0)).json()
+                    seen = {r.get("name"): r for r in health.get("repos", [])}
+                    for repo_name in repo_paths:
+                        r = seen.get(repo_name) or {}
+                        index_results.append({
+                            "repo": repo_name,
+                            "status": "done" if r.get("readable") and (r.get("node_count") or 0) > 0 else "missing",
+                            "elapsed_s": 0,
+                            "node_count": r.get("node_count") or 0,
+                            "rel_count": r.get("rel_count") or 0,
+                            "embedding_count": r.get("embedding_count") or 0,
+                            "skipped": True,
+                        })
+                except Exception as e:
+                    log.error("--skip-indexing health probe failed: %s", e)
         else:
             for repo_name, path in repo_paths.items():
                 try:
