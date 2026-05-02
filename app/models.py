@@ -185,6 +185,7 @@ class IndexStatus(BaseModel):
     current_file: str | None = None
     node_count: int = 0
     rel_count: int = 0
+    embedding_count: int = 0
     started_at: float = 0.0
     elapsed_sec: float = 0.0
     eta_sec: float | None = None

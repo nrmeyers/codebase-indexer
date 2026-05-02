@@ -450,12 +450,22 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # Phase 4: record start time for "parse" phase timer.
     _phase_parse_start = time.monotonic()
 
+    # Sub-phase timers (Cycle 5 follow-up — localising the 4.4 sym/s
+    # end-to-end bottleneck. Embed bench showed embedding is 89→121 sym/s
+    # standalone, so >95% of indexing time is downstream of embedding.
+    # These timers tell us whether the cost is in LadybugIngestor open/close
+    # or in GraphUpdater.run() so we know where to push deeper
+    # instrumentation. Phase-name keys: "parse_open", "parse_run",
+    # "parse_metadata", "parse_close").
+    _t_open = time.monotonic()
     # LadybugIngestor is a context manager — __enter__ opens the DB connection
     # and runs schema migration; __exit__ flushes remaining buffers and closes.
     with LadybugIngestor(
         db_path=repo_db_path,
         batch_size=settings.LADYBUG_BATCH_SIZE,
     ) as ingestor:
+        _metrics.record_index_phase("parse_open", time.monotonic() - _t_open)
+
         updater = GraphUpdater(
             ingestor=ingestor,
             repo_path=repo,
@@ -467,7 +477,9 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             skip_embeddings=True,  # embeddings handled by DuckDB subprocess below
         )
 
+        _t_run = time.monotonic()
         updater.run(force=effective_force)
+        _metrics.record_index_phase("parse_run", time.monotonic() - _t_run)
         # GraphUpdater emits "done" at 100% at the end of run(); reset to 92%
         # so the UI knows the embedding subprocess pass still follows.
         job.progress_pct = min(job.progress_pct, 92.0)
@@ -478,13 +490,18 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         # ``repo_metadata`` table inside the per-repo ``.duck`` file instead —
         # LadybugDB's typed schema doesn't allow adding new columns without a
         # migration, while DuckDB key/value rows are free to extend.
+        _t_meta = time.monotonic()
         project_name = repo.name
         ingestor.conn.execute(  # type: ignore[union-attr]
             "MATCH (p:Project {name: $name}) SET p.root_path = $root_path",
             {"name": project_name, "root_path": str(repo)},
         )
+        _metrics.record_index_phase("parse_metadata", time.monotonic() - _t_meta)
+        _t_close = time.monotonic()
 
-    # Phase 4: emit "parse" phase duration.
+    # `parse_close` ends here — flush + connection teardown happens on __exit__.
+    _metrics.record_index_phase("parse_close", time.monotonic() - _t_close)
+    # Top-level "parse" stays for back-compat with existing dashboard panels.
     _metrics.record_index_phase("parse", time.monotonic() - _phase_parse_start)
 
     # Collect final counts from LadybugDB. Best-effort: if the count
@@ -1067,6 +1084,7 @@ def get_index_status(job_id: str) -> IndexStatus:
                 current_file=stored.current_file,
                 node_count=stored.node_count,
                 rel_count=stored.rel_count,
+                embedding_count=stored.embedding_count,
                 started_at=stored.started_at,
                 elapsed_sec=elapsed,
                 eta_sec=None,
@@ -1092,6 +1110,7 @@ def get_index_status(job_id: str) -> IndexStatus:
         current_file=job.current_file,
         node_count=job.node_count,
         rel_count=job.rel_count,
+        embedding_count=job.embedded_count,
         started_at=job.started_at,
         elapsed_sec=elapsed,
         eta_sec=job.eta_sec,
