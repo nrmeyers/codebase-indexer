@@ -300,3 +300,176 @@ def test_should_preserve_order_when_chat_complete_returns_empty_string(
 
     cands = _cands(3)
     assert reranker.rerank("q", cands) == cands
+
+
+# ---------------------------------------------------------------------------
+# Latency budget (RERANK_DEADLINE_SECONDS) + outcome metric
+# ---------------------------------------------------------------------------
+
+
+def test_rerank_returns_original_order_when_deadline_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user-facing search request can't be held hostage by a slow LM
+    Studio rerank. When ``RERANK_DEADLINE_SECONDS`` is exceeded, ``rerank()``
+    returns the bi-encoder order untouched and the worker thread is left to
+    finish in the background."""
+    import time
+    from app.services import lm_studio, reranker
+
+    monkeypatch.setenv("RERANK_DEADLINE_SECONDS", "0.3")
+    monkeypatch.setattr(lm_studio, "can_rerank", lambda: True)
+
+    def slow_call(*a, **k):
+        time.sleep(1.5)  # exceeds 0.3s budget
+        return "[2] > [1]"
+
+    monkeypatch.setattr(lm_studio, "chat_complete", slow_call)
+    # Reset module-level executor so the slow thread from this test
+    # doesn't leak into the next.
+    reranker._executor = None
+
+    cands = _cands(2)
+    started = time.monotonic()
+    out = reranker.rerank("q", cands)
+    elapsed = time.monotonic() - started
+
+    assert out == cands, "deadline path must return original list unchanged"
+    # Allow some slack for the thread-pool overhead but make sure we
+    # didn't actually wait the full 1.5s.
+    assert elapsed < 1.0, f"rerank waited {elapsed:.2f}s — deadline didn't fire"
+
+
+def test_rerank_deadline_disabled_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setting RERANK_DEADLINE_SECONDS=0 disables the deadline — useful for
+    batch eval runs that prefer correctness over latency."""
+    from app.services import lm_studio, reranker
+
+    monkeypatch.setenv("RERANK_DEADLINE_SECONDS", "0")
+    monkeypatch.setattr(lm_studio, "can_rerank", lambda: True)
+    monkeypatch.setattr(lm_studio, "chat_complete", lambda *a, **k: "[2] > [1]")
+    reranker._executor = None
+
+    cands = _cands(2)
+    out = reranker.rerank("q", cands)
+    # Permutation [2] > [1] flips the order, so output must differ.
+    assert out != cands
+    assert out == [cands[1], cands[0]]
+
+
+# ---------------------------------------------------------------------------
+# Outcome metric — every code path emits exactly one observation
+# ---------------------------------------------------------------------------
+
+
+def _outcome_count(outcome: str) -> float:
+    """Read the current value of `forge_indexer_rerank_outcome_total{outcome=...}`."""
+    from prometheus_client import generate_latest
+
+    needle = f'forge_indexer_rerank_outcome_total{{outcome="{outcome}"}}'
+    for line in generate_latest().decode().splitlines():
+        if line.startswith(needle):
+            try:
+                return float(line.split()[-1])
+            except (ValueError, IndexError):
+                return 0.0
+    return 0.0
+
+
+def _setup_metrics_for_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure the metrics module is initialised inside a test so the
+    rerank counter actually records observations."""
+    from fastapi import FastAPI
+    from prometheus_client import REGISTRY
+    from app import metrics
+
+    # Unregister any pre-existing forge_indexer_* collectors to avoid
+    # `Duplicated timeseries` errors across tests.
+    for collector in list(REGISTRY._collector_to_names.keys()):  # noqa: SLF001
+        names = REGISTRY._collector_to_names.get(collector, set())  # noqa: SLF001
+        if any(n.startswith("forge_indexer_") for n in names):
+            try:
+                REGISTRY.unregister(collector)
+            except KeyError:
+                pass
+
+    metrics._initialised = False
+    metrics._REGISTRY = None
+    metrics._search_duration = None
+    metrics._search_requests = None
+    metrics._index_job_duration = None
+    metrics._index_jobs_total = None
+    metrics._index_job_progress = None
+    metrics._lm_studio_up = None
+    metrics._lm_studio_can_rerank = None
+    metrics._embeddings_count = None
+    metrics._disk_bytes = None
+    metrics._jobs_active = None
+    metrics._jobs_dedupe_409 = None
+    metrics._query_rewriter_applied = None
+    metrics._rerank_outcome = None
+    metrics._repo_cap = None
+
+    monkeypatch.setenv("METRICS_ENABLED", "true")
+    metrics.setup_metrics(FastAPI())
+
+
+def test_outcome_metric_records_skip_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import lm_studio, reranker
+
+    _setup_metrics_for_test(monkeypatch)
+    before = _outcome_count("skip-unavailable")
+
+    monkeypatch.setattr(lm_studio, "can_rerank", lambda: False)
+    out = reranker.rerank("q", _cands(2))
+    assert out == _cands(2)
+    assert _outcome_count("skip-unavailable") == before + 1
+
+
+def test_outcome_metric_records_applied_on_valid_permutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import lm_studio, reranker
+
+    _setup_metrics_for_test(monkeypatch)
+    before = _outcome_count("applied")
+
+    monkeypatch.setattr(lm_studio, "can_rerank", lambda: True)
+    monkeypatch.setattr(lm_studio, "chat_complete", lambda *a, **k: "[2] > [1]")
+    monkeypatch.setenv("RERANK_DEADLINE_SECONDS", "0")  # disable for determinism
+    reranker._executor = None
+
+    out = reranker.rerank("q", _cands(2))
+    assert out != _cands(2)  # actually reordered
+    assert _outcome_count("applied") == before + 1
+
+
+def test_outcome_metric_records_skip_parse_error_on_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import lm_studio, reranker
+
+    _setup_metrics_for_test(monkeypatch)
+    before = _outcome_count("skip-parse-error")
+
+    monkeypatch.setattr(lm_studio, "can_rerank", lambda: True)
+    monkeypatch.setattr(lm_studio, "chat_complete", lambda *a, **k: "no brackets here")
+    monkeypatch.setenv("RERANK_DEADLINE_SECONDS", "0")
+    reranker._executor = None
+
+    out = reranker.rerank("q", _cands(3))
+    assert out == _cands(3)
+    assert _outcome_count("skip-parse-error") == before + 1
+
+
+def test_outcome_metric_records_skip_empty_input_on_no_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import reranker
+
+    _setup_metrics_for_test(monkeypatch)
+    before = _outcome_count("skip-empty-input")
+
+    out = reranker.rerank("q", [])
+    assert out == []
+    assert _outcome_count("skip-empty-input") == before + 1

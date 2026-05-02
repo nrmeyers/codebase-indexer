@@ -38,11 +38,15 @@ Prompt template:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import os
 import re
+import time
 from typing import Any
 
 from . import lm_studio
+from .. import metrics as _metrics
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,40 @@ MAX_SNIPPET_CHARS = 800
 # model's accuracy degrades (per Nomic's own evals) and prompt cost
 # grows linearly.
 MAX_CANDIDATES = 30
+
+
+def _rerank_deadline_seconds() -> float:
+    """Resolve the per-call rerank latency budget from the environment.
+
+    Read at call time (not module load) so tests can ``monkeypatch.setenv``
+    without needing to reimport the module. Default 5.0 s on the assumption
+    that the rerank endpoint serves interactive search — slow runs degrade
+    to bi-encoder ordering rather than blocking the user.
+
+    Set ``RERANK_DEADLINE_SECONDS=0`` (or any non-positive value) to disable
+    the deadline entirely, e.g. for batch eval runs that prefer correctness
+    over latency.
+    """
+    raw = os.environ.get("RERANK_DEADLINE_SECONDS", "5.0")
+    try:
+        return float(raw)
+    except ValueError:
+        return 5.0
+
+
+# Module-level executor — one worker is enough; we serialise rerank calls
+# through LM Studio anyway and concurrent calls would just contend for the
+# same loaded model. Lazy-initialised on first use.
+_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _executor
+    if _executor is None:
+        _executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="rerank"
+        )
+    return _executor
 
 # System prompt — frozen so production behaviour is reproducible.
 _SYSTEM_PROMPT = (
@@ -115,10 +153,23 @@ def is_available() -> bool:
 def rerank(query: str, candidates: list[Candidate]) -> list[Candidate]:
     """Return ``candidates`` reordered by CodeRankLLM relevance to ``query``.
 
-    Best-effort: returns the original list unchanged on any failure.  The
-    returned list contains the *same* objects (no copy) — this preserves
-    every metadata field the bi-encoder attached (similarity score, file
-    path, line range, etc.) while only changing order.
+    Best-effort + latency-budgeted: returns the original list unchanged on
+    any failure (LM Studio unreachable, model not loaded, deadline exceeded,
+    empty/unparseable response).  The returned list contains the *same*
+    objects (no copy) — this preserves every metadata field the bi-encoder
+    attached (similarity score, file path, line range, etc.) while only
+    changing order.
+
+    Each call records exactly one observation against
+    ``forge_indexer_rerank_outcome_total{outcome}`` with outcome ∈
+    {applied, skip-empty-input, skip-unavailable, skip-deadline,
+    skip-empty-response, skip-parse-error}.  Operators consume this metric
+    to decide when the rerank flag is safe to flip on in production
+    (rate(applied)/rate(total) ≥ some confidence threshold).
+
+    The latency budget is read at call time from
+    ``RERANK_DEADLINE_SECONDS`` (default 5.0 s).  A non-positive value
+    disables the deadline — useful for batch eval runs.
 
     Args:
         query: The natural-language query (no Nomic prefix needed; the
@@ -128,38 +179,71 @@ def rerank(query: str, candidates: list[Candidate]) -> list[Candidate]:
             candidates are appended back in their original order.
     """
     if not query or not candidates:
+        _metrics.record_rerank_outcome("skip-empty-input")
         return candidates
     if not is_available():
+        _metrics.record_rerank_outcome("skip-unavailable")
         return candidates
 
     head = candidates[:MAX_CANDIDATES]
     tail = candidates[MAX_CANDIDATES:]
 
     prompt = _build_prompt(query, head)
-    response = lm_studio.chat_complete(
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": prompt + _NO_THINK_TRAILER},
-        ],
-        max_tokens=_MAX_TOKENS,
-        temperature=0.0,
-        # Belt-and-suspenders: pass ``enable_thinking=False`` via the
-        # chat-template renderer (some LM Studio model presets honor it
-        # there) AND keep the ``/no_think`` user-message trailer (the
-        # documented Qwen3 escape hatch).  At least one of these two
-        # paths takes effect on every Qwen3 quant we've tested; both
-        # are no-ops for non-Qwen models.
-        chat_template_kwargs={"enable_thinking": False},
-    )
+
+    # Run the LM Studio call in a worker thread so we can enforce a
+    # deadline. ``concurrent.futures.Future.result(timeout=)`` raises
+    # TimeoutError when the budget is exceeded; the underlying HTTP call
+    # keeps running until LM Studio releases it, but we no longer block
+    # the search request on it.
+    def _call_lm_studio() -> str | None:
+        return lm_studio.chat_complete(
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt + _NO_THINK_TRAILER},
+            ],
+            max_tokens=_MAX_TOKENS,
+            temperature=0.0,
+            # Belt-and-suspenders: pass ``enable_thinking=False`` via the
+            # chat-template renderer (some LM Studio model presets honor it
+            # there) AND keep the ``/no_think`` user-message trailer (the
+            # documented Qwen3 escape hatch).  At least one of these two
+            # paths takes effect on every Qwen3 quant we've tested; both
+            # are no-ops for non-Qwen models.
+            chat_template_kwargs={"enable_thinking": False},
+        )
+
+    deadline = _rerank_deadline_seconds()
+    started = time.monotonic()
+    try:
+        future = _get_executor().submit(_call_lm_studio)
+        response = future.result(timeout=deadline if deadline > 0 else None)
+    except concurrent.futures.TimeoutError:
+        elapsed = time.monotonic() - started
+        logger.info(
+            "rerank deadline exceeded after %.2fs (budget=%.2fs); "
+            "returning bi-encoder order",
+            elapsed, deadline,
+        )
+        _metrics.record_rerank_outcome("skip-deadline")
+        return candidates
+    except Exception as exc:  # pragma: no cover — defensive; LM Studio
+        # adapter already swallows expected errors and returns None
+        logger.warning("rerank call raised: %s; keeping bi-encoder order", exc)
+        _metrics.record_rerank_outcome("skip-unavailable")
+        return candidates
+
     if not response:
+        _metrics.record_rerank_outcome("skip-empty-response")
         return candidates
 
     permutation = _parse_permutation(response, len(head))
     if permutation is None:
         logger.debug("Rerank response unparseable; keeping bi-encoder order")
+        _metrics.record_rerank_outcome("skip-parse-error")
         return candidates
 
     reordered = [head[i] for i in permutation]
+    _metrics.record_rerank_outcome("applied")
     return reordered + tail
 
 
