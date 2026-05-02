@@ -25,6 +25,83 @@ from .. import metrics as _metrics
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Query rewriter (descriptive natural-language → tighter token set)
+# ---------------------------------------------------------------------------
+#
+# Bi-encoder embeddings score concept-matches against function source +
+# docstrings. Function names use verbs (`createErrorEnvelope`, `validateBearer`),
+# but descriptive queries phrase intent nominally ("error envelope construction",
+# "JWT validation against AAD JWKS"). The English filler words around the
+# content tokens drag the query embedding toward generic prose, costing top-K
+# precision. Stripping them is a 30-line, zero-LLM lift on descriptive queries.
+#
+# Empirically (TheForge/docs/CODE_INDEXER_EVAL_RESULTS.md Iter 5):
+#
+#   raw 25-query benchmark    descriptive P@1 = 50%
+#   rewriter active           descriptive P@1 = 60%   (+10pp, no model cost)
+#
+# Behaviour:
+#   - 4+ token queries: drop stop-words, send the rest verbatim
+#   - <4 token queries: pass through (too short to safely strip)
+#   - Dotted / snake_case tokens (module.path.fn, setup_test_env): pass
+#     through (explicit symbol-name signal)
+#   - CamelCase common nouns (WebSocket, MSAL, JavaScript): NOT a
+#     short-circuit — these are English words bi-encoder handles fine,
+#     and dropping noise around them still helps
+_QUERY_STOP_WORDS = frozenset({
+    # Articles
+    "a", "an", "the", "this", "that", "these", "those",
+    # Prepositions
+    "in", "on", "at", "to", "from", "of", "for", "with", "without",
+    "into", "onto", "upon", "via", "by", "as", "about", "against",
+    "between", "across", "through", "during", "before", "after",
+    "above", "below",
+    # Conjunctions
+    "and", "or", "but", "nor", "so", "yet",
+    # Aux verbs / question shaping
+    "is", "are", "was", "were", "be", "been", "being", "do", "does",
+    "did", "has", "have", "had", "can", "could", "should", "would",
+    "will", "shall", "may", "might", "must",
+    "how", "what", "where", "when", "why", "which", "who", "whom",
+    # Pronouns
+    "i", "me", "my", "you", "your", "we", "us", "our", "it", "its",
+    "they", "them", "their",
+    # Generic search verbs
+    "show", "find", "list", "get",
+    # Code-search nominalisations — verb-form names (`create…`, `register…`)
+    # are what we want to match against. Stripping these forces remaining
+    # tokens onto the verb-form via embedding-model compositional structure.
+    "construction", "configuration", "implementation", "registration",
+    "initialization", "initialisation", "destruction", "creation",
+})
+
+
+def _rewrite_descriptive_query(raw: str) -> tuple[str, str]:
+    """Return ``(rewritten_query, outcome_label)``.
+
+    ``outcome_label`` ∈ {"applied", "skip-short", "skip-symbol-like",
+    "skip-overstrip"} — used by the Prometheus metric so we can A/B the
+    rewriter's hit-rate in production without changing call-site code.
+
+    The rewriter never raises; it falls through to the original on every
+    edge case. See module docstring for behavioural details.
+    """
+    text = raw.rstrip("?").strip()
+    tokens = text.split()
+    if len(tokens) < 4:
+        return raw, "skip-short"
+    # Dotted / snake_case tokens are an explicit symbol-name signal —
+    # don't second-guess the caller's already-tight query.
+    for t in tokens:
+        if any(ch in t for ch in "._-"):
+            return raw, "skip-symbol-like"
+    kept = [t for t in tokens if t.lower() not in _QUERY_STOP_WORDS]
+    if len(kept) < 2:
+        return raw, "skip-overstrip"
+    return " ".join(kept), "applied"
+
 from ..config import settings
 from ..models import (
     CentralityResponse,
@@ -468,7 +545,13 @@ def _semantic_search_impl(
     _pr_scores: dict[str, float] = {}
     search_intent: str = "semantic"
     try:
-        query_embedding = _embed_query(q)
+        # Strip natural-language scaffolding from descriptive queries
+        # before embedding. No-op on symbol-like or short queries —
+        # outcome label feeds the rewriter A/B observability counter so
+        # we can measure live hit-rate from /metrics.
+        embed_query_text, _rewrite_outcome = _rewrite_descriptive_query(q)
+        _metrics.record_query_rewriter("semantic", _rewrite_outcome)
+        query_embedding = _embed_query(embed_query_text)
         vec_conn = open_or_create(vec_path)
         try:
             raw = search_similar(vec_conn, query_embedding, k=fetch_k)
