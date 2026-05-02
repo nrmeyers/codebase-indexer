@@ -4,7 +4,12 @@
     "repo": "TheForge",
     "intent": "semantic",
     "q": "where is bearer token validation done",
-    "expected_topk_substrings": ["jwt-validator", "validateBearer", "require-bearer", "bearerToken"],
+    "expected_topk_substrings": [
+      "jwt-validator",
+      "validateBearer",
+      "require-bearer",
+      "bearerToken"
+    ],
     "k": 10
   },
   {
@@ -12,7 +17,12 @@
     "repo": "TheForge",
     "intent": "semantic",
     "q": "find the gate state machine approval transition logic",
-    "expected_topk_substrings": ["gate-state-machine", "gateTransition", "approve", "GateState"],
+    "expected_topk_substrings": [
+      "gate-state-machine",
+      "gateTransition",
+      "approve",
+      "GateState"
+    ],
     "k": 10
   },
   {
@@ -20,7 +30,12 @@
     "repo": "TheForge",
     "intent": "semantic",
     "q": "where does index progress get broadcast over websocket",
-    "expected_topk_substrings": ["activity-feed", "broadcastActivity", "WebSocket", "notification-service"],
+    "expected_topk_substrings": [
+      "activity-feed",
+      "broadcastActivity",
+      "WebSocket",
+      "notification-service"
+    ],
     "k": 10
   },
   {
@@ -28,7 +43,12 @@
     "repo": "TheForge",
     "intent": "semantic",
     "q": "how is the orchestrator prompt assembled and capped",
-    "expected_topk_substrings": ["orchestrator", "composePrompt", "PROMPT_FORMATTING_GUIDE", "prompt-assembly"],
+    "expected_topk_substrings": [
+      "orchestrator",
+      "composePrompt",
+      "PROMPT_FORMATTING_GUIDE",
+      "prompt-assembly"
+    ],
     "k": 10
   },
   {
@@ -36,7 +56,12 @@
     "repo": "TheForge",
     "intent": "semantic",
     "q": "AAD groups to role mapping for authorization",
-    "expected_topk_substrings": ["aad-provider", "m365-auth", "groupsToRoles", "RoleMapping"],
+    "expected_topk_substrings": [
+      "aad-provider",
+      "m365-auth",
+      "groupsToRoles",
+      "RoleMapping"
+    ],
     "k": 10
   },
   {
@@ -44,7 +69,12 @@
     "repo": "TheForge",
     "intent": "semantic",
     "q": "error envelope creation and result pattern usage",
-    "expected_topk_substrings": ["createErrorEnvelope", "errors.ts", "result.ts", "ErrorEnvelope"],
+    "expected_topk_substrings": [
+      "createErrorEnvelope",
+      "errors.ts",
+      "result.ts",
+      "ErrorEnvelope"
+    ],
     "k": 10
   },
   {
@@ -52,7 +82,12 @@
     "repo": "TheForge",
     "intent": "semantic",
     "q": "linear issue sync and project milestone creation",
-    "expected_topk_substrings": ["linear.ts", "LinearSync", "syncLinear", "linearIssue"],
+    "expected_topk_substrings": [
+      "linear.ts",
+      "LinearSync",
+      "syncLinear",
+      "linearIssue"
+    ],
     "k": 10
   },
   {
@@ -109,7 +144,10 @@
     "repo": "TheForge",
     "intent": "symbol",
     "q": "createErrorEnvelope",
-    "expected_topk_substrings": ["errors.ts", "createErrorEnvelope"],
+    "expected_topk_substrings": [
+      "errors.ts",
+      "createErrorEnvelope"
+    ],
     "k": 5
   },
   {
@@ -117,7 +155,11 @@
     "repo": "TheForge",
     "intent": "symbol",
     "q": "validateBearer",
-    "expected_topk_substrings": ["jwt-validator", "require-bearer", "validateBearer"],
+    "expected_topk_substrings": [
+      "jwt-validator",
+      "require-bearer",
+      "validateBearer"
+    ],
     "k": 5
   },
   {
@@ -125,7 +167,11 @@
     "repo": "TheForge",
     "intent": "symbol",
     "q": "composePrompt",
-    "expected_topk_substrings": ["orchestrator", "prompt-assembly", "composePrompt"],
+    "expected_topk_substrings": [
+      "orchestrator",
+      "prompt-assembly",
+      "composePrompt"
+    ],
     "k": 5
   },
   {
@@ -133,7 +179,11 @@
     "repo": "TheForge",
     "intent": "symbol",
     "q": "invalidateProbeCache",
-    "expected_topk_substrings": ["invalidate_probe_cache", "health.ts", "invalidateProbeCache"],
+    "expected_topk_substrings": [
+      "invalidate_probe_cache",
+      "health.ts",
+      "invalidateProbeCache"
+    ],
     "k": 5
   },
   {
@@ -141,7 +191,11 @@
     "repo": "TheForge",
     "intent": "symbol",
     "q": "buildContextBundle",
-    "expected_topk_substrings": ["build_context_bundle", "context_bundle", "buildContextBundle"],
+    "expected_topk_substrings": [
+      "build_context_bundle",
+      "context_bundle",
+      "buildContextBundle"
+    ],
     "k": 5
   },
   {
@@ -149,7 +203,11 @@
     "repo": "TheForge",
     "intent": "symbol",
     "q": "gateStateMachine",
-    "expected_topk_substrings": ["gate-state-machine", "GateStateMachine", "gateStateMachine"],
+    "expected_topk_substrings": [
+      "gate-state-machine",
+      "GateStateMachine",
+      "gateStateMachine"
+    ],
     "k": 5
   },
   {
@@ -157,7 +215,12 @@
     "repo": "code-indexer-service",
     "intent": "semantic",
     "q": "where does the lifespan startup configure prometheus metrics",
-    "expected_topk_substrings": ["lifespan", "setup_metrics", "main.py", "metrics.py"],
+    "expected_topk_substrings": [
+      "lifespan",
+      "setup_metrics",
+      "main.py",
+      "metrics.py"
+    ],
     "k": 10
   },
   {
@@ -165,7 +228,11 @@
     "repo": "code-indexer-service",
     "intent": "semantic",
     "q": "how does the reranker fallback when LM Studio is unavailable",
-    "expected_topk_substrings": ["reranker", "lm_studio", "rerank"],
+    "expected_topk_substrings": [
+      "reranker",
+      "lm_studio",
+      "rerank"
+    ],
     "k": 10
   },
   {
@@ -173,7 +240,11 @@
     "repo": "code-indexer-service",
     "intent": "semantic",
     "q": "where are index progress events streamed over websocket",
-    "expected_topk_substrings": ["websocket", "index_progress", "routers/index"],
+    "expected_topk_substrings": [
+      "websocket",
+      "index_progress",
+      "routers/index"
+    ],
     "k": 10
   },
   {
@@ -181,7 +252,12 @@
     "repo": "code-indexer-service",
     "intent": "semantic",
     "q": "health probe TTL cache for per-repo DB connections",
-    "expected_topk_substrings": ["health", "_probe_cache", "_PROBE_TTL", "invalidate_probe_cache"],
+    "expected_topk_substrings": [
+      "health",
+      "_probe_cache",
+      "_PROBE_TTL",
+      "invalidate_probe_cache"
+    ],
     "k": 10
   },
   {
@@ -189,7 +265,12 @@
     "repo": "code-indexer-service",
     "intent": "semantic",
     "q": "semantic search cosine distance embedding query flow",
-    "expected_topk_substrings": ["search.py", "array_cosine_distance", "_embed_fn", "semantic"],
+    "expected_topk_substrings": [
+      "search.py",
+      "array_cosine_distance",
+      "_embed_fn",
+      "semantic"
+    ],
     "k": 10
   },
   {
@@ -197,7 +278,12 @@
     "repo": "code-indexer-service",
     "intent": "semantic",
     "q": "context bundle keyword module ranking and budget truncation",
-    "expected_topk_substrings": ["context_bundle", "_classify_intent", "_truncate_to_budget", "_score_modules"],
+    "expected_topk_substrings": [
+      "context_bundle",
+      "_classify_intent",
+      "_truncate_to_budget",
+      "_score_modules"
+    ],
     "k": 10
   },
   {
@@ -205,7 +291,11 @@
     "repo": "code-indexer-service",
     "intent": "semantic",
     "q": "write keyword guard preventing Cypher mutations in structural search",
-    "expected_topk_substrings": ["search.py", "_WRITE_KEYWORDS", "structural"],
+    "expected_topk_substrings": [
+      "search.py",
+      "_WRITE_KEYWORDS",
+      "structural"
+    ],
     "k": 10
   },
   {
@@ -262,7 +352,10 @@
     "repo": "code-indexer-service",
     "intent": "symbol",
     "q": "setup_metrics",
-    "expected_topk_substrings": ["metrics.py", "setup_metrics"],
+    "expected_topk_substrings": [
+      "metrics.py",
+      "setup_metrics"
+    ],
     "k": 5
   },
   {
@@ -270,7 +363,10 @@
     "repo": "code-indexer-service",
     "intent": "symbol",
     "q": "lifespan",
-    "expected_topk_substrings": ["main.py", "lifespan"],
+    "expected_topk_substrings": [
+      "main.py",
+      "lifespan"
+    ],
     "k": 5
   },
   {
@@ -278,7 +374,10 @@
     "repo": "code-indexer-service",
     "intent": "symbol",
     "q": "invalidate_probe_cache",
-    "expected_topk_substrings": ["health.py", "invalidate_probe_cache"],
+    "expected_topk_substrings": [
+      "health.py",
+      "invalidate_probe_cache"
+    ],
     "k": 5
   },
   {
@@ -286,7 +385,10 @@
     "repo": "code-indexer-service",
     "intent": "symbol",
     "q": "build_context_bundle",
-    "expected_topk_substrings": ["context_bundle.py", "build_context_bundle"],
+    "expected_topk_substrings": [
+      "context_bundle.py",
+      "build_context_bundle"
+    ],
     "k": 5
   },
   {
@@ -294,7 +396,11 @@
     "repo": "code-indexer-service",
     "intent": "symbol",
     "q": "_blocking_index",
-    "expected_topk_substrings": ["routers/index.py", "_blocking_index", "index.py"],
+    "expected_topk_substrings": [
+      "routers/index.py",
+      "_blocking_index",
+      "index.py"
+    ],
     "k": 5
   },
   {
@@ -302,7 +408,10 @@
     "repo": "code-indexer-service",
     "intent": "symbol",
     "q": "_WRITE_KEYWORDS",
-    "expected_topk_substrings": ["search.py", "_WRITE_KEYWORDS"],
+    "expected_topk_substrings": [
+      "search.py",
+      "_WRITE_KEYWORDS"
+    ],
     "k": 5
   },
   {
@@ -310,7 +419,11 @@
     "repo": "code-graph-rag",
     "intent": "semantic",
     "q": "Arrow bulk insert for DuckDB embedding rows",
-    "expected_topk_substrings": ["bulk_insert_arrow", "vector_store_arrow", "EmbeddingRow"],
+    "expected_topk_substrings": [
+      "bulk_insert_arrow",
+      "vector_store_arrow",
+      "EmbeddingRow"
+    ],
     "k": 10
   },
   {
@@ -318,7 +431,11 @@
     "repo": "code-graph-rag",
     "intent": "semantic",
     "q": "PageRank centrality computation over the call graph",
-    "expected_topk_substrings": ["compute_pagerank", "centrality.py", "pagerank"],
+    "expected_topk_substrings": [
+      "compute_pagerank",
+      "centrality.py",
+      "pagerank"
+    ],
     "k": 10
   },
   {
@@ -326,7 +443,11 @@
     "repo": "code-graph-rag",
     "intent": "semantic",
     "q": "embed_query interface for semantic code search",
-    "expected_topk_substrings": ["embed_query", "embedder.py", "Embedder"],
+    "expected_topk_substrings": [
+      "embed_query",
+      "embedder.py",
+      "Embedder"
+    ],
     "k": 10
   },
   {
@@ -334,7 +455,11 @@
     "repo": "code-graph-rag",
     "intent": "semantic",
     "q": "tree-sitter parser loader for multiple programming languages",
-    "expected_topk_substrings": ["parser_loader", "language_spec", "ParserLoader"],
+    "expected_topk_substrings": [
+      "parser_loader",
+      "language_spec",
+      "ParserLoader"
+    ],
     "k": 10
   },
   {
@@ -342,7 +467,11 @@
     "repo": "code-graph-rag",
     "intent": "semantic",
     "q": "dependency parser for pyproject.toml and requirements.txt files",
-    "expected_topk_substrings": ["dependency_parser", "PyProjectTomlParser", "RequirementsTxtParser"],
+    "expected_topk_substrings": [
+      "dependency_parser",
+      "PyProjectTomlParser",
+      "RequirementsTxtParser"
+    ],
     "k": 10
   },
   {
@@ -350,7 +479,12 @@
     "repo": "code-graph-rag",
     "intent": "semantic",
     "q": "upsert PageRank scores into centrality DuckDB table",
-    "expected_topk_substrings": ["vector_store.py", "upsert_pagerank", "centrality", "pagerank"],
+    "expected_topk_substrings": [
+      "vector_store.py",
+      "upsert_pagerank",
+      "centrality",
+      "pagerank"
+    ],
     "k": 10
   },
   {
@@ -358,7 +492,11 @@
     "repo": "code-graph-rag",
     "intent": "semantic",
     "q": "stdlib extractor resolving standard library module paths",
-    "expected_topk_substrings": ["StdlibExtractor", "stdlib_extractor", "extract_module_path"],
+    "expected_topk_substrings": [
+      "StdlibExtractor",
+      "stdlib_extractor",
+      "extract_module_path"
+    ],
     "k": 10
   },
   {
@@ -415,7 +553,10 @@
     "repo": "code-graph-rag",
     "intent": "symbol",
     "q": "bulk_insert_arrow",
-    "expected_topk_substrings": ["vector_store_arrow", "bulk_insert_arrow"],
+    "expected_topk_substrings": [
+      "vector_store_arrow",
+      "bulk_insert_arrow"
+    ],
     "k": 5
   },
   {
@@ -423,7 +564,10 @@
     "repo": "code-graph-rag",
     "intent": "symbol",
     "q": "compute_pagerank",
-    "expected_topk_substrings": ["centrality.py", "compute_pagerank"],
+    "expected_topk_substrings": [
+      "centrality.py",
+      "compute_pagerank"
+    ],
     "k": 5
   },
   {
@@ -431,7 +575,10 @@
     "repo": "code-graph-rag",
     "intent": "symbol",
     "q": "embed_query",
-    "expected_topk_substrings": ["embedder.py", "embed_query"],
+    "expected_topk_substrings": [
+      "embedder.py",
+      "embed_query"
+    ],
     "k": 5
   },
   {
@@ -439,7 +586,10 @@
     "repo": "code-graph-rag",
     "intent": "symbol",
     "q": "StdlibExtractor",
-    "expected_topk_substrings": ["stdlib_extractor", "StdlibExtractor"],
+    "expected_topk_substrings": [
+      "stdlib_extractor",
+      "StdlibExtractor"
+    ],
     "k": 5
   },
   {
@@ -447,7 +597,10 @@
     "repo": "code-graph-rag",
     "intent": "symbol",
     "q": "PyProjectTomlParser",
-    "expected_topk_substrings": ["dependency_parser", "PyProjectTomlParser"],
+    "expected_topk_substrings": [
+      "dependency_parser",
+      "PyProjectTomlParser"
+    ],
     "k": 5
   },
   {
@@ -455,7 +608,409 @@
     "repo": "code-graph-rag",
     "intent": "symbol",
     "q": "bulk_insert",
-    "expected_topk_substrings": ["vector_store.py", "bulk_insert"],
+    "expected_topk_substrings": [
+      "vector_store.py",
+      "bulk_insert"
+    ],
     "k": 5
+  },
+  {
+    "id": "xrr-tf-001",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "where is the orchestrator's grounding-rules anti-hallucination clause",
+    "expected_topk_substrings": [
+      "GROUNDING_RULES",
+      "PROMPT_FORMATTING_GUIDE",
+      "orchestrator"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-tf-002",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "how does the activity feed broadcast real-time notifications over websocket",
+    "expected_topk_substrings": [
+      "activity-feed",
+      "broadcastActivity",
+      "WebSocket",
+      "notification-service"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-tf-003",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "what is the gate state machine transition logic for approval rejection",
+    "expected_topk_substrings": [
+      "gate-state-machine",
+      "reject",
+      "GateState",
+      "transition"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-tf-004",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "describe the multi-repo fan-out orchestration for context bundles",
+    "expected_topk_substrings": [
+      "orchestrator",
+      "fan-out",
+      "context-bundle",
+      "DEFAULT_CONTEXT_K"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-tf-005",
+    "repo": "TheForge",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "find where Skill API fragments are composed into the system prompt",
+    "expected_topk_substrings": [
+      "skill-api-client",
+      "composePrompt",
+      "fragments",
+      "orchestrator"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cis-001",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "what triggers the 409 conflict on POST /index and how is an active job resolved",
+    "expected_topk_substrings": [
+      "409",
+      "active job",
+      "index/jobs",
+      "job_id"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cis-002",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "how does duckdb handle read-only schema access in the query executor",
+    "expected_topk_substrings": [
+      "duckdb",
+      "read-only",
+      "schema",
+      "query-executor"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cis-003",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "describe the semantic reranking pipeline from embedding to listwise ranking",
+    "expected_topk_substrings": [
+      "rerank",
+      "semantic",
+      "embedding",
+      "listwise"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cis-004",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "what are the accuracy metrics tracked in the E2E evaluation harness",
+    "expected_topk_substrings": [
+      "accuracy",
+      "top1_relevance",
+      "top5_relevance",
+      "evaluation"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cis-005",
+    "repo": "code-indexer-service",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "how does the index service poll and report job status changes",
+    "expected_topk_substrings": [
+      "/index/status",
+      "poll",
+      "job_id",
+      "progress"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cgr-001",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "how does the Arrow graph adapter handle missing pyarrow dependencies",
+    "expected_topk_substrings": [
+      "Arrow",
+      "pyarrow",
+      "adapter",
+      "fallback"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cgr-002",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "what is the traversal strategy for cross-file symbol dependencies",
+    "expected_topk_substrings": [
+      "traversal",
+      "dependencies",
+      "symbol",
+      "cross-file"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cgr-003",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "describe how graph models are serialized and cached for reuse",
+    "expected_topk_substrings": [
+      "serialize",
+      "cache",
+      "graph",
+      "model"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cgr-004",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "what query optimization is applied before graph traversal execution",
+    "expected_topk_substrings": [
+      "optimize",
+      "query",
+      "traversal",
+      "execution"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xrr-cgr-005",
+    "repo": "code-graph-rag",
+    "intent": "semantic",
+    "rerank": true,
+    "q": "how are graph exploration paths ranked by relevance to a task",
+    "expected_topk_substrings": [
+      "rank",
+      "relevance",
+      "path",
+      "exploration"
+    ],
+    "k": 10
+  },
+  {
+    "id": "xcb-tf-001",
+    "repo": "TheForge",
+    "intent": "context_bundle",
+    "q": "Add a notification when a gate is rejected by an approver",
+    "expected_topk_substrings": [
+      "notification-service",
+      "gate-state-machine",
+      "reject"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-tf-002",
+    "repo": "TheForge",
+    "intent": "context_bundle",
+    "q": "Implement real-time activity feed updates over WebSocket for all task changes",
+    "expected_topk_substrings": [
+      "activity-feed",
+      "api-server",
+      "WebSocket"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-tf-003",
+    "repo": "TheForge",
+    "intent": "context_bundle",
+    "q": "Add Code Indexer service health check to the orchestrator preflight",
+    "expected_topk_substrings": [
+      "orchestrator",
+      "code-indexer-client",
+      "preflight"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-tf-004",
+    "repo": "TheForge",
+    "intent": "context_bundle",
+    "q": "Extend Skill API to support multi-step skill composition",
+    "expected_topk_substrings": [
+      "skill-api-client",
+      "orchestrator",
+      "fragments"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-tf-005",
+    "repo": "TheForge",
+    "intent": "context_bundle",
+    "q": "Audit compliance scoring to track governance adherence rates",
+    "expected_topk_substrings": [
+      "governance-compliance",
+      "audit-trail",
+      "scoring"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cis-001",
+    "repo": "code-indexer-service",
+    "intent": "context_bundle",
+    "q": "Implement semantic reranking with listwise LLM ranking for top-k results",
+    "expected_topk_substrings": [
+      "search",
+      "semantic",
+      "rerank",
+      "ranking"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cis-002",
+    "repo": "code-indexer-service",
+    "intent": "context_bundle",
+    "q": "Add request batching for concurrent indexing jobs with deduplication",
+    "expected_topk_substrings": [
+      "/index",
+      "batch",
+      "dedup",
+      "job"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cis-003",
+    "repo": "code-indexer-service",
+    "intent": "context_bundle",
+    "q": "Expose per-repository accuracy metrics on the /metrics endpoint",
+    "expected_topk_substrings": [
+      "/metrics",
+      "accuracy",
+      "evaluation",
+      "repo"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cis-004",
+    "repo": "code-indexer-service",
+    "intent": "context_bundle",
+    "q": "Integrate duckdb full-text search with embedding-based ranking",
+    "expected_topk_substrings": [
+      "duckdb",
+      "fts",
+      "embedding",
+      "ranking"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cis-005",
+    "repo": "code-indexer-service",
+    "intent": "context_bundle",
+    "q": "Cache embedding vectors with TTL to reduce embedding service calls",
+    "expected_topk_substrings": [
+      "embedding",
+      "cache",
+      "ttl",
+      "vector"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cgr-001",
+    "repo": "code-graph-rag",
+    "intent": "context_bundle",
+    "q": "Add Arrow graph serialization with automatic fallback to networkx",
+    "expected_topk_substrings": [
+      "Arrow",
+      "adapter",
+      "serialize",
+      "fallback"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cgr-002",
+    "repo": "code-graph-rag",
+    "intent": "context_bundle",
+    "q": "Implement cross-repo traversal to find external package dependencies",
+    "expected_topk_substrings": [
+      "traversal",
+      "dependencies",
+      "cross-repo",
+      "adapter"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cgr-003",
+    "repo": "code-graph-rag",
+    "intent": "context_bundle",
+    "q": "Optimize graph query execution with plan caching and index hints",
+    "expected_topk_substrings": [
+      "query",
+      "optimize",
+      "cache",
+      "execution"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cgr-004",
+    "repo": "code-graph-rag",
+    "intent": "context_bundle",
+    "q": "Rank exploration paths by semantic relevance to the user task",
+    "expected_topk_substrings": [
+      "path",
+      "rank",
+      "relevance",
+      "task"
+    ],
+    "k": 12
+  },
+  {
+    "id": "xcb-cgr-005",
+    "repo": "code-graph-rag",
+    "intent": "context_bundle",
+    "q": "Add graph metrics dashboard to visualize connectivity and hotspots",
+    "expected_topk_substrings": [
+      "metrics",
+      "graph",
+      "dashboard",
+      "connectivity"
+    ],
+    "k": 12
   }
 ]

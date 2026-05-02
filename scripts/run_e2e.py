@@ -165,7 +165,18 @@ async def _run_queries(
         url, params = _build_request(intent, q, repo_slug)
         t0 = time.monotonic()
         try:
-            r = await client.get(f"{base}{url}", params=params, timeout=60.0)
+            if intent == "context_bundle":
+                r = await client.post(
+                    f"{base}{url}",
+                    json={
+                        "repo": repo_slug,
+                        "task_description": q["q"],
+                        "depth": q.get("k", 12),
+                    },
+                    timeout=60.0,
+                )
+            else:
+                r = await client.get(f"{base}{url}", params=params, timeout=60.0)
             elapsed = time.monotonic() - t0
             ok = r.is_success
             body = r.json() if ok else None
@@ -200,11 +211,14 @@ async def _run_queries(
 
 def _build_request(intent: str, q: dict[str, Any], repo_slug: str) -> tuple[str, dict[str, str]]:
     if intent == "semantic":
-        return "/search/semantic", {
+        params = {
             "q": q["q"],
             "repo": repo_slug,
             "k": str(q.get("k", 10)),
         }
+        if q.get("rerank"):
+            params["rerank"] = "true"
+        return "/search/semantic", params
     if intent == "structural":
         return "/search/structural", {
             "cypher": q["q"],
@@ -217,6 +231,8 @@ def _build_request(intent: str, q: dict[str, Any], repo_slug: str) -> tuple[str,
             "repo": repo_slug,
             "limit": str(q.get("k", 5)),
         }
+    if intent == "context_bundle":
+        return "/context-bundle", {}
     raise ValueError(f"unknown intent {intent!r}")
 
 
