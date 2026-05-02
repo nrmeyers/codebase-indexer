@@ -120,7 +120,23 @@ class _Job:
     exclude_paths: frozenset[str] = field(default_factory=frozenset)
 
 
-# Module-level store — indexed by job_id. Single-process only.
+# Module-level transient runtime cache — indexed by job_id. Single-process.
+#
+# Two-store design (intentional, not a TODO):
+#   - `_jobs` holds the high-frequency mutable progress fields for an
+#     in-flight job (current_file, eta_sec, files_done) and is updated at
+#     ~1 Hz from the GraphUpdater progress_cb. Lives only in RAM.
+#   - `app.services.jobs_store` is the durable record (SQLite, WAL): it
+#     gets the terminal counters via `mark_done` / `mark_failed`, sweeps
+#     interrupted rows on lifespan boot, and surfaces persistent state
+#     across restarts. Updates are coarser — phase transitions only.
+#
+# Persisting every callback to SQLite would either thrash disk or require
+# a write-coalescer that adds complexity for no gain. Querying _jobs at
+# response time is O(1) and always reflects the latest callback fire.
+# Querying jobs_store is needed only when the job_id isn't in _jobs (i.e.
+# the job survived a restart) — that lookup happens lazily in
+# get_index_status's fallback branch.
 _jobs: dict[str, _Job] = {}
 
 # Per-repo-path lock: prevents two concurrent jobs from writing to the same
