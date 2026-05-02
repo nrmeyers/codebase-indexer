@@ -316,19 +316,63 @@ async def main_async(args: argparse.Namespace) -> int:
         pre_metrics = await _fetch_metrics_text(client, args.service_url)
         (out_dir / "metrics_snapshot_pre.txt").write_text(pre_metrics)
 
+        # Pre-flight: check LM Studio embed-model availability when forcing
+        # a reindex. Without it the embedding fallback is 50× slower and the
+        # cycle wastes 30+ min before failing the indexing-rate SLO. Better
+        # to fail-fast and let the operator load the model.
+        if args.force_reindex and not args.skip_indexing:
+            try:
+                health = (await client.get(f"{args.service_url}/health", timeout=5.0)).json()
+                lm = health.get("lm_studio") or {}
+                if lm.get("reachable") and not lm.get("can_embed"):
+                    log.warning(
+                        "PRE-FLIGHT FAIL: LM Studio reachable but can_embed=false. "
+                        "force_reindex with the in-process transformers fallback is ~50x "
+                        "slower than the SLO target. Load CodeRankEmbed in LM Studio and "
+                        "re-run, or pass --skip-indexing to run query-only."
+                    )
+                    (out_dir / "PREFLIGHT_FAIL.md").write_text(
+                        "# Cycle aborted in pre-flight\n\n"
+                        "LM Studio reachable but `can_embed=false`. Indexing rate SLO "
+                        "cannot be met with the transformers fallback.\n\n"
+                        "**Action:** load `CodeRankEmbed` in LM Studio, then re-run.\n"
+                    )
+                    return 2
+            except Exception as e:
+                log.warning("pre-flight health check failed (continuing): %s", e)
+
         # Stage 2 — indexing
         index_results = []
-        for repo_name, path in repo_paths.items():
+        if args.skip_indexing:
+            log.info("--skip-indexing: assuming repos already indexed; reading /repos health")
             try:
-                ix = await _ensure_indexed(
-                    client, args.service_url, repo_name, path, args.force_reindex, out_dir
-                )
-                index_results.append(ix)
+                repos = (await client.get(f"{args.service_url}/repos", timeout=10.0)).json()
+                seen = {r.get("name"): r for r in repos.get("repos", [])}
+                for repo_name in repo_paths:
+                    r = seen.get(repo_name) or {}
+                    index_results.append({
+                        "repo": repo_name,
+                        "status": "done" if r.get("readable") else "missing",
+                        "elapsed_s": 0,
+                        "node_count": r.get("node_count") or 0,
+                        "rel_count": r.get("rel_count") or 0,
+                        "embedding_count": r.get("embedding_count") or 0,
+                        "skipped": True,
+                    })
             except Exception as e:
-                log.error("indexing %s failed: %s", repo_name, e)
-                index_results.append(
-                    {"repo": repo_name, "status": "failed", "error": str(e), "elapsed_s": 0}
-                )
+                log.error("--skip-indexing health probe failed: %s", e)
+        else:
+            for repo_name, path in repo_paths.items():
+                try:
+                    ix = await _ensure_indexed(
+                        client, args.service_url, repo_name, path, args.force_reindex, out_dir
+                    )
+                    index_results.append(ix)
+                except Exception as e:
+                    log.error("indexing %s failed: %s", repo_name, e)
+                    index_results.append(
+                        {"repo": repo_name, "status": "failed", "error": str(e), "elapsed_s": 0}
+                    )
         (out_dir / "index_phase_times.json").write_text(json.dumps(index_results, indent=2))
 
         # Stage 3 — queries
@@ -426,6 +470,11 @@ def main() -> int:
     p.add_argument("--queries", default="scripts/queries.json")
     p.add_argument("--out", required=True, help="output directory for run artefacts")
     p.add_argument("--force-reindex", action="store_true", help="force cold-start indexing")
+    p.add_argument(
+        "--skip-indexing",
+        action="store_true",
+        help="skip the indexing stage; query-only run against existing indexes",
+    )
     p.add_argument("--repo-paths", default=None, help="JSON {name: path} override map")
     args = p.parse_args()
     return asyncio.run(main_async(args))

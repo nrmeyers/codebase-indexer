@@ -27,7 +27,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("grade")
 
 # Fields where we look for substring matches in a result item.
+# Add new keys here whenever the indexer surfaces a different shape; the
+# metric-contract should match real API responses.
 _TEXT_FIELDS = (
+    "symbol",   # current /search/semantic + /search/symbol shape
     "qualified_name",
     "fqn",
     "name",
