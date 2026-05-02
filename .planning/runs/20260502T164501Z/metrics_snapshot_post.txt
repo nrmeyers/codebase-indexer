@@ -1,0 +1,116 @@
+# HELP python_gc_objects_collected_total Objects collected during gc
+# TYPE python_gc_objects_collected_total counter
+python_gc_objects_collected_total{generation="0"} 195691.0
+python_gc_objects_collected_total{generation="1"} 26870.0
+python_gc_objects_collected_total{generation="2"} 17090.0
+# HELP python_gc_objects_uncollectable_total Uncollectable objects found during GC
+# TYPE python_gc_objects_uncollectable_total counter
+python_gc_objects_uncollectable_total{generation="0"} 0.0
+python_gc_objects_uncollectable_total{generation="1"} 0.0
+python_gc_objects_uncollectable_total{generation="2"} 0.0
+# HELP python_gc_collections_total Number of times this generation was collected
+# TYPE python_gc_collections_total counter
+python_gc_collections_total{generation="0"} 4655.0
+python_gc_collections_total{generation="1"} 421.0
+python_gc_collections_total{generation="2"} 28.0
+# HELP python_info Python platform information
+# TYPE python_info gauge
+python_info{implementation="CPython",major="3",minor="12",patchlevel="6",version="3.12.6"} 1.0
+# HELP forge_indexer_search_duration_seconds Wall-clock time per /search/* request, by endpoint and rerank status.
+# TYPE forge_indexer_search_duration_seconds histogram
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="0.005",reranked="false"} 0.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="0.025",reranked="false"} 0.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="0.1",reranked="false"} 0.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="0.25",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="0.5",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="1.0",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="2.5",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="5.0",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="10.0",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_bucket{endpoint="semantic",le="+Inf",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_count{endpoint="semantic",reranked="false"} 42.0
+forge_indexer_search_duration_seconds_sum{endpoint="semantic",reranked="false"} 5.065808834857307
+# HELP forge_indexer_search_duration_seconds_created Wall-clock time per /search/* request, by endpoint and rerank status.
+# TYPE forge_indexer_search_duration_seconds_created gauge
+forge_indexer_search_duration_seconds_created{endpoint="semantic",reranked="false"} 1.7777425916806679e+09
+# HELP forge_indexer_search_requests_total Total /search/* requests by endpoint and HTTP status code.
+# TYPE forge_indexer_search_requests_total counter
+forge_indexer_search_requests_total{endpoint="semantic",status_code="200"} 42.0
+# HELP forge_indexer_search_requests_created Total /search/* requests by endpoint and HTTP status code.
+# TYPE forge_indexer_search_requests_created gauge
+forge_indexer_search_requests_created{endpoint="semantic",status_code="200"} 1.777742591680738e+09
+# HELP forge_indexer_index_job_duration_seconds Per-phase duration of an index job (parse, embed, pagerank, finalize).
+# TYPE forge_indexer_index_job_duration_seconds histogram
+forge_indexer_index_job_duration_seconds_bucket{le="1.0",phase="parse"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="5.0",phase="parse"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="15.0",phase="parse"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="30.0",phase="parse"} 1.0
+forge_indexer_index_job_duration_seconds_bucket{le="60.0",phase="parse"} 1.0
+forge_indexer_index_job_duration_seconds_bucket{le="120.0",phase="parse"} 1.0
+forge_indexer_index_job_duration_seconds_bucket{le="300.0",phase="parse"} 1.0
+forge_indexer_index_job_duration_seconds_bucket{le="600.0",phase="parse"} 3.0
+forge_indexer_index_job_duration_seconds_bucket{le="1800.0",phase="parse"} 3.0
+forge_indexer_index_job_duration_seconds_bucket{le="3600.0",phase="parse"} 3.0
+forge_indexer_index_job_duration_seconds_bucket{le="+Inf",phase="parse"} 3.0
+forge_indexer_index_job_duration_seconds_count{phase="parse"} 3.0
+forge_indexer_index_job_duration_seconds_sum{phase="parse"} 746.037459458923
+forge_indexer_index_job_duration_seconds_bucket{le="1.0",phase="embed"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="5.0",phase="embed"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="15.0",phase="embed"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="30.0",phase="embed"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="60.0",phase="embed"} 0.0
+forge_indexer_index_job_duration_seconds_bucket{le="120.0",phase="embed"} 1.0
+forge_indexer_index_job_duration_seconds_bucket{le="300.0",phase="embed"} 1.0
+forge_indexer_index_job_duration_seconds_bucket{le="600.0",phase="embed"} 1.0
+forge_indexer_index_job_duration_seconds_bucket{le="1800.0",phase="embed"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="3600.0",phase="embed"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="+Inf",phase="embed"} 2.0
+forge_indexer_index_job_duration_seconds_count{phase="embed"} 2.0
+forge_indexer_index_job_duration_seconds_sum{phase="embed"} 1511.1496908329427
+forge_indexer_index_job_duration_seconds_bucket{le="1.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="5.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="15.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="30.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="60.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="120.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="300.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="600.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="1800.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="3600.0",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_bucket{le="+Inf",phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_count{phase="pagerank"} 2.0
+forge_indexer_index_job_duration_seconds_sum{phase="pagerank"} 0.3170339579228312
+# HELP forge_indexer_index_job_duration_seconds_created Per-phase duration of an index job (parse, embed, pagerank, finalize).
+# TYPE forge_indexer_index_job_duration_seconds_created gauge
+forge_indexer_index_job_duration_seconds_created{phase="parse"} 1.777740721001827e+09
+forge_indexer_index_job_duration_seconds_created{phase="embed"} 1.777740895350361e+09
+forge_indexer_index_job_duration_seconds_created{phase="pagerank"} 1.77774089554896e+09
+# HELP forge_indexer_index_jobs_total Index job terminal-state counter.
+# TYPE forge_indexer_index_jobs_total counter
+forge_indexer_index_jobs_total{kind="index",status="failed"} 1.0
+forge_indexer_index_jobs_total{kind="index",status="done"} 2.0
+# HELP forge_indexer_index_jobs_created Index job terminal-state counter.
+# TYPE forge_indexer_index_jobs_created gauge
+forge_indexer_index_jobs_created{kind="index",status="failed"} 1.777740751649277e+09
+forge_indexer_index_jobs_created{kind="index",status="done"} 1.77774089554936e+09
+# HELP forge_indexer_index_job_progress_seconds Seconds since the last progress event for an active index job.
+# TYPE forge_indexer_index_job_progress_seconds gauge
+# HELP forge_indexer_lm_studio_up 1 if LM Studio adapter responded to its last health probe, else 0.
+# TYPE forge_indexer_lm_studio_up gauge
+forge_indexer_lm_studio_up 1.0
+# HELP forge_indexer_lm_studio_can_rerank 1 if LM Studio has a chat model loaded for rerank, else 0.
+# TYPE forge_indexer_lm_studio_can_rerank gauge
+forge_indexer_lm_studio_can_rerank 1.0
+# HELP forge_indexer_embeddings_count Indexed-symbol count per repo (sampled from DuckDB).
+# TYPE forge_indexer_embeddings_count gauge
+# HELP forge_indexer_disk_bytes Bytes used per persistent path (cgr|jobs|audit).
+# TYPE forge_indexer_disk_bytes gauge
+forge_indexer_disk_bytes{path="cgr"} 2.76276353e+08
+# HELP forge_indexer_jobs_active Currently-active job count by kind.
+# TYPE forge_indexer_jobs_active gauge
+# HELP forge_indexer_jobs_dedupe_409_total POST /index requests rejected as duplicates of an active job.
+# TYPE forge_indexer_jobs_dedupe_409_total counter
+forge_indexer_jobs_dedupe_409_total 0.0
+# HELP forge_indexer_jobs_dedupe_409_created POST /index requests rejected as duplicates of an active job.
+# TYPE forge_indexer_jobs_dedupe_409_created gauge
+forge_indexer_jobs_dedupe_409_created 1.77774025276081e+09
