@@ -74,6 +74,7 @@ _disk_bytes: "Gauge | None" = None
 _jobs_active: "Gauge | None" = None
 _jobs_dedupe_409: "Counter | None" = None
 _query_rewriter_applied: "Counter | None" = None
+_rerank_outcome: "Counter | None" = None
 
 _state_lock = Lock()
 _initialised = False
@@ -167,6 +168,27 @@ def record_query_rewriter(intent: str, outcome: str) -> None:
     _query_rewriter_applied.labels(intent=intent, outcome=outcome).inc()  # type: ignore[union-attr]
 
 
+def record_rerank_outcome(outcome: str) -> None:
+    """Record one observation against the LLM-rerank stage.
+
+    Args:
+        outcome: One of ``"applied"``, ``"skip-empty-input"``,
+            ``"skip-unavailable"``, ``"skip-deadline"``,
+            ``"skip-empty-response"``, ``"skip-parse-error"``. See
+            ``app/services/reranker.py:rerank``.
+
+    Headline metric for "is rerank actually helping users?":
+        rate(forge_indexer_rerank_outcome_total{outcome="applied"}[5m])
+        / rate(forge_indexer_rerank_outcome_total[5m])
+
+    Cardinality is bounded at 6 outcomes — small label set safe for
+    high-cardinality scrape intervals.
+    """
+    if not is_enabled():
+        return
+    _rerank_outcome.labels(outcome=outcome).inc()  # type: ignore[union-attr]
+
+
 def set_jobs_active(kind: str, value: int) -> None:
     if not is_enabled():
         return
@@ -218,7 +240,7 @@ def setup_metrics(app: FastAPI) -> None:
     global _lm_studio_up, _lm_studio_can_rerank
     global _embeddings_count, _disk_bytes
     global _jobs_active, _jobs_dedupe_409
-    global _query_rewriter_applied
+    global _query_rewriter_applied, _rerank_outcome
 
     enabled = os.environ.get("METRICS_ENABLED", "true").lower() in ("1", "true", "yes", "on")
     if not enabled:
@@ -293,6 +315,13 @@ def setup_metrics(app: FastAPI) -> None:
             "Query-rewriter outcomes per /search/semantic call. "
             "outcome ∈ {applied, skip-short, skip-symbol-like, skip-overstrip}.",
             labelnames=("intent", "outcome"),
+        )
+        _rerank_outcome = Counter(
+            "forge_indexer_rerank_outcome_total",
+            "LLM-rerank outcomes per ?rerank=true call. outcome ∈ "
+            "{applied, skip-empty-input, skip-unavailable, skip-deadline, "
+            "skip-empty-response, skip-parse-error}.",
+            labelnames=("outcome",),
         )
 
         # HTTP middleware via prometheus-fastapi-instrumentator + the

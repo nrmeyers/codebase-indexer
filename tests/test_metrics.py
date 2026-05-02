@@ -28,6 +28,7 @@ _DASHBOARD_METRIC_NAMES = (
     "forge_indexer_jobs_active",
     "forge_indexer_jobs_dedupe_409_total",
     "forge_indexer_query_rewriter_applied_total",
+    "forge_indexer_rerank_outcome_total",
 )
 
 
@@ -58,6 +59,7 @@ def _reset_metrics_state() -> None:
     metrics._jobs_active = None
     metrics._jobs_dedupe_409 = None
     metrics._query_rewriter_applied = None
+    metrics._rerank_outcome = None
     metrics._repo_cap = None
 
 
@@ -94,6 +96,8 @@ def test_dashboard_metric_contract(metrics_app: FastAPI) -> None:
     metrics.update_index_progress_gauge("job-abc", 4.2)
     metrics.record_query_rewriter("semantic", "applied")
     metrics.record_query_rewriter("semantic", "skip-short")
+    metrics.record_rerank_outcome("applied")
+    metrics.record_rerank_outcome("skip-deadline")
 
     client = TestClient(metrics_app)
     body = client.get("/metrics").text
