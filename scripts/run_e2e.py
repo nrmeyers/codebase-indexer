@@ -166,12 +166,16 @@ async def _run_queries(
         t0 = time.monotonic()
         try:
             if intent == "context_bundle":
+                # /context-bundle expects `repo_path` (full filesystem path) not
+                # `repo`, and caps `depth` at 3 (per the route's pydantic model).
+                # The query's `k` is informational only — used for downstream
+                # grading, not the bundle's hop budget.
                 r = await client.post(
                     f"{base}{url}",
                     json={
-                        "repo": repo_slug,
+                        "repo_path": _DEFAULT_REPO_PATHS.get(q["repo"], q["repo"]),
                         "task_description": q["q"],
-                        "depth": q.get("k", 12),
+                        "depth": min(q.get("k", 3), 3),
                     },
                     timeout=60.0,
                 )
@@ -240,7 +244,16 @@ def _extract_top_k(intent: str, body: Any) -> list[dict[str, Any]]:
     if not body:
         return []
     if isinstance(body, dict):
-        for key in ("results", "rows", "matches", "items", "data"):
+        # /context-bundle returns a flat list at `symbols` (strings) plus
+        # `source_snippets` keyed by symbol; project to the grader's expected
+        # shape `[{symbol: ..., snippet: ...}]` for substring matching.
+        if intent == "context_bundle" and isinstance(body.get("symbols"), list):
+            snips = body.get("source_snippets") or {}
+            return [
+                {"symbol": s, "snippet": snips.get(s, "") if isinstance(snips, dict) else ""}
+                for s in body["symbols"]
+            ]
+        for key in ("results", "rows", "matches", "items", "data", "symbols"):
             v = body.get(key)
             if isinstance(v, list):
                 return v
@@ -265,23 +278,34 @@ def _score_indexing(index_results: list[dict[str, Any]]) -> dict[str, float | No
     }
 
 
-def _score_queries(query_results: list[dict[str, Any]]) -> dict[str, float]:
+def _score_queries(query_results: list[dict[str, Any]]) -> dict[str, float | None]:
     by_intent: dict[str, list[float]] = {}
     semantic_with_rerank: list[float] = []
     semantic_no_rerank: list[float] = []
+    context_bundle_lat: list[float] = []
     for r in query_results:
         intent = r["intent"]
         elapsed = r["elapsed_s"]
         by_intent.setdefault(intent, []).append(elapsed)
         if intent == "semantic":
-            # We don't currently flag rerank in the request — assume no-rerank for cycle 0.
-            semantic_no_rerank.append(elapsed)
+            # `xrr-` id prefix marks Agent B's rerank queries; the queries.json
+            # also carries an explicit `rerank: true` field on those records.
+            # Either signal counts.
+            qid = (r.get("id") or "")
+            is_rerank = qid.startswith("xrr-") or bool(r.get("rerank"))
+            if is_rerank:
+                semantic_with_rerank.append(elapsed)
+            else:
+                semantic_no_rerank.append(elapsed)
+        elif intent == "context_bundle":
+            context_bundle_lat.append(elapsed)
 
     return {
-        "search_semantic_p95_no_rerank_s": _percentile(semantic_no_rerank, 0.95),
-        "search_semantic_p95_with_rerank_s": _percentile(semantic_with_rerank, 0.95) if semantic_with_rerank else 0.0,
-        "search_structural_p95_s": _percentile(by_intent.get("structural", []), 0.95),
-        "search_symbol_p95_s": _percentile(by_intent.get("symbol", []), 0.95),
+        "search_semantic_p95_no_rerank_s": _percentile(semantic_no_rerank, 0.95) if semantic_no_rerank else None,
+        "search_semantic_p95_with_rerank_s": _percentile(semantic_with_rerank, 0.95) if semantic_with_rerank else None,
+        "search_structural_p95_s": _percentile(by_intent.get("structural", []), 0.95) if by_intent.get("structural") else None,
+        "search_symbol_p95_s": _percentile(by_intent.get("symbol", []), 0.95) if by_intent.get("symbol") else None,
+        "context_bundle_p95_s": _percentile(context_bundle_lat, 0.95) if context_bundle_lat else None,
     }
 
 
@@ -315,11 +339,11 @@ def _score_lm_uptime(metrics_pre: str, metrics_post: str) -> dict[str, float]:
     }
 
 
-def _score_context_bundle(query_results: list[dict[str, Any]]) -> dict[str, float]:
-    # Cycle 0 doesn't directly hit /context-bundle (queries.json is search-only).
-    # Carry as 0.0 so SLO row stays N/A; populate in a later cycle if we add a
-    # context-bundle suite.
-    return {"context_bundle_p95_s": 0.0}
+def _score_context_bundle(query_results: list[dict[str, Any]]) -> dict[str, float | None]:
+    # Superseded by _score_queries which now folds context_bundle latencies in.
+    # Kept as a no-op so the existing call site at main_async() doesn't break;
+    # returns an empty dict so dict-merge yields no override.
+    return {}
 
 
 # ---------------------------------------------------------------------------
