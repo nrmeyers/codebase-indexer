@@ -10,17 +10,21 @@ Routes mounted at ``/repos/...`` so the TheForge proxy can forward
 ``/api/code-indexer/repos/...`` straight through.
 
 Endpoints:
-    GET  /repos/{name}/stats   — sidebar facts (db size, fragment count,
-                                  edge count, per-label node counts, last
-                                  indexed timestamp, indexed commit SHA)
-    POST /repos/{name}/reindex — force re-index. Wipes the LadybugDB +
-                                  DuckDB files, then schedules all 4
-                                  indexing passes.
+    GET  /repos/{name}/stats      — sidebar facts (db size, fragment count,
+                                    edge count, per-label node counts, last
+                                    indexed timestamp, indexed commit SHA)
+    POST /repos/{name}/reindex    — force re-index. Wipes the LadybugDB +
+                                    DuckDB files, then schedules all 4
+                                    indexing passes.
+    POST /repos/{slug}/watch      — start file-watcher (Phase 5)
+    GET  /repos/{slug}/watch      — watcher status (Phase 5)
+    DELETE /repos/{slug}/watch    — stop file-watcher (Phase 5)
 """
 from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,9 +33,12 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from ..config import settings
 from ..models import (
     IndexRequest,
+    PartialIndexEvent,
     ReindexAccepted,
     ReindexRequest,
     RepoIndexStatsResponse,
+    WatchAccepted,
+    WatchStatus,
 )
 
 router = APIRouter(prefix="/repos", tags=["repos"])
@@ -301,3 +308,171 @@ async def reindex_repo(
         background_tasks,
     )
     return ReindexAccepted(job_id=accepted.job_id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — file-watcher lifecycle endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{slug}/watch",
+    response_model=WatchAccepted,
+    status_code=202,
+    summary="Start file-watcher for a repo (Phase 5)",
+)
+async def start_watch(slug: str) -> WatchAccepted:
+    """Start a per-repo file-watcher.
+
+    The watcher debounces FS events and triggers partial re-indexes so
+    edits are visible in ``/search/semantic`` within ~5 s of save.
+
+    Returns:
+        WatchAccepted (202): ``{ watcher_id, started_at, debounce_ms }``.
+
+    Raises:
+        503: ``WATCH_ENABLED=false`` — feature flag is off.
+        409: Watcher already active for this slug.
+        404: Repo is not indexed — run ``POST /index`` first.
+        429: Too many active watchers (``WATCH_MAX_REPOS`` limit).
+    """
+    from ..services.watch_manager import (
+        start_watch as _start_watch,
+        WatchDisabledError,
+        WatchAlreadyActiveError,
+        WatchCapacityError,
+        get_watch,
+    )
+
+    try:
+        handle = await _start_watch(
+            slug,
+            actor_oid="anon",
+            actor_email="anon@local",
+        )
+    except WatchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "watch_disabled", "message": "WATCH_ENABLED is false"},
+        )
+    except WatchAlreadyActiveError:
+        existing = get_watch(slug)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "watch_already_active",
+                "watcher_id": slug,
+                "started_at": existing.started_at if existing else 0.0,
+            },
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "repo_not_indexed",
+                "message": f"Repo '{slug}' has no index. POST /index first.",
+            },
+        )
+    except WatchCapacityError:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "watch_capacity_exceeded",
+                "max": settings.WATCH_MAX_REPOS,
+            },
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "watch_inotify_exhausted",
+                "message": (
+                    f"Observer.schedule failed: {exc}. "
+                    "Try: echo fs.inotify.max_user_watches=524288 >> /etc/sysctl.conf"
+                ),
+            },
+        )
+
+    return WatchAccepted(
+        watcher_id=handle.repo_slug,
+        started_at=handle.started_at,
+        debounce_ms=handle.debounce_ms,
+    )
+
+
+@router.get(
+    "/{slug}/watch",
+    response_model=WatchStatus,
+    summary="Get file-watcher status for a repo (Phase 5)",
+)
+def get_watch_status(slug: str) -> WatchStatus:
+    """Return the current state of the watcher for ``slug``.
+
+    Returns:
+        WatchStatus (200): Current watcher snapshot.
+
+    Raises:
+        404: No active watcher for this slug.
+    """
+    from ..services.watch_manager import get_watch as _get_watch
+
+    handle = _get_watch(slug)
+    if handle is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "watch_not_active", "message": f"No watcher for '{slug}'"},
+        )
+    return WatchStatus(
+        repo_slug=handle.repo_slug,
+        repo_path=handle.repo_path,
+        actor_oid=handle.actor_oid,
+        actor_email=handle.actor_email,
+        started_at=handle.started_at,
+        last_event_at=handle.last_event_at,
+        last_partial_job_id=handle.last_partial_job_id,
+        debounce_ms=handle.debounce_ms,
+        pending_paths_count=handle.pending_paths_count,
+        state=handle.state,
+    )
+
+
+@router.delete(
+    "/{slug}/watch",
+    summary="Stop file-watcher for a repo (Phase 5)",
+)
+async def stop_watch(slug: str) -> dict:
+    """Stop the file-watcher for ``slug``.
+
+    Returns:
+        dict: ``{ stopped_at, last_partial_job_id }``.
+
+    Raises:
+        404: No active watcher for this slug.
+    """
+    from ..services.watch_manager import (
+        stop_watch as _stop_watch,
+        get_watch as _get_watch,
+        WatchNotActiveError,
+    )
+
+    handle = _get_watch(slug)
+    if handle is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "watch_not_active", "message": f"No watcher for '{slug}'"},
+        )
+
+    last_partial_job_id = handle.last_partial_job_id
+
+    try:
+        await _stop_watch(slug)
+    except WatchNotActiveError:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "watch_not_active", "message": f"No watcher for '{slug}'"},
+        )
+
+    return {
+        "stopped_at": time.time(),
+        "last_partial_job_id": last_partial_job_id,
+    }

@@ -544,12 +544,24 @@ def count_active(kind: str | None = None) -> int:
 def clear_terminal(
     actor_oid: str | None = None,
     statuses: set[str] | None = None,
+    kind: str | None = None,
+    older_than_hours: int | None = None,
 ) -> int:
     """Delete rows in terminal states. Returns count removed.
 
     By default clears done / failed / cancelled — ``interrupted`` rows
     are kept by default so a UI can show "we restarted while you were
     indexing" until the user explicitly dismisses them.
+
+    Args:
+        actor_oid: When provided, only rows owned by this actor are deleted.
+        statuses: Terminal statuses to include. Defaults to
+            ``{'done', 'failed', 'cancelled'}``.
+        kind: When provided, restrict the sweep to a specific job kind
+            (e.g. ``'watch_partial'`` for Phase 5 housekeeping).
+        older_than_hours: When provided, only delete rows whose
+            ``started_at`` is more than this many hours ago.  Phase 5
+            uses 24 hours for high-volume ``watch_partial`` housekeeping.
     """
     if statuses is None:
         statuses = {"done", "failed", "cancelled"}
@@ -562,6 +574,13 @@ def clear_terminal(
     if actor_oid is not None:
         sql += " AND actor_oid = ?"
         params.append(actor_oid)
+    if kind is not None:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if older_than_hours is not None:
+        cutoff = time.time() - older_than_hours * 3600.0
+        sql += " AND started_at < ?"
+        params.append(cutoff)
     conn = _require_conn()
     with _lock:
         cur = conn.execute(sql, params)

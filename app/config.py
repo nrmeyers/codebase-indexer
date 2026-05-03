@@ -131,6 +131,19 @@ class Settings(BaseSettings):
             return []
         return [o.strip().lower() for o in raw.split(",") if o.strip()]
 
+    # --- Phase 5: Realtime file-watcher ---
+    # Master switch — false by default until validated in production (§12).
+    WATCH_ENABLED: bool = False
+    # Debounce window in milliseconds.  Env var name ends with _MS (not _S)
+    # to match the plan §2 table and the WatchAccepted payload field.
+    WATCH_DEBOUNCE_MS: int = 1500
+    # Hard timeout (seconds) for joining all Observer threads on shutdown.
+    WATCH_SHUTDOWN_TIMEOUT_S: float = 5.0
+    # Rows older than this are swept by clear_terminal on startup.
+    WATCH_PARTIAL_RETENTION_HOURS: int = 24
+    # Maximum concurrent watchers (inotify budget guard).
+    WATCH_MAX_REPOS: int = 32
+
     # --- LM Studio adapter (opt-in, best-effort) ---
     # When LM_STUDIO_URL is set and the named models are loaded, the
     # /search/semantic and /context-bundle endpoints will:
