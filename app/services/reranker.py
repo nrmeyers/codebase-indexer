@@ -63,9 +63,14 @@ logger = logging.getLogger(__name__)
 MAX_SNIPPET_CHARS = 800
 
 # Hard cap on candidates we send to a single rerank call.  Beyond ~30 the
-# model's accuracy degrades (per Nomic's own evals) and prompt cost
-# grows linearly.
-MAX_CANDIDATES = 30
+# model's accuracy degrades (per Nomic's own evals) and prompt cost grows
+# linearly.  Lower caps trade recall@5 for latency: at 20 the rerank prompt
+# is ~3.4k tokens and qwen2.5-vl-7b lands rerank under 4s on dev hardware
+# (cycle 8: 5.83s at cap=30; cycle 9 target ≤4s at cap=20).
+#
+# Env-tunable so the cap can be flipped without redeploy when a faster
+# rerank model lands or when SLO targets shift.
+MAX_CANDIDATES = int(os.environ.get("RERANK_MAX_CANDIDATES", "30"))
 
 
 def _rerank_deadline_seconds() -> float:
