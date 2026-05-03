@@ -190,7 +190,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         _log.info("metrics: background collectors started")
 
+    # --- Phase 5: Sweep stale watch_partial rows (high-volume housekeeping) ---
+    if settings.WATCH_ENABLED:
+        swept_wp = _jobs_store.clear_terminal(
+            statuses={"done", "failed", "cancelled"},
+            kind="watch_partial",
+            older_than_hours=settings.WATCH_PARTIAL_RETENTION_HOURS,
+        )
+        if swept_wp:
+            _log.info(
+                "jobs_store: swept %d stale watch_partial row(s) older than %dh",
+                swept_wp,
+                settings.WATCH_PARTIAL_RETENTION_HOURS,
+            )
+
     yield
+
+    # Shutdown: stop all active file-watchers before the event loop exits.
+    if settings.WATCH_ENABLED:
+        try:
+            from .services.watch_manager import shutdown_all as _watch_shutdown_all
+            await _watch_shutdown_all()
+        except Exception as _exc:
+            _log.warning("watch_manager: shutdown_all error: %s", _exc)
 
     # Shutdown: cancel the metrics background task gracefully.
     if _metrics_task is not None:

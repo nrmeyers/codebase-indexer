@@ -76,6 +76,13 @@ _jobs_dedupe_409: "Counter | None" = None
 _query_rewriter_applied: "Counter | None" = None
 _rerank_outcome: "Counter | None" = None
 
+# Phase 5 — realtime watcher metrics
+_watch_active_repos: "Gauge | None" = None
+_watch_events_total: "Counter | None" = None
+_watch_partial_duration: "Histogram | None" = None
+_watch_partial_files: "Histogram | None" = None
+_watch_inotify_failures: "Counter | None" = None
+
 _state_lock = Lock()
 _initialised = False
 
@@ -229,6 +236,55 @@ def clear_index_progress_gauge(job_id: str) -> None:
         pass
 
 
+# Phase 5 — realtime watcher helpers
+def set_watch_active_repos(count: int) -> None:
+    """Update the gauge tracking the number of active watchers."""
+    if not is_enabled():
+        return
+    _watch_active_repos.set(count)  # type: ignore[union-attr]
+
+
+def record_watch_event(result: str) -> None:
+    """Increment the watch-event counter.
+
+    Args:
+        result: One of ``dispatched``, ``filtered``, or ``coalesced``.
+    """
+    if not is_enabled():
+        return
+    _watch_events_total.labels(result=result).inc()  # type: ignore[union-attr]
+
+
+def record_watch_partial_duration(duration_seconds: float, terminal_status: str) -> None:
+    """Observe a partial-index run duration.
+
+    Args:
+        duration_seconds: Wall-clock seconds for the full partial run.
+        terminal_status: ``done`` | ``failed`` | ``cancelled`` | ``noop``.
+    """
+    if not is_enabled():
+        return
+    _watch_partial_duration.labels(terminal_status=terminal_status).observe(duration_seconds)  # type: ignore[union-attr]
+
+
+def record_watch_partial_files(dirty_count: int) -> None:
+    """Observe the number of dirty files in one debounced batch."""
+    if not is_enabled():
+        return
+    _watch_partial_files.observe(dirty_count)  # type: ignore[union-attr]
+
+
+def record_watch_inotify_failure(reason: str) -> None:
+    """Increment the inotify-failure counter.
+
+    Args:
+        reason: One of ``max_watches``, ``permission``, or ``other``.
+    """
+    if not is_enabled():
+        return
+    _watch_inotify_failures.labels(reason=reason).inc()  # type: ignore[union-attr]
+
+
 # ---------------------------------------------------------------------------
 # Setup / shutdown
 # ---------------------------------------------------------------------------
@@ -241,6 +297,8 @@ def setup_metrics(app: FastAPI) -> None:
     global _embeddings_count, _disk_bytes
     global _jobs_active, _jobs_dedupe_409
     global _query_rewriter_applied, _rerank_outcome
+    global _watch_active_repos, _watch_events_total
+    global _watch_partial_duration, _watch_partial_files, _watch_inotify_failures
 
     enabled = os.environ.get("METRICS_ENABLED", "true").lower() in ("1", "true", "yes", "on")
     if not enabled:
@@ -322,6 +380,34 @@ def setup_metrics(app: FastAPI) -> None:
             "{applied, skip-empty-input, skip-unavailable, skip-deadline, "
             "skip-empty-response, skip-parse-error}.",
             labelnames=("outcome",),
+        )
+
+        # Phase 5 — realtime watcher metrics (plan §9)
+        _WATCH_PARTIAL_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+        _watch_active_repos = Gauge(
+            "forge_indexer_watch_active_repos",
+            "Number of repos currently being watched by the file-watcher.",
+        )
+        _watch_events_total = Counter(
+            "forge_indexer_watch_events_total",
+            "FS events received by the watcher; result ∈ {dispatched, filtered, coalesced}.",
+            labelnames=("result",),
+        )
+        _watch_partial_duration = Histogram(
+            "forge_indexer_watch_partial_duration_seconds",
+            "Wall-clock seconds per partial-index run.",
+            labelnames=("terminal_status",),
+            buckets=_WATCH_PARTIAL_BUCKETS,
+        )
+        _watch_partial_files = Histogram(
+            "forge_indexer_watch_partial_files",
+            "Number of dirty files per debounced batch.",
+            buckets=(1, 2, 5, 10, 20, 50, 100),
+        )
+        _watch_inotify_failures = Counter(
+            "forge_indexer_watch_inotify_failures_total",
+            "Observer.schedule failures; reason ∈ {max_watches, permission, other}.",
+            labelnames=("reason",),
         )
 
         # HTTP middleware via prometheus-fastapi-instrumentator + the
