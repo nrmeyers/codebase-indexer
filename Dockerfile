@@ -71,9 +71,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-deps "pyarrow>=15.0"
 
 # Now copy app source and re-sync to install code-indexer-service itself.
+# README.md is REQUIRED — pyproject.toml declares `readme = "README.md"`
+# and hatchling reads the file during the editable install. Without it,
+# `uv sync` fails with `OSError: Readme file does not exist: README.md`.
 COPY code-indexer-service/app ./app
 COPY code-indexer-service/main.py ./main.py
 COPY code-indexer-service/scripts ./scripts
+COPY code-indexer-service/README.md ./README.md
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
