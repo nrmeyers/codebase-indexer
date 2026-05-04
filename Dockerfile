@@ -54,12 +54,21 @@ COPY code-indexer-service/pyproject.toml code-indexer-service/uv.lock ./code-ind
 
 WORKDIR /workspace/code-indexer-service
 
-# Install deps WITH the [arrow] extra. Bench results
-# (code-graph-rag/scripts/BENCH_RESULTS_2026-04-27.md) showed pyarrow
-# bulk_insert is 380x faster than executemany on FLOAT[768] payloads;
-# the ~30 MB image cost is trivially worth the indexing throughput.
+# Install lockfile-resolved deps (no app source yet, no extras).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra arrow
+    uv sync --frozen --no-dev --no-install-project
+
+# pyarrow is the 380× bulk_insert speedup
+# (code-graph-rag/scripts/BENCH_RESULTS_2026-04-27.md). The `arrow` extra
+# is declared on code-graph-rag's pyproject.toml — NOT on the indexer's
+# — so `uv sync --extra arrow` fails from this repo's perspective. Pull
+# pyarrow explicitly with `uv pip install --no-deps` so the lockfile
+# resolution above stays intact and pyarrow lands in the runtime image.
+# vector_store.py in code-graph-rag auto-detects pyarrow at import time
+# and routes to the bulk_insert_arrow path when present; falls back to
+# executemany otherwise.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-deps "pyarrow>=15.0"
 
 # Now copy app source and re-sync to install code-indexer-service itself.
 COPY code-indexer-service/app ./app
@@ -67,7 +76,7 @@ COPY code-indexer-service/main.py ./main.py
 COPY code-indexer-service/scripts ./scripts
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra arrow
+    uv sync --frozen --no-dev
 
 # ---------- Stage 2: runtime ----------
 FROM python:3.12-slim AS runtime
