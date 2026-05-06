@@ -718,6 +718,45 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         logger.debug("jobs_store.mark_done non-fatal: %s", _exc)
     _metrics.record_index_terminal("done", kind="index")
 
+    # BUC-1518 C3 — stamp RepoMeta with the current HEAD SHA only AFTER both
+    # graph build and embed pass have completed successfully.  A mid-flight
+    # crash above this point leaves the OLD SHA in place, so the next /index
+    # call re-runs the same diff and recovers without losing prior progress.
+    try:
+        from codebase_rag.services.git_diff import get_head_sha
+        from codebase_rag.services import repo_meta as _rm
+        head_sha = get_head_sha(repo)
+        if head_sha:
+            _stamp_db = lb.Database(repo_db_path)
+            _stamp_conn = lb.Connection(_stamp_db)
+            try:
+                _rm.stamp(
+                    _stamp_conn,
+                    repo.name,
+                    last_indexed_sha=head_sha,
+                    last_indexed_at=int(job.finished_at),
+                )
+                logger.info(
+                    "RepoMeta stamped: repo=%s sha=%s model=%s",
+                    repo.name, head_sha[:8], _rm.MODEL_VERSION,
+                )
+            finally:
+                try:
+                    _stamp_conn.close()
+                except Exception:
+                    pass
+                del _stamp_conn, _stamp_db
+                _gc.collect()
+        else:
+            logger.info(
+                "RepoMeta stamp skipped: %s is not a git repo (incremental disabled)",
+                repo.name,
+            )
+    except Exception as _exc:
+        # Stamping failures are non-fatal — the index already succeeded;
+        # we just lose the ability to do incremental on the NEXT call.
+        logger.warning("RepoMeta.stamp failed (non-fatal): %s", _exc)
+
     # Bust the health probe cache again now that embeddings are done so the
     # UI transitions from "indexing" to fully-complete state immediately.
     try:
