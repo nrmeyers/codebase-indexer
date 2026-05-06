@@ -147,6 +147,15 @@ class Settings(BaseSettings):
     LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint
     LM_STUDIO_TIMEOUT: float = 30.0
 
+    # --- S3 snapshot / restore (BUC-1499) ---
+    # When S3_INDEX_BUCKET is set the service pulls index files from S3 on
+    # startup and pushes changed files back on clean shutdown.  This lets
+    # containers inherit the last committed graph without a bind-mount.
+    # Leave blank in local dev to disable S3 sync entirely.
+    S3_INDEX_BUCKET: str = "navistone-forge-data"   # set to "" to disable
+    S3_INDEX_PREFIX: str = "code-indexer/indexes"   # key prefix inside the bucket
+    S3_INDEX_REGION: str = "us-east-1"
+
     # --- SageMaker embedding endpoint (production primary) ---
     # Priority: SageMaker (this) → LM Studio → in-process torch.
     # Set SAGEMAKER_EMBED_ENDPOINT to the endpoint name to activate.
