@@ -128,7 +128,13 @@ class SageMakerEmbedder:
                         f"SageMaker returned {len(raw)} vectors for {len(chunk)} inputs"
                     )
                 for offset, vec in enumerate(raw):
-                    results[start + offset] = [float(v) for v in vec]
+                    # forge-e5-embed-v1 wraps embeddings in extra list levels:
+                    # e.g. raw[i] may be [[[ f0, f1, ...]]] not [f0, f1, ...].
+                    # Unwrap until the innermost non-nested float list.
+                    actual = vec
+                    while actual and isinstance(actual[0], list):
+                        actual = actual[0]
+                    results[start + offset] = [float(v) for v in actual]
 
         except Exception as exc:
             logger.warning(
