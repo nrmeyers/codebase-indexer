@@ -147,6 +147,16 @@ class Settings(BaseSettings):
     LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint
     LM_STUDIO_TIMEOUT: float = 30.0
 
+    # --- SageMaker embedding endpoint (production primary) ---
+    # Priority: SageMaker (this) → LM Studio → in-process torch.
+    # Set SAGEMAKER_EMBED_ENDPOINT to the endpoint name to activate.
+    # Requires AWS credentials with sagemaker:InvokeEndpoint on the endpoint.
+    # Read directly by app.services.sagemaker_embedder (no pydantic dep).
+    # Keep names in sync with sagemaker_embedder.SageMakerEmbedder.from_env().
+    SAGEMAKER_EMBED_ENDPOINT: str = ""            # e.g. forge-e5-embed-v1
+    SAGEMAKER_EMBED_REGION: str = "us-east-1"
+    SAGEMAKER_EMBED_BATCH_SIZE: int = 32          # 16–64 per Forge contract
+
 
 # Module-level singleton — import this rather than re-instantiating Settings.
 settings = Settings()
