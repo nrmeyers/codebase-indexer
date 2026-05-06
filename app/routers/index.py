@@ -29,6 +29,7 @@ import asyncio
 import logging
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -62,6 +63,52 @@ router = APIRouter()
 # Per-process worker token used by jobs_store.sweep_interrupted() to identify
 # orphaned rows from prior processes. Matches the token written to each new row.
 _WORKER_TOKEN: str = _os.urandom(8).hex()
+
+
+# Pre-warm tracking — only warm the endpoint once per uvicorn process per job.
+# A set of job_ids that have already had a warmup ping sent.
+_prewarmed_jobs: set[str] = set()
+
+
+def _prewarm_sagemaker_endpoint(job_id: str) -> None:
+    """Fire-and-forget warmup ping to the SageMaker embedding endpoint.
+
+    Hides the 30-60s Serverless Inference cold start by running in parallel
+    with the parsing phase (~70s for typical repos).  By the time embedding
+    starts, the endpoint is already hot and the first real batch returns
+    in normal latency.
+
+    Idempotent per job — only fires once even if the parsing-phase callback
+    runs multiple times for the same job_id.  Cheap (~$0.0001 per call) and
+    failures are silently swallowed since this is purely a latency optimisation.
+    """
+    if job_id in _prewarmed_jobs:
+        return
+    _prewarmed_jobs.add(job_id)
+
+    def _ping() -> None:
+        try:
+            from ..services.sagemaker_embedder import get_sagemaker_embedder
+            sm = get_sagemaker_embedder()
+            if sm is None:
+                return  # not configured; nothing to warm
+            t0 = time.time()
+            sm.embed("warmup")
+            logger.info(
+                "SageMaker prewarm: endpoint=%s, latency=%.2fs (job=%s)",
+                sm.endpoint_name,
+                time.time() - t0,
+                job_id[:8],
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Warmup is best-effort — never fail the job over a missed ping.
+            logger.debug(
+                "SageMaker prewarm failed (best-effort): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+    threading.Thread(target=_ping, name=f"sm-prewarm-{job_id[:8]}", daemon=True).start()
 
 
 class _IndexCancelledError(RuntimeError):
@@ -413,6 +460,12 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         phase = event.get("phase")
         if phase:
             job.phase = str(phase)
+            # Pre-warm SageMaker the moment we enter the parsing phase.
+            # Parsing typically takes ~70s; that's enough to absorb the
+            # 30-60s Serverless Inference cold start in parallel, so
+            # embedding kicks off against an already-hot endpoint.
+            if phase == "parsing":
+                _prewarm_sagemaker_endpoint(job.job_id)
         if "files_total" in event:
             job.files_total = int(event["files_total"])
         if "files_done" in event:
@@ -889,7 +942,7 @@ print("EMBED_DONE")
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=1800,  # 30 min hard limit
+            timeout=14400,  # 4 hr hard limit — large repos at batch=32 SageMaker need ~2-3 hr
             cwd=str(Path(repo_db_path).parent.parent.parent),  # service root
         )
 
