@@ -781,6 +781,7 @@ def _blocking_embed(job: _EmbedJob) -> None:
     # Running in a subprocess means an OOM kill doesn't affect uvicorn.
     vec_db_path = settings.vec_db_path_for_repo(job.repo_name)
     driver = f"""
+import hashlib
 import sys
 import time
 from pathlib import Path
@@ -791,6 +792,7 @@ from codebase_rag.storage.vector_store import (
     EmbeddingRow,
     bulk_insert,
     open_or_create,
+    read_content_hashes,
     write_metadata,
 )
 from codebase_rag.storage.docstring_format import format_docstring
@@ -848,10 +850,21 @@ _root_path = {repr(repo_path_str)}
 # Open (or create) the DuckDB vector store (.duck)
 _vec_conn = open_or_create({repr(vec_db_path)})
 
+# BUC-1518 C2 — incremental embedding. Pre-load every existing
+# content_hash from the .duck file. For each candidate symbol, hash its
+# source range and skip the SageMaker call entirely if the hash matches
+# the stored one (== content unchanged since last index).  For typical
+# commits touching a few files, this skips 95-99% of the work.
+_existing_hashes = read_content_hashes(_vec_conn)
+print(f"existing content_hashes: {{len(_existing_hashes)}}", flush=True)
+
 _BATCH = 50
 _embedded_count = 0
+_skipped_unchanged = 0
 _batch_texts: list[str] = []
-_batch_meta: list[tuple[str, str, int, int, str]] = []
+# Now also carry the content_hash for each item — written back to .duck
+# alongside the embedding so future re-indexes can skip them too.
+_batch_meta: list[tuple[str, str, int, int, str, str]] = []
 
 for _row in _rows:
     _qname = _row.get("qualified_name")
@@ -895,8 +908,16 @@ for _row in _rows:
         _header_parts.append(_formatted_doc)
     _header_parts.append(_src)
     _embed_text = "\\n".join(_header_parts)
+    # BUC-1518 C2 — incremental skip:  hash the actual embed input (header
+    # + source) so any change to source, docstring, or caller-count flips
+    # the hash and triggers re-embedding.  SHA-1 is fine here — we're not
+    # using it cryptographically, only as a content fingerprint.
+    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
+    if _existing_hashes.get(_qname) == _content_hash:
+        _skipped_unchanged += 1
+        continue
     _batch_texts.append(_embed_text)
-    _batch_meta.append((_qname, _abs, int(_start), int(_end), _stype))
+    _batch_meta.append((_qname, _abs, int(_start), int(_end), _stype, _content_hash))
 
     if len(_batch_texts) >= _BATCH:
         _embs = embed_code_batch(_batch_texts)
@@ -904,7 +925,7 @@ for _row in _rows:
             EmbeddingRow(
                 qualified_name=_m[0], embedding=_e,
                 file_path=_m[1], start_line=_m[2], end_line=_m[3],
-                symbol_type=_m[4],
+                symbol_type=_m[4], content_hash=_m[5],
             )
             for _m, _e in zip(_batch_meta, _embs)
         ]
@@ -919,7 +940,7 @@ if _batch_texts:
         EmbeddingRow(
             qualified_name=_m[0], embedding=_e,
             file_path=_m[1], start_line=_m[2], end_line=_m[3],
-            symbol_type=_m[4],
+            symbol_type=_m[4], content_hash=_m[5],
         )
         for _m, _e in zip(_batch_meta, _embs)
     ]
@@ -927,7 +948,7 @@ if _batch_texts:
     _embedded_count += len(_insert)
 
 _vec_conn.close()
-print(f"Embedded {{_embedded_count}}")
+print(f"Embedded {{_embedded_count}} (skipped {{_skipped_unchanged}} unchanged)")
 print("EMBED_DONE")
 """
 
