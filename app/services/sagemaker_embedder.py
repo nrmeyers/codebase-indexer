@@ -34,7 +34,7 @@ from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BATCH_SIZE = 32
+_DEFAULT_BATCH_SIZE = 8
 _MAX_BATCH_SIZE = 64
 _CONTENT_TYPE = "application/json"
 _INVOKE_TIMEOUT = 30  # seconds
@@ -121,7 +121,14 @@ class SageMakerEmbedder:
             results: list[list[float] | None] = [None] * len(texts)
             for start in range(0, len(texts), self._batch_size):
                 chunk = texts[start : start + self._batch_size]
-                body = json.dumps({"inputs": chunk}).encode("utf-8")
+                # e5-base-v2 (BERT) has a hard 512-token position-embedding
+                # limit. The SageMaker HF inference toolkit does NOT truncate
+                # automatically and returns HTTP 400 on overflow.
+                # Binary search: 1000 chars → OK, 1200 chars → FAIL.
+                # 1000 is the safe ceiling (~3.3 chars/token for Python code).
+                _MAX_CHARS = 1000
+                safe_chunk = [t[:_MAX_CHARS] if len(t) > _MAX_CHARS else t for t in chunk]
+                body = json.dumps({"inputs": safe_chunk}).encode("utf-8")
                 raw: list[list[float]] = json.loads(self._signed_post(body))
                 if len(raw) != len(chunk):
                     raise RuntimeError(
