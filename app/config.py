@@ -153,7 +153,10 @@ class Settings(BaseSettings):
     # Requires AWS credentials with sagemaker:InvokeEndpoint on the endpoint.
     # Read directly by app.services.sagemaker_embedder (no pydantic dep).
     # Keep names in sync with sagemaker_embedder.SageMakerEmbedder.from_env().
-    SAGEMAKER_EMBED_ENDPOINT: str = ""            # e.g. forge-e5-embed-v1
+    # Prefer SAGEMAKER_EMBED_URL (full invocation URL) — no name lookup needed.
+    # If only ENDPOINT is set the URL is derived automatically.
+    SAGEMAKER_EMBED_URL: str = ""                 # https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/forge-e5-embed-v1/invocations
+    SAGEMAKER_EMBED_ENDPOINT: str = ""            # fallback if URL not set: forge-e5-embed-v1
     SAGEMAKER_EMBED_REGION: str = "us-east-1"
     SAGEMAKER_EMBED_BATCH_SIZE: int = 32          # 16–64 per Forge contract
 
