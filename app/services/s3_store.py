@@ -59,6 +59,7 @@ _SYNC_EXTENSIONS = {".db", ".duck"}
 # synced to S3 without having to query the bucket directly.
 _LAST_SNAPSHOT_AT: float | None = None
 _LAST_SNAPSHOT_COUNT: int | None = None
+_LAST_SNAPSHOT_ERROR: str | None = None
 
 
 def get_sync_state() -> dict:
@@ -83,6 +84,7 @@ def get_sync_state() -> dict:
         "region": _region() if enabled else None,
         "last_snapshot_at": _LAST_SNAPSHOT_AT,
         "last_snapshot_count": _LAST_SNAPSHOT_COUNT,
+        "last_error": _LAST_SNAPSHOT_ERROR,
     }
 
 
@@ -277,6 +279,7 @@ def snapshot_indexes(db_dir: str | Path) -> int:
     import hashlib
 
     uploaded = 0
+    upload_errors = []
     for local in sorted(db_path.iterdir()):
         if local.suffix not in _SYNC_EXTENSIONS:
             continue
@@ -318,16 +321,21 @@ def snapshot_indexes(db_dir: str | Path) -> int:
             uploaded += 1
             logger.info("s3_store: uploaded %s → s3://%s/%s", local.name, bucket, key)
         except Exception as exc:
-            logger.warning("s3_store: upload of %s failed: %s", local.name, exc)
+            error_msg = f"upload of {local.name} failed: {exc}"
+            logger.warning("s3_store: %s", error_msg)
+            upload_errors.append(error_msg)
 
     # Record the snapshot for /health.  We track 'attempted' (anything
     # we ran the snapshot loop on, even when 0 files changed) so the
     # frontend can show "Synced now" rather than only flipping state on
     # successful pushes.
     import time as _time
-    global _LAST_SNAPSHOT_AT, _LAST_SNAPSHOT_COUNT
+    global _LAST_SNAPSHOT_AT, _LAST_SNAPSHOT_COUNT, _LAST_SNAPSHOT_ERROR
     _LAST_SNAPSHOT_AT = _time.time()
     _LAST_SNAPSHOT_COUNT = uploaded
+    _LAST_SNAPSHOT_ERROR = None
+    if upload_errors:
+        _LAST_SNAPSHOT_ERROR = "; ".join(upload_errors[:3])  # surface first 3 errors
 
     if uploaded:
         logger.info("s3_store: snapshot complete — %d file(s) pushed to S3", uploaded)
@@ -508,3 +516,46 @@ def ensure_local(db_dir: str | Path, repo_name: str) -> bool:
             all_ok = False
 
     return all_ok
+
+
+def delete_repo_backup(repo_name: str) -> str:
+    """Delete a repo's backup copy from S3.
+
+    Called during cascading delete to clean up the S3 copy.
+    Returns a status string: "deleted", "not found", or "error: <msg>".
+
+    Args:
+        repo_name: Repository slug (matches filename stem in S3).
+
+    Returns:
+        Status message describing what happened.
+    """
+    bucket = _bucket()
+    prefix = _prefix()
+    client = _make_client()
+
+    if client is None:
+        return "not found"  # S3 not configured; nothing to delete
+
+    try:
+        # Try to delete both .db and .duck files
+        deleted_count = 0
+        for ext in [".db", ".duck"]:
+            key = f"{prefix}/{repo_name}{ext}"
+            try:
+                client.delete_object(Bucket=bucket, Key=key)
+                deleted_count += 1
+                logger.info("s3_store.delete_repo_backup: deleted %s", key)
+            except client.exceptions.NoSuchKey:
+                pass  # File doesn't exist, which is fine
+            except Exception as exc:
+                logger.warning(
+                    "s3_store.delete_repo_backup: failed to delete %s: %s",
+                    key, exc,
+                )
+
+        return f"deleted {deleted_count} file(s)" if deleted_count > 0 else "not found"
+    except Exception as exc:
+        msg = str(exc)
+        logger.warning("s3_store.delete_repo_backup: %s", msg)
+        return f"error: {msg}"

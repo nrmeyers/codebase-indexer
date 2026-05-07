@@ -38,6 +38,7 @@ load_dotenv()
 
 from .config import settings  # noqa: E402  -- must run AFTER load_dotenv()
 from .routers import (  # noqa: E402  -- must run AFTER load_dotenv()
+    admin,
     context_bundle,
     disk,
     explorer,
@@ -249,7 +250,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 settings.WATCH_PARTIAL_RETENTION_HOURS,
             )
 
+    # --- Phase 8: Periodic S3 snapshot (BUC-1555) ---
+    # Background task that periodically pushes changed index files to S3.
+    # Complements the lifespan shutdown snapshot with a more reliable mechanism
+    # (in-dev, kill -9 bypasses graceful shutdown).  Non-fatal — S3 unavailability
+    # does not break the indexer.
+    _S3_SNAPSHOT_INTERVAL_SEC = 600  # 10 minutes
+    _s3_snapshot_task: asyncio.Task | None = None
+
+    async def _periodic_s3_snapshot() -> None:
+        """Background task: periodically snapshot indexes to S3."""
+        while True:
+            try:
+                await asyncio.sleep(_S3_SNAPSHOT_INTERVAL_SEC)
+                count = _s3_snapshot(_Path(settings.LADYBUG_DB_DIR))
+                if count > 0:
+                    _log.info("s3: periodic snapshot pushed %d files", count)
+            except asyncio.CancelledError:
+                break
+            except Exception as _exc:  # noqa: BLE001
+                _log.warning("s3: periodic snapshot failed (will retry in %ds): %s",
+                            _S3_SNAPSHOT_INTERVAL_SEC, _exc)
+
+    if settings.LADYBUG_DB_DIR:  # only start if DB dir is configured
+        _s3_snapshot_task = asyncio.create_task(_periodic_s3_snapshot())
+        _log.info("s3: periodic snapshot task started (interval=%ds)", _S3_SNAPSHOT_INTERVAL_SEC)
+
     yield
+
+    # Shutdown: cancel the periodic S3 snapshot task.
+    if _s3_snapshot_task is not None:
+        _s3_snapshot_task.cancel()
+        try:
+            await _s3_snapshot_task
+        except asyncio.CancelledError:
+            pass
 
     # Shutdown: push changed index files to S3 so the next container inherits them.
     _s3_snapshot(settings.LADYBUG_DB_DIR)
@@ -294,6 +329,7 @@ def create_app() -> FastAPI:
     app.include_router(context_bundle.router, tags=["context"])
     app.include_router(explorer.router, tags=["explorer"])
     app.include_router(github.router, tags=["github"])
+    app.include_router(admin.router, tags=["admin"])
     # Frontend-shape endpoints (BACKEND_HANDOVER doc):
     #   /repos/{name}/stats, /repos/{name}/reindex     (§2.1, §2.2)
     #   /symbols/{fqn}, /symbols/{fqn}/{callers,callees} (§2.7, §2.9)

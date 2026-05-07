@@ -42,8 +42,15 @@ class TestRestoreIndexes:
         """Build a minimal mock boto3 S3 client."""
         client = MagicMock()
 
-        # paginator for list_objects_v2
-        page = {"Contents": objects}
+        # paginator for list_objects_v2 — ensure all objects have Size (copy to avoid in-place mutation)
+        enriched_objects = []
+        for obj in objects:
+            enriched = dict(obj)  # copy
+            if "Size" not in enriched and "Key" in enriched:
+                key = enriched["Key"]
+                enriched["Size"] = len(content_map.get(key, b""))
+            enriched_objects.append(enriched)
+        page = {"Contents": enriched_objects}
         paginator = MagicMock()
         paginator.paginate.return_value = [page]
         client.get_paginator.return_value = paginator
@@ -53,6 +60,15 @@ class TestRestoreIndexes:
             path.write_bytes(content_map[key])
 
         client.download_file.side_effect = _download
+
+        # Mock head_object for multipart detection
+        def _head_object(Bucket, Key):  # type: ignore[override]
+            if Key in content_map:
+                content = content_map[Key]
+                return {"Metadata": {"content-md5": _md5(content)}}
+            return {"Metadata": {}}
+        client.head_object.side_effect = _head_object
+
         return client
 
     def test_downloads_absent_file(self, tmp_path: Path) -> None:
@@ -77,10 +93,11 @@ class TestRestoreIndexes:
         prefix = "code-indexer/indexes"
         local_file = tmp_path / "repo1.db"
         local_file.write_bytes(content)
+        key = f"{prefix}/repo1.db"
         objects = [
-            {"Key": f"{prefix}/repo1.db", "ETag": f'"{_md5(content)}"'},
+            {"Key": key, "ETag": f'"{_md5(content)}"'},
         ]
-        client = self._make_s3_client(objects, {})
+        client = self._make_s3_client(objects, {key: content})
 
         with (
             patch("app.services.s3_store._make_client", return_value=client),
@@ -169,15 +186,37 @@ class TestRestoreIndexes:
 class TestSnapshotIndexes:
     """snapshot_indexes: push changed local files to S3."""
 
-    def _make_s3_client(self, existing_etags: dict[str, str] | None = None) -> MagicMock:
+    def _make_s3_client(
+        self,
+        existing_etags: dict[str, str] | None = None,
+        existing_sizes: dict[str, int] | None = None,
+    ) -> MagicMock:
         """Build a minimal mock boto3 S3 client with an existing etag map."""
         client = MagicMock()
         existing_etags = existing_etags or {}
+        existing_sizes = existing_sizes or {}
 
-        page = {"Contents": [{"Key": k, "ETag": f'"{v}"'} for k, v in existing_etags.items()]}
+        # Build Contents with Size field so size comparison works
+        contents = []
+        for k, v in existing_etags.items():
+            contents.append({
+                "Key": k,
+                "ETag": f'"{v}"',
+                "Size": existing_sizes.get(k, 100),  # use provided size or default
+            })
+        page = {"Contents": contents}
         paginator = MagicMock()
         paginator.paginate.return_value = [page]
         client.get_paginator.return_value = paginator
+
+        # Mock head_object for multipart detection — return Metadata with content-md5
+        # so the snapshot code can verify multipart files
+        def _head_object(Bucket, Key):  # type: ignore[override]
+            if Key in existing_etags:
+                return {"Metadata": {"content-md5": existing_etags[Key]}}
+            return {"Metadata": {}}
+        client.head_object.side_effect = _head_object
+
         return client
 
     def test_uploads_new_files(self, tmp_path: Path) -> None:
@@ -197,9 +236,30 @@ class TestSnapshotIndexes:
     def test_skips_unchanged_files(self, tmp_path: Path) -> None:
         content = b"unchanged-db"
         (tmp_path / "repo1.db").write_bytes(content)
-        client = self._make_s3_client(
-            {"code-indexer/indexes/repo1.db": _md5(content)}
-        )
+
+        # Mock client with the existing file
+        client = MagicMock()
+        existing_etags = {"code-indexer/indexes/repo1.db": _md5(content)}
+
+        # Build Contents with Size field matching actual content
+        contents = [
+            {
+                "Key": "code-indexer/indexes/repo1.db",
+                "ETag": f'"{_md5(content)}"',
+                "Size": len(content),
+            }
+        ]
+        page = {"Contents": contents}
+        paginator = MagicMock()
+        paginator.paginate.return_value = [page]
+        client.get_paginator.return_value = paginator
+
+        # Mock head_object
+        def _head_object(Bucket, Key):  # type: ignore[override]
+            if Key in existing_etags:
+                return {"Metadata": {"content-md5": existing_etags[Key]}}
+            return {"Metadata": {}}
+        client.head_object.side_effect = _head_object
 
         with (
             patch("app.services.s3_store._make_client", return_value=client),
@@ -217,7 +277,8 @@ class TestSnapshotIndexes:
         (tmp_path / "repo2.db").write_bytes(old_content)
         # repo2.db is up-to-date in S3
         client = self._make_s3_client(
-            {"code-indexer/indexes/repo2.db": _md5(old_content)}
+            existing_etags={"code-indexer/indexes/repo2.db": _md5(old_content)},
+            existing_sizes={"code-indexer/indexes/repo2.db": len(old_content)},
         )
 
         with (
@@ -266,7 +327,7 @@ class TestSnapshotIndexes:
 
         upload_calls: list[str] = []
 
-        def _upload(src, bucket, key):  # type: ignore[override]
+        def _upload(src, bucket, key, ExtraArgs=None):  # type: ignore[override]
             upload_calls.append(key)
             if "repo1" in key:
                 raise RuntimeError("upload failed")
@@ -282,3 +343,39 @@ class TestSnapshotIndexes:
         # repo1 failed, repo2 succeeded — count reflects only successful uploads
         assert n == 1
         assert len(upload_calls) == 2
+
+    def test_tracks_upload_error_in_sync_state(self, tmp_path: Path) -> None:
+        """Verify that snapshot_indexes records error messages for /health."""
+        from app.services.s3_store import get_sync_state
+        (tmp_path / "repo1.db").write_bytes(b"content")
+        client = self._make_s3_client()
+
+        def _upload(src, bucket, key, ExtraArgs=None):  # type: ignore[override]
+            raise RuntimeError("S3 auth failed")
+
+        client.upload_file.side_effect = _upload
+
+        with (
+            patch("app.services.s3_store._make_client", return_value=client),
+            patch.dict(os.environ, {"S3_INDEX_BUCKET": "test-bucket", "S3_INDEX_PREFIX": "code-indexer/indexes"}),
+        ):
+            snapshot_indexes(tmp_path)
+            state = get_sync_state()
+
+        assert state["last_error"] is not None
+        assert "S3 auth failed" in state["last_error"]
+
+    def test_clears_error_on_successful_snapshot(self, tmp_path: Path) -> None:
+        """Verify that errors are cleared after a successful snapshot."""
+        from app.services.s3_store import get_sync_state
+        (tmp_path / "repo1.db").write_bytes(b"content")
+        client = self._make_s3_client()
+
+        with (
+            patch("app.services.s3_store._make_client", return_value=client),
+            patch.dict(os.environ, {"S3_INDEX_BUCKET": "test-bucket", "S3_INDEX_PREFIX": "code-indexer/indexes"}),
+        ):
+            snapshot_indexes(tmp_path)
+            state = get_sync_state()
+
+        assert state["last_error"] is None

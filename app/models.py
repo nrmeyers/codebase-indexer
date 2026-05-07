@@ -103,6 +103,9 @@ class S3SyncStatus(BaseModel):
     # Number of files pushed in the last snapshot.  0 means "no changes
     # since last sync"; absent means we haven't snapshotted yet.
     last_snapshot_count: int | None = None
+    # Error message from the most recent snapshot attempt, if any.  None when
+    # the last snapshot succeeded or hasn't run yet.
+    last_error: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -505,6 +508,7 @@ class DeleteIndexResponse(BaseModel):
     repo: str
     removed_files: list[str]
     ok: bool
+    cleanup: dict[str, str] = {}  # Resource type -> status message
 
 
 # ---------------------------------------------------------------------------
