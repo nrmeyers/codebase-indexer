@@ -182,19 +182,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # --- Phase 4: Prometheus metrics ---
     # setup_metrics mounts /metrics and wires HTTP auto-instrumentation.
-    # start_background_collectors polls LM Studio health + disk usage every 30 s.
+    # start_background_collectors polls disk usage every 30 s.
+    # LM Studio health probing was removed (LM Studio retired in PR #168; see BUC-1545).
     _metrics_task: asyncio.Task | None = None
     if settings.METRICS_ENABLED:
         from . import metrics as _metrics
-        from .services.lm_studio import is_available as _lm_available, can_rerank as _lm_can_rerank
-
-        def _lm_health() -> tuple[bool, bool]:
-            return _lm_available(), _lm_can_rerank()
 
         _metrics.setup_metrics(app)
         _metrics_task = asyncio.create_task(
             _metrics.start_background_collectors(
-                lm_studio_health_fn=_lm_health,
+                lm_studio_health_fn=None,
                 cgr_data_dir=settings.CGR_DATA_DIR,
             )
         )

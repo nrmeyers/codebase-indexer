@@ -144,20 +144,26 @@ class Settings(BaseSettings):
     # Maximum concurrent watchers (inotify budget guard).
     WATCH_MAX_REPOS: int = 32
 
-    # --- LM Studio adapter (opt-in, best-effort) ---
-    # When LM_STUDIO_URL is set and the named models are loaded, the
-    # /search/semantic and /context-bundle endpoints will:
-    #   * use CodeRankEmbed at LM Studio for query embedding (avoids
-    #     loading torch into uvicorn's process)
-    #   * use CodeRankLLM at LM Studio for listwise rerank when the
-    #     ?rerank=true flag is set
+    # --- Rerank pipeline (disabled by default) ---
+    # Master control for the two-stage retrieval rerank path.  When False (default),
+    # dense vector ranking (e5-base-v2 + DuckDB cosine) is the only ranker.
+    # When True, semantic search top-50 are reranked via CodeRankLLM.
+    # LM Studio was retired (TheForge PR #168); future implementations will wire
+    # LLM-as-reranker via a different backend (e.g. Manifest) — see BUC-1545.
+    RERANK_ENABLED: bool = False
+
+    # --- LM Studio adapter (deprecated; LM Studio retired in TheForge PR #168) ---
+    # These settings are retained for backward compatibility and reference.
+    # LM_STUDIO_URL is no longer probed at startup.  To re-enable rerank in a
+    # future release, set RERANK_ENABLED=true and configure a non-LM-Studio
+    # backend (TBD; see docs/SEARCH_RANKING.md for options).
     # These are READ DIRECTLY by app.services.lm_studio (which has no
     # pydantic-settings dependency), so duplicating them here is purely
     # for documentation / IDE discoverability.  Keep names in sync with
     # lm_studio._env() default values.
-    LM_STUDIO_URL: str = ""                       # e.g. http://localhost:1234
-    LM_STUDIO_EMBED_MODEL: str = "CodeRankEmbed"  # substring hint
-    LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint
+    LM_STUDIO_URL: str = ""                       # e.g. http://localhost:1234 (deprecated)
+    LM_STUDIO_EMBED_MODEL: str = "CodeRankEmbed"  # substring hint (deprecated)
+    LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint (deprecated)
     LM_STUDIO_TIMEOUT: float = 30.0
 
     # --- S3 snapshot / restore (BUC-1499) ---

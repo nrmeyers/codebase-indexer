@@ -638,15 +638,15 @@ def _semantic_search_impl(
         # Best-effort fusion: never fail a search because BM25 misbehaved.
         pass
 
-    # --- Stage 2: optional listwise rerank via CodeRankLLM (LM Studio) ---
-    # Runs AFTER all stage-1 fusion (PageRank + RRF/BM25) so the
-    # bi-encoder's best-fused order is what the LLM rescores.  We hand
-    # the reranker the top-50 candidates *enriched with their source
-    # snippets* (joined from LadybugDB Module nodes), get back its
-    # permutation, and slice to k.  Best-effort: any failure (LM Studio
-    # offline, parse error, timeout, source-fetch error) leaves
-    # ``filtered`` untouched.
-    if rerank:
+    # --- Stage 2: optional listwise rerank via CodeRankLLM (disabled by default) ---
+    # When RERANK_ENABLED=true, runs AFTER all stage-1 fusion (PageRank + RRF/BM25)
+    # so the bi-encoder's best-fused order is what the LLM rescores. We hand the
+    # reranker the top-50 candidates *enriched with their source snippets* (joined
+    # from LadybugDB Module nodes), get back its permutation, and slice to k.
+    # Best-effort: any failure (reranker offline, parse error, timeout, source-fetch
+    # error) leaves ``filtered`` untouched. LM Studio was retired (TheForge PR #168);
+    # future rerank implementations will wire via a different backend (see BUC-1545).
+    if settings.RERANK_ENABLED and rerank:
         try:
             from ..services import reranker, source_fetch  # noqa: WPS433 — runtime-optional
 

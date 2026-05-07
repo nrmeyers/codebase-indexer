@@ -963,13 +963,14 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         seed_cap = max(effective_k, len(exact_hits) + len(module_hits) + len(entrypoint_hits))
         seed_symbols = merged[: min(seed_cap, effective_k * 2)]
 
-        # Optional listwise rerank of the merged seed set via CodeRankLLM
-        # (LM Studio).  Runs BEFORE BFS expansion so the call-graph walk
-        # spends its hop budget on the most-relevant seeds; reordering
-        # after expansion would already have wasted hops on weak seeds.
-        # Best-effort — any failure leaves seed_symbols in the merged
-        # boost+semantic order.
-        if req.rerank and seed_symbols:
+        # Optional listwise rerank of the merged seed set (disabled by default).
+        # When RERANK_ENABLED=true, this runs BEFORE BFS expansion so the
+        # call-graph walk spends its hop budget on the most-relevant seeds;
+        # reordering after expansion would already have wasted hops on weak
+        # seeds. Best-effort — any failure leaves seed_symbols in the merged
+        # boost+semantic order. LM Studio was retired (TheForge PR #168);
+        # future rerank implementations will wire via a different backend.
+        if settings.RERANK_ENABLED and req.rerank and seed_symbols:
             try:
                 from ..services import reranker  # noqa: WPS433
                 cand = [{"qualified_name": qn} for qn in seed_symbols]
