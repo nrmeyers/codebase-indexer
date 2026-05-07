@@ -661,6 +661,14 @@ def delete_job(job_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def delete_by_repo(repo_slug: str) -> int:
+    """Delete all jobs for a given repo. Returns number of rows deleted."""
+    conn = _require_conn()
+    with _lock:
+        cur = conn.execute("DELETE FROM jobs WHERE repo_slug = ?", (repo_slug,))
+        return cur.rowcount
+
+
 # ---------------------------------------------------------------------------
 # diagnostics
 # ---------------------------------------------------------------------------
