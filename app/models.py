@@ -186,6 +186,12 @@ class IndexStatus(BaseModel):
     node_count: int = 0
     rel_count: int = 0
     embedding_count: int = 0
+    # BUC-1518: live embed-pass breakdown.  Populated from PROGRESS lines
+    # the embed driver writes to its log file, so the frontend can show
+    # how the work is being divided across actual SageMaker calls vs
+    # cache skips vs filtered-out files.
+    embeddings_skipped_unchanged: int = 0
+    embeddings_filtered_out: int = 0
     started_at: float = 0.0
     elapsed_sec: float = 0.0
     eta_sec: float | None = None

@@ -65,6 +65,43 @@ router = APIRouter()
 _WORKER_TOKEN: str = _os.urandom(8).hex()
 
 
+def _parse_embed_progress(job_id: str) -> tuple[int, int, int] | None:
+    """Read the latest PROGRESS line from an embed subprocess log.
+
+    Returns ``(embedded, skipped_unchanged, filtered_out)`` from the most
+    recent ``PROGRESS embedded=N skipped=M filtered=K`` line, or None when
+    the log file does not exist or has no PROGRESS line yet.
+
+    The embed driver writes one PROGRESS line per concurrent flush
+    (BUC-1517 / BUC-1519).  Tailing the log gives the frontend live
+    visibility into the embed pass without changing the subprocess
+    contract.
+    """
+    log_path = Path(f"/tmp/cis_embed_{job_id}.log")
+    if not log_path.exists():
+        return None
+    try:
+        # Embed logs are tiny (one PROGRESS line every ~30s).  No need
+        # for a stat-then-seek tail; just read and reverse-scan.
+        with log_path.open() as fh:
+            lines = fh.readlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if line.startswith("PROGRESS "):
+            parts = line.split()
+            try:
+                vals = {kv.split("=")[0]: int(kv.split("=")[1]) for kv in parts[1:]}
+                return (
+                    vals.get("embedded", 0),
+                    vals.get("skipped", 0),
+                    vals.get("filtered", 0),
+                )
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
 # Pre-warm tracking — only warm the endpoint once per uvicorn process per job.
 # A set of job_ids that have already had a warmup ping sent.
 _prewarmed_jobs: set[str] = set()
@@ -158,6 +195,8 @@ class _Job:
     node_count: int = 0
     rel_count: int = 0
     embedded_count: int = 0
+    embeddings_skipped_unchanged: int = 0
+    embeddings_filtered_out: int = 0
     cancelled: bool = False
     elapsed_sec: float = 0.0
     eta_sec: float | None = None
@@ -821,8 +860,12 @@ def _blocking_embed(job: _EmbedJob) -> None:
     vec_db_path = settings.vec_db_path_for_repo(job.repo_name)
     driver = f"""
 import hashlib
+import os
+import re
+import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import real_ladybug as lb
@@ -835,6 +878,59 @@ from codebase_rag.storage.vector_store import (
     write_metadata,
 )
 from codebase_rag.storage.docstring_format import format_docstring
+
+
+# Per-batch wall-clock watchdog.  If a single embed_code_batch call takes
+# longer than this, we abort the subprocess with a clear error rather than
+# hanging indefinitely.  150s is generous: batch=16 with cold start is
+# ~30s, sustained is ~16s; 150s catches genuinely stuck calls fast.
+def _alarm_handler(signum, frame):
+    raise TimeoutError("embed_code_batch exceeded 150s — single call wedged")
+signal.signal(signal.SIGALRM, _alarm_handler)
+
+# BUC-1517: number of concurrent SageMaker invocations.  Capped at 2
+# because Serverless Inference has a hard 60s per-call timeout.  Each
+# outer batch of 50 items splits into ~4 inner SageMaker calls; with
+# concurrency=2 we submit 8 simultaneous calls into a 5-worker endpoint,
+# which fits in 2 worker rounds × ~30s = under the 60s ceiling.
+# Concurrency >= 3 risks one of the queued calls timing out and tripping
+# the local-torch fallback, which is dramatically slower than just being
+# patient with serverless.  Override via SAGEMAKER_EMBED_CONCURRENCY.
+_CONCURRENCY = int(os.environ.get("SAGEMAKER_EMBED_CONCURRENCY") or "2")
+
+# BUC-1519: skip-embed heuristics. Symbols whose source files match these
+# patterns add nothing to semantic search but cost SageMaker time and money.
+# Test files dominate this list (often 25-35% of repos); generated code
+# is usually 5-10%.
+_SKIP_PATTERNS = [
+    re.compile(p) for p in [
+        r"(^|/)tests?/",                           # /tests/ or /test/ dir
+        r"_test\.(py|go|rs|js|ts|tsx)$",           # foo_test.go etc.
+        r"\\.test\\.(js|ts|tsx|jsx)$",             # foo.test.ts
+        r"\\.spec\\.(js|ts|tsx|jsx)$",             # foo.spec.ts
+        r"(^|/)__tests__/",                        # JS/TS __tests__/
+        r"(^|/)test_[^/]+\\.py$",                  # test_foo.py
+        r"(^|/)conftest\\.py$",                    # pytest fixtures
+        r"\\.pb\\.(go|py|cc|h)$",                  # protobuf-generated
+        r"_pb2\\.py$",                             # protobuf-generated python
+        r"_pb2_grpc\\.py$",                        # grpc-generated
+        r"(^|/)generated/",                        # */generated/* dirs
+        r"_generated\\.(go|py|ts|tsx)$",
+        r"(^|/)vendor/",                           # vendored deps
+        r"(^|/)node_modules/",                     # JS deps
+        r"(^|/)\\.venv/",                          # python venv
+        r"(^|/)dist/",                             # build outputs
+        r"(^|/)build/",                            # build outputs
+    ]
+]
+
+
+# Return True for file paths whose symbols are not worth embedding
+# (test / generated / vendored).  Single-line def — no docstring because
+# this whole module body is itself inside a triple-quoted f-string driver
+# and apostrophes in docstrings collide with the outer delimiters.
+def _should_skip_embed(file_path: str) -> bool:
+    return any(p.search(file_path) for p in _SKIP_PATTERNS)
 
 # Open LadybugDB read-only to query symbol locations.
 #
@@ -900,10 +996,47 @@ print(f"existing content_hashes: {{len(_existing_hashes)}}", flush=True)
 _BATCH = 50
 _embedded_count = 0
 _skipped_unchanged = 0
+_skipped_filtered = 0
 _batch_texts: list[str] = []
 # Now also carry the content_hash for each item — written back to .duck
 # alongside the embedding so future re-indexes can skip them too.
 _batch_meta: list[tuple[str, str, int, int, str, str]] = []
+# BUC-1517 — concurrency: pending outer batches that haven't been
+# dispatched to SageMaker yet.  When this list reaches _CONCURRENCY, we
+# flush them all in parallel via a ThreadPoolExecutor.
+_pending_batches: list[tuple[list[str], list[tuple[str, str, int, int, str, str]]]] = []
+
+
+# Submit each pending outer batch to a thread, gather results, bulk insert
+def _flush_pending(pool):
+    global _embedded_count
+    if not _pending_batches:
+        return
+    signal.alarm(150 + 30 * len(_pending_batches))  # +30s margin per concurrent batch
+    try:
+        # Submit all batches; futures preserve insertion order so results align
+        futures = [
+            pool.submit(embed_code_batch, texts)
+            for texts, _meta in _pending_batches
+        ]
+        all_inserts = []
+        for fut, (_texts, meta) in zip(futures, _pending_batches):
+            embs = fut.result()
+            for _m, _e in zip(meta, embs):
+                all_inserts.append(EmbeddingRow(
+                    qualified_name=_m[0], embedding=_e,
+                    file_path=_m[1], start_line=_m[2], end_line=_m[3],
+                    symbol_type=_m[4], content_hash=_m[5],
+                ))
+        bulk_insert(_vec_conn, all_inserts)
+        _embedded_count += len(all_inserts)
+    finally:
+        signal.alarm(0)
+    _pending_batches.clear()
+    print(f"PROGRESS embedded={{_embedded_count}} skipped={{_skipped_unchanged}} filtered={{_skipped_filtered}}", flush=True)
+
+
+_pool = ThreadPoolExecutor(max_workers=_CONCURRENCY)
 
 for _row in _rows:
     _qname = _row.get("qualified_name")
@@ -915,6 +1048,14 @@ for _row in _rows:
     _callers = int(_row.get("caller_count") or 0)
 
     if not _qname or _start is None or _end is None or not _rel:
+        continue
+
+    # BUC-1519 — skip embedding for tests / generated / vendored files.
+    # Test files are rarely the target of semantic search and dominate
+    # the symbol count in many repos.  Filter on the relative path so
+    # patterns like /tests/ or .test.ts work portably.
+    if _should_skip_embed(_rel):
+        _skipped_filtered += 1
         continue
 
     _abs = _rel if Path(_rel).is_absolute() else (
@@ -959,35 +1100,26 @@ for _row in _rows:
     _batch_meta.append((_qname, _abs, int(_start), int(_end), _stype, _content_hash))
 
     if len(_batch_texts) >= _BATCH:
-        _embs = embed_code_batch(_batch_texts)
-        _insert = [
-            EmbeddingRow(
-                qualified_name=_m[0], embedding=_e,
-                file_path=_m[1], start_line=_m[2], end_line=_m[3],
-                symbol_type=_m[4], content_hash=_m[5],
-            )
-            for _m, _e in zip(_batch_meta, _embs)
-        ]
-        bulk_insert(_vec_conn, _insert)
-        _embedded_count += len(_insert)
+        # Queue this outer batch instead of dispatching immediately.  When
+        # _CONCURRENCY batches are queued, _flush_pending fans them out in
+        # parallel via the thread pool.  This gives us 5x throughput against
+        # the Serverless endpoint (which has MaxConcurrency=5 configured).
+        _pending_batches.append((_batch_texts, _batch_meta))
         _batch_texts = []
         _batch_meta = []
+        if len(_pending_batches) >= _CONCURRENCY:
+            _flush_pending(_pool)
 
+# Queue the trailing partial outer batch (if any) and flush whatever's
+# left in the pending queue concurrently.
 if _batch_texts:
-    _embs = embed_code_batch(_batch_texts)
-    _insert = [
-        EmbeddingRow(
-            qualified_name=_m[0], embedding=_e,
-            file_path=_m[1], start_line=_m[2], end_line=_m[3],
-            symbol_type=_m[4], content_hash=_m[5],
-        )
-        for _m, _e in zip(_batch_meta, _embs)
-    ]
-    bulk_insert(_vec_conn, _insert)
-    _embedded_count += len(_insert)
+    _pending_batches.append((_batch_texts, _batch_meta))
+if _pending_batches:
+    _flush_pending(_pool)
 
+_pool.shutdown(wait=True)
 _vec_conn.close()
-print(f"Embedded {{_embedded_count}} (skipped {{_skipped_unchanged}} unchanged)")
+print(f"Embedded {{_embedded_count}} (skipped {{_skipped_unchanged}} unchanged, filtered {{_skipped_filtered}})")
 print("EMBED_DONE")
 """
 
@@ -1229,6 +1361,27 @@ def get_index_status(job_id: str) -> IndexStatus:
     # reflects the job lifecycle.
     phase_val = job.phase  # type: ignore[assignment]
 
+    # Live embed progress: tail the embed subprocess log for the latest
+    # PROGRESS line.  Lets the frontend show running totals (embedded /
+    # skipped via content_hash / filtered as test or generated) WHILE the
+    # pass is in flight, instead of seeing 0 until completion.
+    live_embedded = job.embedded_count
+    live_skipped = job.embeddings_skipped_unchanged
+    live_filtered = job.embeddings_filtered_out
+    if job.status == "running" and job.phase == "embedding":
+        progress = _parse_embed_progress(job.job_id)
+        if progress is not None:
+            live_embedded, live_skipped, live_filtered = progress
+            # Mirror back onto the job so subsequent reads stay monotonic
+            # even if the log briefly races during a flush.
+            job.embedded_count = max(job.embedded_count, live_embedded)
+            job.embeddings_skipped_unchanged = max(
+                job.embeddings_skipped_unchanged, live_skipped
+            )
+            job.embeddings_filtered_out = max(
+                job.embeddings_filtered_out, live_filtered
+            )
+
     return IndexStatus(
         job_id=job.job_id,
         status=job.status,
@@ -1239,7 +1392,9 @@ def get_index_status(job_id: str) -> IndexStatus:
         current_file=job.current_file,
         node_count=job.node_count,
         rel_count=job.rel_count,
-        embedding_count=job.embedded_count,
+        embedding_count=live_embedded,
+        embeddings_skipped_unchanged=live_skipped,
+        embeddings_filtered_out=live_filtered,
         started_at=job.started_at,
         elapsed_sec=elapsed,
         eta_sec=job.eta_sec,
