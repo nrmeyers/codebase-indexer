@@ -446,34 +446,37 @@ def _semantic_search_impl(
 
     global _embed_fn, _embed_unavailable  # noqa: PLW0603
 
-    # Try the LM Studio path first — when LM_STUDIO_URL is set and the
-    # CodeRankEmbed model is loaded there, we get a warm in-server embed
-    # (no torch in uvicorn's process) and the same vector LSpace as the
-    # in-process embedder. Falls back transparently on any failure.
-    from ..services import lm_studio  # local import keeps cold-start cheap
+    # Provider priority: SageMaker (prod) → LM Studio (dev) → in-process torch.
+    from ..services import lm_studio          # local import keeps cold-start cheap
+    from ..services.sagemaker_embedder import get_sagemaker_embedder  # noqa: PLC0415
 
     def _embed_query(text: str) -> list[float]:
-        # The bi-encoder uses the asymmetric "search_query: " prefix at
-        # query time; mismatching this with the index-time prefix
-        # silently degrades recall ~15–20%, so we always pass it
-        # explicitly rather than letting the model default kick in.
+        # SageMaker primary — no asymmetric prefix; E5 models handle it natively.
+        sm = get_sagemaker_embedder()
+        if sm is not None:
+            vecs = sm.embed(text)
+            if vecs:
+                return vecs[0]
+
+        # LM Studio dev fallback — uses asymmetric "search_query: " prefix.
         if vec := lm_studio.embed(text, prefix="search_query: "):
             return vec
+
+        # In-process torch last resort.
         if _embed_fn is None:  # pragma: no cover — guarded by outer block
             raise RuntimeError("in-process embedder not initialised")
         return _embed_fn(text)
 
-    # Use can_embed() (not is_available()) — LM Studio can be running with
-    # only a chat model loaded (e.g. for rerank) while CodeRankEmbed is
-    # unloaded, in which case every embed() call returns None.  Fast-fail
-    # cleanly instead of falling into the per-query error path.
-    if _embed_unavailable and not lm_studio.can_embed():
+    _sm_available = get_sagemaker_embedder() is not None
+    _lm_available = lm_studio.can_embed()
+
+    if _embed_unavailable and not _sm_available and not _lm_available:
         raise HTTPException(
             status_code=503,
             detail="Semantic search unavailable (missing deps; import failed on first attempt)",
         )
 
-    if _embed_fn is None and not lm_studio.can_embed():
+    if _embed_fn is None and not _sm_available and not _lm_available:
         try:
             from codebase_rag.embedder import embed_query  # type: ignore[import-untyped]
             _embed_fn = embed_query

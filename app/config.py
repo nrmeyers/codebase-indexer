@@ -160,6 +160,28 @@ class Settings(BaseSettings):
     LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint
     LM_STUDIO_TIMEOUT: float = 30.0
 
+    # --- S3 snapshot / restore (BUC-1499) ---
+    # When S3_INDEX_BUCKET is set the service pulls index files from S3 on
+    # startup and pushes changed files back on clean shutdown.  This lets
+    # containers inherit the last committed graph without a bind-mount.
+    # Leave blank in local dev to disable S3 sync entirely.
+    S3_INDEX_BUCKET: str = "navistone-forge-data"   # set to "" to disable
+    S3_INDEX_PREFIX: str = "code-indexer/indexes"   # key prefix inside the bucket
+    S3_INDEX_REGION: str = "us-east-1"
+
+    # --- SageMaker embedding endpoint (production primary) ---
+    # Priority: SageMaker (this) → LM Studio → in-process torch.
+    # Set SAGEMAKER_EMBED_ENDPOINT to the endpoint name to activate.
+    # Requires AWS credentials with sagemaker:InvokeEndpoint on the endpoint.
+    # Read directly by app.services.sagemaker_embedder (no pydantic dep).
+    # Keep names in sync with sagemaker_embedder.SageMakerEmbedder.from_env().
+    # Prefer SAGEMAKER_EMBED_URL (full invocation URL) — no name lookup needed.
+    # If only ENDPOINT is set the URL is derived automatically.
+    SAGEMAKER_EMBED_URL: str = ""                 # https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/forge-e5-embed-v1/invocations
+    SAGEMAKER_EMBED_ENDPOINT: str = ""            # fallback if URL not set: forge-e5-embed-v1
+    SAGEMAKER_EMBED_REGION: str = "us-east-1"
+    SAGEMAKER_EMBED_BATCH_SIZE: int = 32          # 16–64 per Forge contract
+
 
 # Module-level singleton — import this rather than re-instantiating Settings.
 settings = Settings()

@@ -81,9 +81,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from pathlib import Path as _Path
     import logging as _logging
     import real_ladybug as _lb
+    from .services.s3_store import restore_indexes as _s3_restore, snapshot_indexes as _s3_snapshot
 
     db_dir = _Path(settings.LADYBUG_DB_DIR)
     db_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- S3 restore: pull any absent or stale index files from S3 before
+    # probing / rehydrating.  Non-fatal — a warning is logged and startup
+    # continues if S3 is unreachable or S3_INDEX_BUCKET is unset.
+    _s3_restored = _s3_restore(db_dir)
+    if _s3_restored:
+        _logging.getLogger(__name__).info(
+            "Startup S3 restore: pulled %d index file(s) from S3.", _s3_restored
+        )
 
     # Probe each existing DB file at startup.  A corrupt WAL or shadow file
     # (from a SIGKILL mid-write) causes every subsequent open() call to
@@ -190,7 +200,45 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         _log.info("metrics: background collectors started")
 
-    # --- Phase 5: Sweep stale watch_partial rows (high-volume housekeeping) ---
+    # --- Phase 5: SageMaker pre-warm (BUC-1518 D1) ---
+    # Fire a fire-and-forget warmup invocation to absorb the Serverless
+    # Inference cold start (~4-5s observed) in the background.  Without
+    # this, the first user-facing call after restart (semantic search,
+    # /index parse-phase prewarm not yet fired, etc.) pays the cold-start
+    # latency.  Cost: ~$0.0001 per restart.  Safe to skip if no endpoint
+    # is configured; failures are silently swallowed.
+    def _startup_prewarm() -> None:
+        try:
+            from .services.sagemaker_embedder import get_sagemaker_embedder
+            sm = get_sagemaker_embedder()
+            if sm is None:
+                return  # not configured
+            import time as _t
+            t0 = _t.time()
+            sm.embed("warmup")
+            _log.info(
+                "SageMaker startup prewarm: endpoint=%s latency=%.2fs",
+                sm.endpoint_name, _t.time() - t0,
+            )
+        except Exception as _exc:  # noqa: BLE001
+            _log.debug("SageMaker startup prewarm failed (best-effort): %s", _exc)
+
+    import threading as _threading
+    _threading.Thread(target=_startup_prewarm, name="sm-startup-prewarm", daemon=True).start()
+
+    # --- Phase 6: housekeeping — drop stale /tmp/cis_embed_*.log files ---
+    # Each re-index creates one diagnostic log file.  Without cleanup these
+    # accumulate forever (saw 23 lying around after a couple of dev days).
+    # Keep the 5 most recent for post-mortem use; everything older is noise.
+    try:
+        from .routers.index import _cleanup_old_embed_logs
+        removed = _cleanup_old_embed_logs(keep=5)
+        if removed:
+            _log.info("startup: removed %d stale embed log file(s)", removed)
+    except Exception as _exc:  # noqa: BLE001
+        _log.debug("embed-log cleanup failed (non-fatal): %s", _exc)
+
+    # --- Phase 7: Sweep stale watch_partial rows (high-volume housekeeping) ---
     if settings.WATCH_ENABLED:
         swept_wp = _jobs_store.clear_terminal(
             statuses={"done", "failed", "cancelled"},
@@ -205,6 +253,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
 
     yield
+
+    # Shutdown: push changed index files to S3 so the next container inherits them.
+    _s3_snapshot(settings.LADYBUG_DB_DIR)
 
     # Shutdown: stop all active file-watchers before the event loop exits.
     if settings.WATCH_ENABLED:

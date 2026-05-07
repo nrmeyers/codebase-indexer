@@ -29,6 +29,7 @@ import asyncio
 import logging
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -62,6 +63,115 @@ router = APIRouter()
 # Per-process worker token used by jobs_store.sweep_interrupted() to identify
 # orphaned rows from prior processes. Matches the token written to each new row.
 _WORKER_TOKEN: str = _os.urandom(8).hex()
+
+
+def _cleanup_old_embed_logs(keep: int = 5) -> int:
+    """Remove all but the ``keep`` most-recent /tmp/cis_embed_*.log files.
+
+    Embed logs are diagnostic artefacts that pile up over weeks of dev use
+    (one per re-index attempt).  Tail behaviour and incremental embedding
+    mean we run more re-indexes per day, so without housekeeping the file
+    count grows unbounded.  Called on uvicorn startup; best-effort.
+    """
+    try:
+        log_paths = sorted(
+            Path("/tmp").glob("cis_embed_*.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        removed = 0
+        for stale in log_paths[keep:]:
+            try:
+                stale.unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _parse_embed_progress(job_id: str) -> tuple[int, int, int] | None:
+    """Read the latest PROGRESS line from an embed subprocess log.
+
+    Returns ``(embedded, skipped_unchanged, filtered_out)`` from the most
+    recent ``PROGRESS embedded=N skipped=M filtered=K`` line, or None when
+    the log file does not exist or has no PROGRESS line yet.
+
+    The embed driver writes one PROGRESS line per concurrent flush
+    (BUC-1517 / BUC-1519).  Tailing the log gives the frontend live
+    visibility into the embed pass without changing the subprocess
+    contract.
+    """
+    log_path = Path(f"/tmp/cis_embed_{job_id}.log")
+    if not log_path.exists():
+        return None
+    try:
+        # Embed logs are tiny (one PROGRESS line every ~30s).  No need
+        # for a stat-then-seek tail; just read and reverse-scan.
+        with log_path.open() as fh:
+            lines = fh.readlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if line.startswith("PROGRESS "):
+            parts = line.split()
+            try:
+                vals = {kv.split("=")[0]: int(kv.split("=")[1]) for kv in parts[1:]}
+                return (
+                    vals.get("embedded", 0),
+                    vals.get("skipped", 0),
+                    vals.get("filtered", 0),
+                )
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+# Pre-warm tracking — only warm the endpoint once per uvicorn process per job.
+# A set of job_ids that have already had a warmup ping sent.
+_prewarmed_jobs: set[str] = set()
+
+
+def _prewarm_sagemaker_endpoint(job_id: str) -> None:
+    """Fire-and-forget warmup ping to the SageMaker embedding endpoint.
+
+    Hides the 30-60s Serverless Inference cold start by running in parallel
+    with the parsing phase (~70s for typical repos).  By the time embedding
+    starts, the endpoint is already hot and the first real batch returns
+    in normal latency.
+
+    Idempotent per job — only fires once even if the parsing-phase callback
+    runs multiple times for the same job_id.  Cheap (~$0.0001 per call) and
+    failures are silently swallowed since this is purely a latency optimisation.
+    """
+    if job_id in _prewarmed_jobs:
+        return
+    _prewarmed_jobs.add(job_id)
+
+    def _ping() -> None:
+        try:
+            from ..services.sagemaker_embedder import get_sagemaker_embedder
+            sm = get_sagemaker_embedder()
+            if sm is None:
+                return  # not configured; nothing to warm
+            t0 = time.time()
+            sm.embed("warmup")
+            logger.info(
+                "SageMaker prewarm: endpoint=%s, latency=%.2fs (job=%s)",
+                sm.endpoint_name,
+                time.time() - t0,
+                job_id[:8],
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Warmup is best-effort — never fail the job over a missed ping.
+            logger.debug(
+                "SageMaker prewarm failed (best-effort): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+    threading.Thread(target=_ping, name=f"sm-prewarm-{job_id[:8]}", daemon=True).start()
 
 
 class _IndexCancelledError(RuntimeError):
@@ -111,6 +221,8 @@ class _Job:
     node_count: int = 0
     rel_count: int = 0
     embedded_count: int = 0
+    embeddings_skipped_unchanged: int = 0
+    embeddings_filtered_out: int = 0
     cancelled: bool = False
     elapsed_sec: float = 0.0
     eta_sec: float | None = None
@@ -413,6 +525,12 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         phase = event.get("phase")
         if phase:
             job.phase = str(phase)
+            # Pre-warm SageMaker the moment we enter the parsing phase.
+            # Parsing typically takes ~70s; that's enough to absorb the
+            # 30-60s Serverless Inference cold start in parallel, so
+            # embedding kicks off against an already-hot endpoint.
+            if phase == "parsing":
+                _prewarm_sagemaker_endpoint(job.job_id)
         if "files_total" in event:
             job.files_total = int(event["files_total"])
         if "files_done" in event:
@@ -665,6 +783,86 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         logger.debug("jobs_store.mark_done non-fatal: %s", _exc)
     _metrics.record_index_terminal("done", kind="index")
 
+    # BUC-1518 C3 — stamp RepoMeta with the current HEAD SHA only AFTER both
+    # graph build and embed pass have completed successfully.  A mid-flight
+    # crash above this point leaves the OLD SHA in place, so the next /index
+    # call re-runs the same diff and recovers without losing prior progress.
+    try:
+        from codebase_rag.services.git_diff import get_head_sha
+        from codebase_rag.services import repo_meta as _rm
+        head_sha = get_head_sha(repo)
+        if head_sha:
+            _stamp_db = lb.Database(repo_db_path)
+            _stamp_conn = lb.Connection(_stamp_db)
+            try:
+                _rm.stamp(
+                    _stamp_conn,
+                    repo.name,
+                    last_indexed_sha=head_sha,
+                    last_indexed_at=int(job.finished_at),
+                )
+                logger.info(
+                    "RepoMeta stamped: repo=%s sha=%s model=%s",
+                    repo.name, head_sha[:8], _rm.MODEL_VERSION,
+                )
+            finally:
+                try:
+                    _stamp_conn.close()
+                except Exception:
+                    pass
+                del _stamp_conn, _stamp_db
+                _gc.collect()
+        else:
+            logger.info(
+                "RepoMeta stamp skipped: %s is not a git repo (incremental disabled)",
+                repo.name,
+            )
+    except Exception as _exc:
+        # Stamping failures are non-fatal — the index already succeeded;
+        # we just lose the ability to do incremental on the NEXT call.
+        logger.warning("RepoMeta.stamp failed (non-fatal): %s", _exc)
+
+    # BUC-1518 — push the freshly-indexed .db + .duck to S3 so anyone else
+    # running the indexer (locally or in another container) sees the same
+    # graph + embeddings without re-indexing.  Best-effort: never fail the
+    # job if the upload errors; the next graceful shutdown will retry.
+    # Runs in a background thread so the long upload (~30-100 MB) doesn't
+    # block the response or hold any DB locks.
+    #
+    # After the push succeeds we also opportunistically evict any STALE
+    # local files from OTHER repos that have aged out of the TTL window
+    # — this keeps disk usage bounded on long-running VMs without
+    # requiring a separate cron job.  The repo we just indexed is
+    # naturally fresh and won't be evicted.
+    try:
+        from .services.s3_store import (
+            snapshot_indexes as _s3_snapshot,
+            evict_local_cache as _s3_evict,
+        )
+        def _push_and_evict() -> None:
+            try:
+                n = _s3_snapshot(settings.LADYBUG_DB_DIR)
+                logger.info("S3 snapshot after index: %d file(s) pushed", n)
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("S3 snapshot after index failed (non-fatal): %s", _e)
+                return  # don't evict if push failed — would risk data loss
+            try:
+                evicted, kept = _s3_evict(settings.LADYBUG_DB_DIR)
+                if evicted:
+                    logger.info(
+                        "S3 cache evict: %d local file(s) dropped (kept %d)",
+                        evicted, kept,
+                    )
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("S3 cache evict failed (non-fatal): %s", _e)
+        threading.Thread(
+            target=_push_and_evict,
+            name=f"s3-snapshot-{job.job_id[:8]}",
+            daemon=True,
+        ).start()
+    except Exception as _exc:
+        logger.debug("S3 snapshot dispatch failed: %s", _exc)
+
     # Bust the health probe cache again now that embeddings are done so the
     # UI transitions from "indexing" to fully-complete state immediately.
     try:
@@ -728,8 +926,13 @@ def _blocking_embed(job: _EmbedJob) -> None:
     # Running in a subprocess means an OOM kill doesn't affect uvicorn.
     vec_db_path = settings.vec_db_path_for_repo(job.repo_name)
     driver = f"""
+import hashlib
+import os
+import re
+import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import real_ladybug as lb
@@ -738,9 +941,63 @@ from codebase_rag.storage.vector_store import (
     EmbeddingRow,
     bulk_insert,
     open_or_create,
+    read_content_hashes,
     write_metadata,
 )
 from codebase_rag.storage.docstring_format import format_docstring
+
+
+# Per-batch wall-clock watchdog.  If a single embed_code_batch call takes
+# longer than this, we abort the subprocess with a clear error rather than
+# hanging indefinitely.  150s is generous: batch=16 with cold start is
+# ~30s, sustained is ~16s; 150s catches genuinely stuck calls fast.
+def _alarm_handler(signum, frame):
+    raise TimeoutError("embed_code_batch exceeded 150s — single call wedged")
+signal.signal(signal.SIGALRM, _alarm_handler)
+
+# BUC-1517: number of concurrent SageMaker invocations.  Capped at 2
+# because Serverless Inference has a hard 60s per-call timeout.  Each
+# outer batch of 50 items splits into ~4 inner SageMaker calls; with
+# concurrency=2 we submit 8 simultaneous calls into a 5-worker endpoint,
+# which fits in 2 worker rounds × ~30s = under the 60s ceiling.
+# Concurrency >= 3 risks one of the queued calls timing out and tripping
+# the local-torch fallback, which is dramatically slower than just being
+# patient with serverless.  Override via SAGEMAKER_EMBED_CONCURRENCY.
+_CONCURRENCY = int(os.environ.get("SAGEMAKER_EMBED_CONCURRENCY") or "2")
+
+# BUC-1519: skip-embed heuristics. Symbols whose source files match these
+# patterns add nothing to semantic search but cost SageMaker time and money.
+# Test files dominate this list (often 25-35% of repos); generated code
+# is usually 5-10%.
+_SKIP_PATTERNS = [
+    re.compile(p) for p in [
+        r"(^|/)tests?/",                           # /tests/ or /test/ dir
+        r"_test\.(py|go|rs|js|ts|tsx)$",           # foo_test.go etc.
+        r"\\.test\\.(js|ts|tsx|jsx)$",             # foo.test.ts
+        r"\\.spec\\.(js|ts|tsx|jsx)$",             # foo.spec.ts
+        r"(^|/)__tests__/",                        # JS/TS __tests__/
+        r"(^|/)test_[^/]+\\.py$",                  # test_foo.py
+        r"(^|/)conftest\\.py$",                    # pytest fixtures
+        r"\\.pb\\.(go|py|cc|h)$",                  # protobuf-generated
+        r"_pb2\\.py$",                             # protobuf-generated python
+        r"_pb2_grpc\\.py$",                        # grpc-generated
+        r"(^|/)generated/",                        # */generated/* dirs
+        r"_generated\\.(go|py|ts|tsx)$",
+        r"(^|/)vendor/",                           # vendored deps
+        r"(^|/)node_modules/",                     # JS deps
+        r"(^|/)\\.venv/",                          # python venv
+        r"(^|/)dist/",                             # build outputs
+        r"(^|/)build/",                            # build outputs
+    ]
+]
+
+
+# Return True for file paths whose symbols are not worth embedding
+# (test / generated / vendored).  Single-line def — no docstring because
+# this whole module body is itself inside a triple-quoted f-string driver
+# and apostrophes in docstrings collide with the outer delimiters.
+def _should_skip_embed(file_path: str) -> bool:
+    return any(p.search(file_path) for p in _SKIP_PATTERNS)
 
 # Open LadybugDB read-only to query symbol locations.
 #
@@ -795,10 +1052,58 @@ _root_path = {repr(repo_path_str)}
 # Open (or create) the DuckDB vector store (.duck)
 _vec_conn = open_or_create({repr(vec_db_path)})
 
+# BUC-1518 C2 — incremental embedding. Pre-load every existing
+# content_hash from the .duck file. For each candidate symbol, hash its
+# source range and skip the SageMaker call entirely if the hash matches
+# the stored one (== content unchanged since last index).  For typical
+# commits touching a few files, this skips 95-99% of the work.
+_existing_hashes = read_content_hashes(_vec_conn)
+print(f"existing content_hashes: {{len(_existing_hashes)}}", flush=True)
+
 _BATCH = 50
 _embedded_count = 0
+_skipped_unchanged = 0
+_skipped_filtered = 0
 _batch_texts: list[str] = []
-_batch_meta: list[tuple[str, str, int, int, str]] = []
+# Now also carry the content_hash for each item — written back to .duck
+# alongside the embedding so future re-indexes can skip them too.
+_batch_meta: list[tuple[str, str, int, int, str, str]] = []
+# BUC-1517 — concurrency: pending outer batches that haven't been
+# dispatched to SageMaker yet.  When this list reaches _CONCURRENCY, we
+# flush them all in parallel via a ThreadPoolExecutor.
+_pending_batches: list[tuple[list[str], list[tuple[str, str, int, int, str, str]]]] = []
+
+
+# Submit each pending outer batch to a thread, gather results, bulk insert
+def _flush_pending(pool):
+    global _embedded_count
+    if not _pending_batches:
+        return
+    signal.alarm(150 + 30 * len(_pending_batches))  # +30s margin per concurrent batch
+    try:
+        # Submit all batches; futures preserve insertion order so results align
+        futures = [
+            pool.submit(embed_code_batch, texts)
+            for texts, _meta in _pending_batches
+        ]
+        all_inserts = []
+        for fut, (_texts, meta) in zip(futures, _pending_batches):
+            embs = fut.result()
+            for _m, _e in zip(meta, embs):
+                all_inserts.append(EmbeddingRow(
+                    qualified_name=_m[0], embedding=_e,
+                    file_path=_m[1], start_line=_m[2], end_line=_m[3],
+                    symbol_type=_m[4], content_hash=_m[5],
+                ))
+        bulk_insert(_vec_conn, all_inserts)
+        _embedded_count += len(all_inserts)
+    finally:
+        signal.alarm(0)
+    _pending_batches.clear()
+    print(f"PROGRESS embedded={{_embedded_count}} skipped={{_skipped_unchanged}} filtered={{_skipped_filtered}}", flush=True)
+
+
+_pool = ThreadPoolExecutor(max_workers=_CONCURRENCY)
 
 for _row in _rows:
     _qname = _row.get("qualified_name")
@@ -810,6 +1115,14 @@ for _row in _rows:
     _callers = int(_row.get("caller_count") or 0)
 
     if not _qname or _start is None or _end is None or not _rel:
+        continue
+
+    # BUC-1519 — skip embedding for tests / generated / vendored files.
+    # Test files are rarely the target of semantic search and dominate
+    # the symbol count in many repos.  Filter on the relative path so
+    # patterns like /tests/ or .test.ts work portably.
+    if _should_skip_embed(_rel):
+        _skipped_filtered += 1
         continue
 
     _abs = _rel if Path(_rel).is_absolute() else (
@@ -842,39 +1155,38 @@ for _row in _rows:
         _header_parts.append(_formatted_doc)
     _header_parts.append(_src)
     _embed_text = "\\n".join(_header_parts)
+    # BUC-1518 C2 — incremental skip:  hash the actual embed input (header
+    # + source) so any change to source, docstring, or caller-count flips
+    # the hash and triggers re-embedding.  SHA-1 is fine here — we're not
+    # using it cryptographically, only as a content fingerprint.
+    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
+    if _existing_hashes.get(_qname) == _content_hash:
+        _skipped_unchanged += 1
+        continue
     _batch_texts.append(_embed_text)
-    _batch_meta.append((_qname, _abs, int(_start), int(_end), _stype))
+    _batch_meta.append((_qname, _abs, int(_start), int(_end), _stype, _content_hash))
 
     if len(_batch_texts) >= _BATCH:
-        _embs = embed_code_batch(_batch_texts)
-        _insert = [
-            EmbeddingRow(
-                qualified_name=_m[0], embedding=_e,
-                file_path=_m[1], start_line=_m[2], end_line=_m[3],
-                symbol_type=_m[4],
-            )
-            for _m, _e in zip(_batch_meta, _embs)
-        ]
-        bulk_insert(_vec_conn, _insert)
-        _embedded_count += len(_insert)
+        # Queue this outer batch instead of dispatching immediately.  When
+        # _CONCURRENCY batches are queued, _flush_pending fans them out in
+        # parallel via the thread pool.  This gives us 5x throughput against
+        # the Serverless endpoint (which has MaxConcurrency=5 configured).
+        _pending_batches.append((_batch_texts, _batch_meta))
         _batch_texts = []
         _batch_meta = []
+        if len(_pending_batches) >= _CONCURRENCY:
+            _flush_pending(_pool)
 
+# Queue the trailing partial outer batch (if any) and flush whatever's
+# left in the pending queue concurrently.
 if _batch_texts:
-    _embs = embed_code_batch(_batch_texts)
-    _insert = [
-        EmbeddingRow(
-            qualified_name=_m[0], embedding=_e,
-            file_path=_m[1], start_line=_m[2], end_line=_m[3],
-            symbol_type=_m[4],
-        )
-        for _m, _e in zip(_batch_meta, _embs)
-    ]
-    bulk_insert(_vec_conn, _insert)
-    _embedded_count += len(_insert)
+    _pending_batches.append((_batch_texts, _batch_meta))
+if _pending_batches:
+    _flush_pending(_pool)
 
+_pool.shutdown(wait=True)
 _vec_conn.close()
-print(f"Embedded {{_embedded_count}}")
+print(f"Embedded {{_embedded_count}} (skipped {{_skipped_unchanged}} unchanged, filtered {{_skipped_filtered}})")
 print("EMBED_DONE")
 """
 
@@ -889,7 +1201,7 @@ print("EMBED_DONE")
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=1800,  # 30 min hard limit
+            timeout=14400,  # 4 hr hard limit — large repos at batch=32 SageMaker need ~2-3 hr
             cwd=str(Path(repo_db_path).parent.parent.parent),  # service root
         )
 
@@ -1116,6 +1428,27 @@ def get_index_status(job_id: str) -> IndexStatus:
     # reflects the job lifecycle.
     phase_val = job.phase  # type: ignore[assignment]
 
+    # Live embed progress: tail the embed subprocess log for the latest
+    # PROGRESS line.  Lets the frontend show running totals (embedded /
+    # skipped via content_hash / filtered as test or generated) WHILE the
+    # pass is in flight, instead of seeing 0 until completion.
+    live_embedded = job.embedded_count
+    live_skipped = job.embeddings_skipped_unchanged
+    live_filtered = job.embeddings_filtered_out
+    if job.status == "running" and job.phase == "embedding":
+        progress = _parse_embed_progress(job.job_id)
+        if progress is not None:
+            live_embedded, live_skipped, live_filtered = progress
+            # Mirror back onto the job so subsequent reads stay monotonic
+            # even if the log briefly races during a flush.
+            job.embedded_count = max(job.embedded_count, live_embedded)
+            job.embeddings_skipped_unchanged = max(
+                job.embeddings_skipped_unchanged, live_skipped
+            )
+            job.embeddings_filtered_out = max(
+                job.embeddings_filtered_out, live_filtered
+            )
+
     return IndexStatus(
         job_id=job.job_id,
         status=job.status,
@@ -1126,7 +1459,9 @@ def get_index_status(job_id: str) -> IndexStatus:
         current_file=job.current_file,
         node_count=job.node_count,
         rel_count=job.rel_count,
-        embedding_count=job.embedded_count,
+        embedding_count=live_embedded,
+        embeddings_skipped_unchanged=live_skipped,
+        embeddings_filtered_out=live_filtered,
         started_at=job.started_at,
         elapsed_sec=elapsed,
         eta_sec=job.eta_sec,
