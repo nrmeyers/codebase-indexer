@@ -796,6 +796,28 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         # we just lose the ability to do incremental on the NEXT call.
         logger.warning("RepoMeta.stamp failed (non-fatal): %s", _exc)
 
+    # BUC-1518 — push the freshly-indexed .db + .duck to S3 so anyone else
+    # running the indexer (locally or in another container) sees the same
+    # graph + embeddings without re-indexing.  Best-effort: never fail the
+    # job if the upload errors; the next graceful shutdown will retry.
+    # Runs in a background thread so the long upload (~30-100 MB) doesn't
+    # block the response or hold any DB locks.
+    try:
+        from .services.s3_store import snapshot_indexes as _s3_snapshot
+        def _push() -> None:
+            try:
+                n = _s3_snapshot(settings.LADYBUG_DB_DIR)
+                logger.info("S3 snapshot after index: %d file(s) pushed", n)
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("S3 snapshot after index failed (non-fatal): %s", _e)
+        threading.Thread(
+            target=_push,
+            name=f"s3-snapshot-{job.job_id[:8]}",
+            daemon=True,
+        ).start()
+    except Exception as _exc:
+        logger.debug("S3 snapshot dispatch failed: %s", _exc)
+
     # Bust the health probe cache again now that embeddings are done so the
     # UI transitions from "indexing" to fully-complete state immediately.
     try:

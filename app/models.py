@@ -86,6 +86,25 @@ class LmStudioStatus(BaseModel):
     can_rerank: bool = False
 
 
+class S3SyncStatus(BaseModel):
+    """Snapshot of where the S3-backed index store stands.
+
+    Surfaces in /health so operators (and the frontend) can tell at a glance
+    whether the local indexes are backed by S3 and when they were last synced.
+    """
+
+    enabled: bool = False
+    bucket: str | None = None
+    prefix: str | None = None
+    region: str | None = None
+    # Last time the indexer pushed indexes to S3 in this process.  None until
+    # the first successful snapshot happens.  Unix timestamp.
+    last_snapshot_at: float | None = None
+    # Number of files pushed in the last snapshot.  0 means "no changes
+    # since last sync"; absent means we haven't snapshotted yet.
+    last_snapshot_count: int | None = None
+
+
 class HealthResponse(BaseModel):
     """Response for ``GET /health``.
 
@@ -108,6 +127,10 @@ class HealthResponse(BaseModel):
     repos: list[RepoHealth] = []
     running_jobs: int = 0
     lm_studio: "LmStudioStatus" = Field(default_factory=lambda: LmStudioStatus())
+    # S3 sync status: shows whether per-repo .db / .duck files are backed
+    # up to S3, and when the most recent push happened.  Lets the frontend
+    # display a "synced" / "local-only" badge per indexer instance.
+    s3_sync: "S3SyncStatus" = Field(default_factory=lambda: S3SyncStatus())
 
 
 # ---------------------------------------------------------------------------

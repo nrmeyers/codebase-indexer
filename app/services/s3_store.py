@@ -39,6 +39,37 @@ _DEFAULT_PREFIX = "code-indexer/indexes"
 _DEFAULT_REGION = "us-east-1"
 _SYNC_EXTENSIONS = {".db", ".duck"}
 
+# In-process bookkeeping for /health.  Updated by snapshot_indexes() on
+# every successful push so operators can see when the local indexer last
+# synced to S3 without having to query the bucket directly.
+_LAST_SNAPSHOT_AT: float | None = None
+_LAST_SNAPSHOT_COUNT: int | None = None
+
+
+def get_sync_state() -> dict:
+    """Snapshot of the S3 sync configuration + last push timestamp.
+
+    Returned in /health so the frontend can render a "Synced 2 min ago"
+    badge per indexer instance.  ``enabled`` is True when boto3 is
+    importable AND a bucket name is set.  When False, the indexer is
+    operating in local-only mode and indexes will be lost if the host
+    is reset.
+    """
+    enabled = False
+    try:
+        import boto3  # type: ignore[import-untyped] # noqa: F401
+        enabled = bool(_bucket())
+    except Exception:
+        enabled = False
+    return {
+        "enabled": enabled,
+        "bucket": _bucket() if enabled else None,
+        "prefix": _prefix() if enabled else None,
+        "region": _region() if enabled else None,
+        "last_snapshot_at": _LAST_SNAPSHOT_AT,
+        "last_snapshot_count": _LAST_SNAPSHOT_COUNT,
+    }
+
 
 def _bucket() -> str:
     return (os.environ.get("S3_INDEX_BUCKET") or _DEFAULT_BUCKET).strip()
@@ -188,6 +219,15 @@ def snapshot_indexes(db_dir: str | Path) -> int:
             logger.info("s3_store: uploaded %s → s3://%s/%s", local.name, bucket, key)
         except Exception as exc:
             logger.warning("s3_store: upload of %s failed: %s", local.name, exc)
+
+    # Record the snapshot for /health.  We track 'attempted' (anything
+    # we ran the snapshot loop on, even when 0 files changed) so the
+    # frontend can show "Synced now" rather than only flipping state on
+    # successful pushes.
+    import time as _time
+    global _LAST_SNAPSHOT_AT, _LAST_SNAPSHOT_COUNT
+    _LAST_SNAPSHOT_AT = _time.time()
+    _LAST_SNAPSHOT_COUNT = uploaded
 
     if uploaded:
         logger.info("s3_store: snapshot complete — %d file(s) pushed to S3", uploaded)

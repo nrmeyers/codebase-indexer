@@ -233,6 +233,17 @@ def health() -> HealthResponse:
     status = "ok" if all(p.readable for p in probes) else "degraded"
     running = sum(1 for j in _jobs.values() if j.status == "running")
 
+    # S3 sync state is best-effort — if the import or call fails for any
+    # reason, fall back to "disabled" so /health stays alive.
+    try:
+        from ..services.s3_store import get_sync_state
+        from ..models import S3SyncStatus
+        s3_sync = S3SyncStatus(**get_sync_state())
+    except Exception as exc:
+        logger.debug("S3 sync state unavailable: %s", exc)
+        from ..models import S3SyncStatus
+        s3_sync = S3SyncStatus(enabled=False)
+
     return HealthResponse(
         status=status,
         db_path=settings.LADYBUG_DB_DIR,
@@ -240,4 +251,5 @@ def health() -> HealthResponse:
         repos=probes,
         running_jobs=running,
         lm_studio=_probe_lm_studio(),
+        s3_sync=s3_sync,
     )
