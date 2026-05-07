@@ -828,16 +828,35 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # job if the upload errors; the next graceful shutdown will retry.
     # Runs in a background thread so the long upload (~30-100 MB) doesn't
     # block the response or hold any DB locks.
+    #
+    # After the push succeeds we also opportunistically evict any STALE
+    # local files from OTHER repos that have aged out of the TTL window
+    # — this keeps disk usage bounded on long-running VMs without
+    # requiring a separate cron job.  The repo we just indexed is
+    # naturally fresh and won't be evicted.
     try:
-        from .services.s3_store import snapshot_indexes as _s3_snapshot
-        def _push() -> None:
+        from .services.s3_store import (
+            snapshot_indexes as _s3_snapshot,
+            evict_local_cache as _s3_evict,
+        )
+        def _push_and_evict() -> None:
             try:
                 n = _s3_snapshot(settings.LADYBUG_DB_DIR)
                 logger.info("S3 snapshot after index: %d file(s) pushed", n)
             except Exception as _e:  # noqa: BLE001
                 logger.warning("S3 snapshot after index failed (non-fatal): %s", _e)
+                return  # don't evict if push failed — would risk data loss
+            try:
+                evicted, kept = _s3_evict(settings.LADYBUG_DB_DIR)
+                if evicted:
+                    logger.info(
+                        "S3 cache evict: %d local file(s) dropped (kept %d)",
+                        evicted, kept,
+                    )
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("S3 cache evict failed (non-fatal): %s", _e)
         threading.Thread(
-            target=_push,
+            target=_push_and_evict,
             name=f"s3-snapshot-{job.job_id[:8]}",
             daemon=True,
         ).start()
