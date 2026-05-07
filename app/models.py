@@ -142,10 +142,38 @@ class HealthResponse(BaseModel):
 
 
 class IndexRequest(BaseModel):
-    """Request body for ``POST /index``."""
+    """Request body for ``POST /index``.
+
+    Two modes:
+
+    1. **Local path mode** (backward compatible) — supply ``repo_path`` only.
+       The service indexes the directory in place. Auth for any out-of-band
+       git operations comes from the local git config (SSH key, PAT, etc).
+
+    2. **App-authenticated clone mode** (BUC-1561b) — supply ``github_token``
+       and ``full_name`` (and optionally ``branch``). The service clones the
+       remote repo using the token-bearing URL
+       ``https://x-access-token:{token}@github.com/{owner}/{repo}.git`` and
+       then indexes the freshly-cloned working tree. ``repo_path`` is
+       ignored / optional in this mode — the destination is derived from
+       ``full_name``.
+
+       The token is treated as an ephemeral secret: it is **never** logged,
+       **never** persisted in the jobs_store payload, and is scrubbed (``***``)
+       from any error messages echoed back to the caller. GitHub App
+       installation tokens are valid for ~1 hour, so the clone must complete
+       within that window — large repos that exceed the window will fail
+       with a 502 ``git failed`` and the caller must request a fresh token
+       and retry.
+    """
 
     repo_path: str = Field(
-        description="Absolute or relative path to the repository to index."
+        default="",
+        description=(
+            "Absolute or relative path to the repository to index. Required "
+            "in local-path mode; ignored when ``github_token`` + ``full_name`` "
+            "are supplied (the cloned path is used instead)."
+        ),
     )
     force_reindex: bool = Field(
         default=False,
@@ -156,6 +184,30 @@ class IndexRequest(BaseModel):
         description=(
             "Repo-relative path prefixes to skip during indexing (e.g. 'tests/fixtures'). "
             "Defaults to an empty list; common fixture directories are excluded automatically."
+        ),
+    )
+    github_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional GitHub App installation token (or PAT) used to clone "
+            "private repos without relying on local git config / SSH keys. "
+            "When set, ``full_name`` is required. Treated as an ephemeral "
+            "secret — never logged, never persisted; only the masked form "
+            "``***`` appears in any persisted state."
+        ),
+    )
+    full_name: str | None = Field(
+        default=None,
+        description=(
+            "``owner/repo`` identifier — required when ``github_token`` is set. "
+            "Used to build the clone URL."
+        ),
+    )
+    branch: str | None = Field(
+        default=None,
+        description=(
+            "Branch to check out when cloning. Defaults to the repo's HEAD "
+            "(typically the default branch). Only used in clone mode."
         ),
     )
 

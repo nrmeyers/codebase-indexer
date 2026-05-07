@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..models import (
@@ -43,6 +44,180 @@ from ..models import (
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# GET /repos — listing endpoint (BUC-1561b)
+# ---------------------------------------------------------------------------
+
+
+class RepoListItem(BaseModel):
+    """One row in the ``GET /repos`` response.
+
+    The shape complements TheForge's ``GET /api/code-indexer/repos/available``
+    endpoint: this one is "what does the indexer know about", that one is
+    "what does GitHub say is available". The frontend joins on ``slug`` /
+    ``full_name``.
+    """
+
+    slug: str = Field(description="Repo slug — the key used by /repos/{slug}/stats")
+    full_name: str | None = Field(
+        default=None,
+        description="``owner/repo`` if the slug encodes one (e.g. 'navistone__TheForge'), else None.",
+    )
+    default_branch: str | None = Field(
+        default=None,
+        description="Best-effort default branch from local git config; None when unknown.",
+    )
+    last_indexed_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp of last successful index, or None.",
+    )
+    last_indexed_sha: str | None = Field(
+        default=None,
+        description="Git SHA recorded at index time; None when never indexed or unknown.",
+    )
+    indexed: bool = Field(description="True when at least one successful index has run.")
+    status: str = Field(
+        description=(
+            "Freshness verdict: ``unindexed`` | ``fresh`` | ``stale``. "
+            "``fresh`` means last_indexed_sha matches the current local HEAD; "
+            "``stale`` means the index ran but the SHAs differ; "
+            "``unindexed`` means no successful index job has ever completed. "
+            "Drift detection against the GitHub remote is TheForge's "
+            "responsibility — this endpoint only sees what's locally known."
+        ),
+    )
+
+
+class RepoListResponse(BaseModel):
+    """Envelope for ``GET /repos``."""
+
+    repos: list[RepoListItem]
+
+
+def _slug_to_full_name(slug: str) -> str | None:
+    """Recover ``owner/repo`` from a slug when the clone helper encoded it.
+
+    ``_clone_or_update`` writes clones to ``.cgr/clones/{owner}__{name}``,
+    and ``slugify_repo`` flattens that to ``{owner}__{name}``. We invert
+    the convention here to give TheForge a join key against its own
+    ``GET /api/code-indexer/repos/available`` listing. Slugs that don't
+    follow the convention return None — the frontend renders ``—`` then.
+    """
+    if "__" in slug:
+        owner, _, name = slug.partition("__")
+        if owner and name:
+            return f"{owner}/{name}"
+    return None
+
+
+@router.get("", response_model=RepoListResponse)
+def list_repos() -> RepoListResponse:
+    """List every repo this indexer knows about.
+
+    Reads from the in-memory ``indexed_repos`` set + per-repo DuckDB
+    ``repo_metadata`` table (rehydrated on startup). Does NOT call GitHub
+    — that's TheForge's job via the GitHub App. The caller can intersect
+    this list with TheForge's ``/api/code-indexer/repos/available`` to
+    decide which repos need (re)indexing.
+
+    Status semantics (BUC-1561b):
+        * ``unindexed`` — no successful index job has ever completed.
+          Should not normally appear in this list (the list is built from
+          repos that *have* metadata) but included as a defence-in-depth
+          fallback when ``last_indexed_at`` is missing.
+        * ``fresh`` — ``last_indexed_sha`` matches the local working
+          tree's current ``git rev-parse HEAD``. Drift detection against
+          the *remote* is TheForge's responsibility.
+        * ``stale`` — index ran, but the local HEAD has moved on.
+
+    Returns an empty list on a fresh database.
+    """
+    from datetime import datetime, timezone
+    from .index import _read_meta, indexed_repo_paths, indexed_repos
+
+    items: list[RepoListItem] = []
+
+    # Union of in-memory registry + on-disk DB files so we still report
+    # repos whose ``indexed_repos`` set entry was lost (e.g. the rehydrate
+    # at startup couldn't resolve ``root_path``).
+    db_dir = Path(settings.LADYBUG_DB_DIR)
+    on_disk_slugs: set[str] = set()
+    if db_dir.exists():
+        for db_file in sorted(db_dir.glob("*.db")):
+            on_disk_slugs.add(db_file.stem)
+
+    for slug in sorted(indexed_repos | on_disk_slugs):
+        meta = _read_meta(slug) if slug else {}
+
+        last_indexed_at_raw = meta.get("last_indexed_at")
+        last_indexed_at_iso: str | None = None
+        if last_indexed_at_raw is not None:
+            try:
+                last_indexed_at_iso = (
+                    datetime.fromtimestamp(float(last_indexed_at_raw), tz=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+            except (ValueError, TypeError, OSError):
+                last_indexed_at_iso = None
+
+        last_indexed_sha = meta.get("last_indexed_sha") or None
+        if isinstance(last_indexed_sha, str):
+            last_indexed_sha = last_indexed_sha.strip() or None
+
+        # ``indexed`` reflects whether a real timestamp was recorded — a
+        # row in repo_metadata without ``last_indexed_at`` indicates an
+        # in-flight or interrupted job.
+        indexed = bool(last_indexed_at_iso)
+
+        # Status verdict — see docstring for semantics.
+        if not indexed:
+            status_verdict = "unindexed"
+        else:
+            repo_root = indexed_repo_paths.get(slug) or meta.get("root_path") or ""
+            current_head = _git_sha(str(repo_root)) if repo_root else None
+            if last_indexed_sha and current_head and last_indexed_sha == current_head:
+                status_verdict = "fresh"
+            elif last_indexed_sha and current_head and last_indexed_sha != current_head:
+                status_verdict = "stale"
+            else:
+                # No SHA on either side → can't prove drift; assume stale
+                # so TheForge re-checks against the GitHub App rather than
+                # trusting an unverifiable "fresh" answer.
+                status_verdict = "stale"
+
+        # Best-effort default branch from local git config.
+        default_branch: str | None = None
+        repo_root = indexed_repo_paths.get(slug) or meta.get("root_path") or ""
+        if repo_root:
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(repo_root), "symbolic-ref", "--short", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    default_branch = result.stdout.strip() or None
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                default_branch = None
+
+        items.append(
+            RepoListItem(
+                slug=slug,
+                full_name=_slug_to_full_name(slug),
+                default_branch=default_branch,
+                last_indexed_at=last_indexed_at_iso,
+                last_indexed_sha=last_indexed_sha,
+                indexed=indexed,
+                status=status_verdict,
+            )
+        )
+
+    return RepoListResponse(repos=items)
 
 
 # ---------------------------------------------------------------------------

@@ -792,6 +792,11 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         from codebase_rag.services import repo_meta as _rm
         head_sha = get_head_sha(repo)
         if head_sha:
+            # Mirror the SHA into the DuckDB ``repo_metadata`` sidecar so the
+            # GET /repos listing endpoint (BUC-1561b) can compute fresh/stale
+            # status without a LadybugDB read (which contends with the
+            # single-writer lock during a re-index).
+            _write_meta(repo.name, last_indexed_sha=head_sha)
             _stamp_db = lb.Database(repo_db_path)
             _stamp_conn = lb.Connection(_stamp_db)
             try:
@@ -1284,24 +1289,73 @@ async def start_index(
     # Opportunistically evict stale job records before allocating a new one.
     _prune_old_jobs()
 
+    # ------------------------------------------------------------------
+    # App-authenticated clone path (BUC-1561b)
+    # ------------------------------------------------------------------
+    # When ``github_token`` is supplied alongside ``full_name``, clone the
+    # remote into ``.cgr/clones/{owner}__{repo}`` using the token-bearing
+    # URL and treat the cloned working tree as the repo to index. Token is
+    # NEVER logged, NEVER persisted — we only retain the resolved local
+    # path beyond this block, and the masked form ``***`` is what surfaces
+    # in any error message.
+    #
+    # GitHub App installation tokens are valid for ~1h; clones must finish
+    # within that window or git will fail with 401 and the caller must
+    # request a fresh token and retry.
+    cloned_repo_path: Path | None = None
+    if req.github_token:
+        if not req.full_name or "/" not in req.full_name:
+            raise HTTPException(
+                status_code=422,
+                detail="full_name (owner/repo) is required when github_token is set",
+            )
+        # Lazy import to avoid the circular dependency (github.py imports
+        # _Job / _run_ingestion from this module).
+        from .github import _clone_or_update
+
+        try:
+            cloned_repo_path = await asyncio.get_running_loop().run_in_executor(
+                None,
+                _clone_or_update,
+                req.full_name,
+                req.branch,
+                req.github_token,
+            )
+        except HTTPException:
+            # _clone_or_update already scrubs the token from the error
+            # message — re-raise as-is so the caller sees a clean 502.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Defensive: any other failure type — scrub token before surfacing.
+            msg = str(exc)
+            if req.github_token:
+                msg = msg.replace(req.github_token, "***")
+            raise HTTPException(status_code=502, detail=f"clone failed: {msg[:500]}") from None
+
+    # Resolve the effective repo path: cloned tree wins when present,
+    # otherwise fall back to the caller-supplied local path.
+    effective_repo_path = (
+        str(cloned_repo_path) if cloned_repo_path is not None else req.repo_path
+    )
+
     # Reject empty or whitespace-only paths before attempting filesystem ops.
     # Path("") resolves to cwd (a valid directory) so it must be caught early.
-    if not req.repo_path or not req.repo_path.strip():
+    if not effective_repo_path or not effective_repo_path.strip():
         raise HTTPException(
             status_code=422,
             detail="repo_path must not be empty",
         )
 
-    repo_path = Path(req.repo_path)
+    repo_path = Path(effective_repo_path)
     if not repo_path.exists():
         raise HTTPException(
             status_code=422,
-            detail=f"repo_path does not exist: {req.repo_path}",
+            detail=f"repo_path does not exist: {effective_repo_path}",
         )
     if not repo_path.is_dir():
         raise HTTPException(
             status_code=422,
-            detail=f"repo_path must be a directory, not a file: {req.repo_path}",
+            detail=f"repo_path must be a directory, not a file: {effective_repo_path}",
         )
 
     # Reject a second concurrent job on the same repo with a clear 409 so the
