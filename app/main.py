@@ -200,6 +200,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         _log.info("metrics: background collectors started")
 
+    # --- Phase 5: SageMaker pre-warm (BUC-1518 D1) ---
+    # Fire a fire-and-forget warmup invocation to absorb the Serverless
+    # Inference cold start (~4-5s observed) in the background.  Without
+    # this, the first user-facing call after restart (semantic search,
+    # /index parse-phase prewarm not yet fired, etc.) pays the cold-start
+    # latency.  Cost: ~$0.0001 per restart.  Safe to skip if no endpoint
+    # is configured; failures are silently swallowed.
+    def _startup_prewarm() -> None:
+        try:
+            from .services.sagemaker_embedder import get_sagemaker_embedder
+            sm = get_sagemaker_embedder()
+            if sm is None:
+                return  # not configured
+            import time as _t
+            t0 = _t.time()
+            sm.embed("warmup")
+            _log.info(
+                "SageMaker startup prewarm: endpoint=%s latency=%.2fs",
+                sm.endpoint_name, _t.time() - t0,
+            )
+        except Exception as _exc:  # noqa: BLE001
+            _log.debug("SageMaker startup prewarm failed (best-effort): %s", _exc)
+
+    import threading as _threading
+    _threading.Thread(target=_startup_prewarm, name="sm-startup-prewarm", daemon=True).start()
+
+    # --- Phase 6: housekeeping — drop stale /tmp/cis_embed_*.log files ---
+    # Each re-index creates one diagnostic log file.  Without cleanup these
+    # accumulate forever (saw 23 lying around after a couple of dev days).
+    # Keep the 5 most recent for post-mortem use; everything older is noise.
+    try:
+        from .routers.index import _cleanup_old_embed_logs
+        removed = _cleanup_old_embed_logs(keep=5)
+        if removed:
+            _log.info("startup: removed %d stale embed log file(s)", removed)
+    except Exception as _exc:  # noqa: BLE001
+        _log.debug("embed-log cleanup failed (non-fatal): %s", _exc)
+
     yield
 
     # Shutdown: push changed index files to S3 so the next container inherits them.

@@ -65,6 +65,32 @@ router = APIRouter()
 _WORKER_TOKEN: str = _os.urandom(8).hex()
 
 
+def _cleanup_old_embed_logs(keep: int = 5) -> int:
+    """Remove all but the ``keep`` most-recent /tmp/cis_embed_*.log files.
+
+    Embed logs are diagnostic artefacts that pile up over weeks of dev use
+    (one per re-index attempt).  Tail behaviour and incremental embedding
+    mean we run more re-indexes per day, so without housekeeping the file
+    count grows unbounded.  Called on uvicorn startup; best-effort.
+    """
+    try:
+        log_paths = sorted(
+            Path("/tmp").glob("cis_embed_*.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        removed = 0
+        for stale in log_paths[keep:]:
+            try:
+                stale.unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _parse_embed_progress(job_id: str) -> tuple[int, int, int] | None:
     """Read the latest PROGRESS line from an embed subprocess log.
 
