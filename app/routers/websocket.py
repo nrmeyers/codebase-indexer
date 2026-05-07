@@ -12,6 +12,11 @@ plumb a publish call through every progress callback. The cost is a
 ~1s latency floor on event delivery, which the FE renders smoothly via
 its own progress-bar interpolation.
 
+Phase 5 addition: ``broadcast_partial_update`` pushes ``index_partial_update``
+events to all currently-connected WS subscribers.  Called by
+``watch_manager._run_partial_index`` on every terminal transition so the FE
+can soft-refresh search results immediately.
+
 Event shapes:
 
     {
@@ -28,6 +33,12 @@ Event shapes:
     { "event": "index.complete", "data": { "repo": "TheForge" } }
 
     { "event": "index.failed", "data": { "repo": "TheForge", "reason": "..." } }
+
+    {
+      "type": "index_partial_update",
+      "ts": 1714492800.123,
+      "payload": { "repo_slug": "...", "job_id": "...", "status": "done", ... }
+    }
 """
 from __future__ import annotations
 
@@ -42,6 +53,14 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Phase 5 — connected client registry for broadcast
+# ---------------------------------------------------------------------------
+
+# Set of all currently-connected WebSocket clients.  Updated by ws_endpoint.
+# Used by broadcast_partial_update to push events without polling.
+_connected: set[WebSocket] = set()
 
 
 # Phase → pass-number mapping mirrors BACKEND_HANDOVER §2.3:
@@ -132,6 +151,74 @@ def _build_progress_event(job: Any, prev_embedded: int, prev_ts: float) -> dict[
     return payload
 
 
+async def broadcast_partial_update(
+    repo_slug: str,
+    job_id: str,
+    status: str,
+    changed_paths: list[str] | None = None,
+    files_done: int = 0,
+    files_total: int = 0,
+    embedding_count: int = 0,
+    node_count: int = 0,
+    rel_count: int = 0,
+    duration_ms: int = 0,
+    noop: bool = False,
+    cancelled: bool = False,
+) -> None:
+    """Push an ``index_partial_update`` event to all connected WS clients.
+
+    Silently ignores send errors (a disconnecting client should not crash
+    the runner).  Called from ``watch_manager._run_partial_index`` on every
+    status transition.
+
+    Args:
+        repo_slug: Repo identifier; FE filters by this.
+        job_id: ``watch_partial`` job ID.
+        status: Current status — ``running``, ``done``, ``failed``, or
+            ``cancelled``.
+        changed_paths: Repo-relative paths in this batch.
+        files_done: Files actually processed after hash-diff skip.
+        files_total: Total paths before hash-diff.
+        embedding_count: Symbols re-embedded.
+        node_count: Graph nodes touched.
+        rel_count: Graph rels touched.
+        duration_ms: Wall-clock milliseconds for the run.
+        noop: True when no content changed (hash-diff short-circuit).
+        cancelled: True when the run was cancelled.
+    """
+    if not _connected:
+        return
+
+    payload: dict[str, Any] = {
+        "type": "index_partial_update",
+        "ts": time.time(),
+        "payload": {
+            "repo_slug": repo_slug,
+            "job_id": job_id,
+            "status": status,
+            "changed_paths": changed_paths or [],
+            "files_done": files_done,
+            "files_total": files_total,
+            "embedding_count": embedding_count,
+            "node_count": node_count,
+            "rel_count": rel_count,
+            "duration_ms": duration_ms,
+            "noop": noop,
+            "cancelled": cancelled,
+        },
+    }
+    text = json.dumps(payload)
+
+    dead: list[WebSocket] = []
+    for ws in list(_connected):
+        try:
+            await ws.send_text(text)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _connected.discard(ws)
+
+
 @router.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket) -> None:
     """Stream index progress + completion events to a single subscriber.
@@ -150,6 +237,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     from .index import _jobs
 
     await websocket.accept()
+    _connected.add(websocket)
     logger.info("WS subscriber connected: %s", websocket.client)
 
     last_snapshots: dict[str, dict[str, Any]] = {}
@@ -217,3 +305,5 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             await websocket.close()
         except Exception:
             pass
+    finally:
+        _connected.discard(websocket)

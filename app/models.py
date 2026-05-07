@@ -665,3 +665,81 @@ class GraphOverviewResponse(BaseModel):
     edges: list[GraphEdge]
     node_count: int
     edge_count: int
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Realtime watcher
+# ---------------------------------------------------------------------------
+
+
+class WatchStatus(BaseModel):
+    """Response for ``GET /repos/{slug}/watch``.
+
+    Attributes:
+        repo_slug: Repo identifier (same as the URL slug).
+        repo_path: Absolute filesystem path being watched.
+        actor_oid: OID of the actor who started the watch.
+        actor_email: Email of the actor who started the watch.
+        started_at: Unix epoch when the watcher was started.
+        last_event_at: Unix epoch of the last FS event; None when no
+            event has fired since the watcher started.
+        last_partial_job_id: Job ID of the most recent ``watch_partial``
+            run; None when no partial has run yet.
+        debounce_ms: Configured debounce window in milliseconds.
+        pending_paths_count: Number of paths accumulated in the debouncer
+            but not yet dispatched (0 outside the debounce window).
+        state: Lifecycle state of the watcher entry.
+    """
+
+    repo_slug: str
+    repo_path: str
+    actor_oid: str
+    actor_email: str
+    started_at: float
+    last_event_at: float | None
+    last_partial_job_id: str | None
+    debounce_ms: int
+    pending_paths_count: int
+    state: Literal["starting", "active", "stopping", "stopped", "errored"]
+
+
+class WatchAccepted(BaseModel):
+    """202 response from ``POST /repos/{slug}/watch``."""
+
+    watcher_id: str
+    started_at: float
+    debounce_ms: int
+
+
+class PartialIndexEvent(BaseModel):
+    """WebSocket payload for ``index_partial_update`` events.
+
+    Attributes:
+        repo_slug: Repo the partial index ran against.
+        job_id: Job ID of the ``watch_partial`` row.
+        status: Terminal status of the run.
+        changed_paths: Repo-relative paths included in this batch.
+        files_done: Files actually re-processed (after hash-diff skip).
+        files_total: Total paths in the batch before hash-diff.
+        embedding_count: Symbols re-embedded.
+        node_count: Graph nodes touched.
+        rel_count: Graph relationships touched.
+        duration_ms: Wall-clock milliseconds for the partial run.
+        noop: True when hash-diff showed no content change — no graph
+            work was done.
+        cancelled: True when the partial was cancelled (e.g. superseded
+            by a full re-index).
+    """
+
+    repo_slug: str
+    job_id: str
+    status: Literal["running", "done", "failed", "cancelled"]
+    changed_paths: list[str] = Field(default_factory=list)
+    files_done: int = 0
+    files_total: int = 0
+    embedding_count: int = 0
+    node_count: int = 0
+    rel_count: int = 0
+    duration_ms: int = 0
+    noop: bool = False
+    cancelled: bool = False

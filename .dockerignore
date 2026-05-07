@@ -1,0 +1,43 @@
+# Per .planning/phase-plans/PHASE_3_DOCKER.md §3.1
+# Excludes from the parent-dir build context — see Dockerfile header for
+# why context: . means we're shipping the parent and need to scope down.
+
+# Indexer-side junk
+.venv/
+.cgr/
+.cgr-hash-cache.json
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+service.log
+*.log
+
+# Tests aren't needed at runtime; the image stays slim and the build
+# layer doesn't grow unnecessarily.
+tests/
+
+# Planning + ops docs
+.planning/
+docs/
+
+# Editor / OS / git noise
+.git/
+.github/
+.vscode/
+.idea/
+.DS_Store
+
+# Ladybug + DuckDB scratch
+*.db
+*.duck
+*.duck.wal
+*.duck.tmp
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

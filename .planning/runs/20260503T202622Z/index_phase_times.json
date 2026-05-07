@@ -1,0 +1,29 @@
+[
+  {
+    "repo": "TheForge",
+    "status": "done",
+    "elapsed_s": 0,
+    "node_count": 7418,
+    "rel_count": 0,
+    "embedding_count": 0,
+    "skipped": true
+  },
+  {
+    "repo": "code-indexer-service",
+    "status": "done",
+    "elapsed_s": 0,
+    "node_count": 569,
+    "rel_count": 0,
+    "embedding_count": 0,
+    "skipped": true
+  },
+  {
+    "repo": "code-graph-rag",
+    "status": "done",
+    "elapsed_s": 0,
+    "node_count": 6613,
+    "rel_count": 0,
+    "embedding_count": 0,
+    "skipped": true
+  }
+]
