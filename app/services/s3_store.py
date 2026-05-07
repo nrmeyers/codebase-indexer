@@ -52,7 +52,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BUCKET = "navistone-forge-data"
 _DEFAULT_PREFIX = "code-indexer/indexes"
 _DEFAULT_REGION = "us-east-1"
+_DEFAULT_SNAPSHOT_RETAIN = 10
+_DEFAULT_SNAPSHOT_MIN_AGE_HOURS = 24.0  # never purge anything younger than this
 _SYNC_EXTENSIONS = {".db", ".duck"}
+_SNAPSHOTS_SUBPREFIX = "snapshots"  # under _prefix(): {prefix}/snapshots/<ts>/...
+_MANIFEST_NAME = "index.json"
 
 # In-process bookkeeping for /health.  Updated by snapshot_indexes() on
 # every successful push so operators can see when the local indexer last
@@ -60,6 +64,10 @@ _SYNC_EXTENSIONS = {".db", ".duck"}
 _LAST_SNAPSHOT_AT: float | None = None
 _LAST_SNAPSHOT_COUNT: int | None = None
 _LAST_SNAPSHOT_ERROR: str | None = None
+# Snapshot-bundle bookkeeping for /admin/s3/health (BUC-1555b).  Tracks the
+# most recent timestamped snapshot bundle written to {prefix}/snapshots/.
+_LAST_SNAPSHOT_BUNDLE_AT: float | None = None
+_LAST_SNAPSHOT_BUNDLE_KEY: str | None = None
 
 
 def get_sync_state() -> dict:
@@ -112,6 +120,31 @@ def _local_max_gb() -> float:
         return float(os.environ.get("S3_INDEX_LOCAL_MAX_GB") or "5")
     except (TypeError, ValueError):
         return 5.0
+
+
+def _snapshot_retain() -> int:
+    """Number of snapshot bundles to retain (default 10)."""
+    try:
+        n = int(os.environ.get("S3_SNAPSHOT_RETAIN") or _DEFAULT_SNAPSHOT_RETAIN)
+        return max(1, n)
+    except (TypeError, ValueError):
+        return _DEFAULT_SNAPSHOT_RETAIN
+
+
+def _snapshot_min_age_hours() -> float:
+    """Floor — snapshots younger than this are never purged regardless of count."""
+    try:
+        return float(
+            os.environ.get("S3_SNAPSHOT_MIN_AGE_HOURS")
+            or _DEFAULT_SNAPSHOT_MIN_AGE_HOURS
+        )
+    except (TypeError, ValueError):
+        return _DEFAULT_SNAPSHOT_MIN_AGE_HOURS
+
+
+def _snapshots_prefix() -> str:
+    """Prefix under which timestamped snapshot bundles live."""
+    return f"{_prefix()}/{_SNAPSHOTS_SUBPREFIX}"
 
 
 def _make_client():  # type: ignore[return]
@@ -559,3 +592,385 @@ def delete_repo_backup(repo_name: str) -> str:
         msg = str(exc)
         logger.warning("s3_store.delete_repo_backup: %s", msg)
         return f"error: {msg}"
+
+
+# ---------------------------------------------------------------------------
+# Snapshot bundles + rotation + lifecycle (BUC-1555b)
+# ---------------------------------------------------------------------------
+#
+# Snapshot bundles are *point-in-time* archives of every .db / .duck file in
+# the local index dir, written under a timestamped sub-prefix:
+#
+#     s3://{bucket}/{prefix}/snapshots/{ISO8601-Z}/
+#         <repo>.db
+#         <repo>.duck
+#         index.json    -- manifest with sha256 + size for each file
+#
+# These exist alongside the per-file "primary" objects under {prefix}/ which
+# the LRU cache layer maintains.  Bundles enable point-in-time restore and
+# are subject to rotation (S3_SNAPSHOT_RETAIN, default 10) so they don't
+# grow unbounded.
+
+
+def _utcnow_iso() -> str:
+    """RFC 3339 UTC timestamp without colons (S3-key safe)."""
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _sha256_file(path: Path) -> str:
+    """Stream-sha256 a file (no full read into memory for large indexes)."""
+    import hashlib
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _build_manifest(snapshot_key: str, files: list[dict]) -> dict:
+    """Manifest schema written as ``index.json`` inside each snapshot bundle."""
+    import time as _time
+    return {
+        "version": 1,
+        "snapshot_key": snapshot_key,
+        "created_at": _time.time(),
+        "files": files,  # [{ name, sha256, size_bytes }]
+    }
+
+
+def snapshot_bundle(db_dir: str | Path) -> dict:
+    """Write a timestamped point-in-time snapshot bundle to S3.
+
+    Uploads every ``.db`` / ``.duck`` file under *db_dir* into a fresh
+    ``{prefix}/snapshots/<timestamp>/`` sub-prefix and writes an
+    ``index.json`` manifest containing per-file SHA-256 + size.  After
+    a successful upload, runs :func:`rotate_snapshots` to enforce
+    retention limits.
+
+    Returns a dict shape::
+
+        {
+            "ok": bool,
+            "snapshot_key": str,        # the snapshots/<timestamp>/ prefix
+            "files_uploaded": int,
+            "bytes": int,
+            "error": Optional[str],
+            "rotation": dict,           # output of rotate_snapshots()
+        }
+
+    No-op (returns ok=False, error="s3 not configured") when boto3 is
+    unavailable or the bucket is unset.
+    """
+    bucket = _bucket()
+    client = _make_client()
+    if client is None:
+        return {
+            "ok": False,
+            "snapshot_key": "",
+            "files_uploaded": 0,
+            "bytes": 0,
+            "error": "s3 not configured",
+            "rotation": {"deleted": [], "kept": []},
+        }
+
+    db_path = Path(db_dir)
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "snapshot_key": "",
+            "files_uploaded": 0,
+            "bytes": 0,
+            "error": f"db_dir {db_dir} does not exist",
+            "rotation": {"deleted": [], "kept": []},
+        }
+
+    ts = _utcnow_iso()
+    snapshot_prefix = f"{_snapshots_prefix()}/{ts}"
+    files_meta: list[dict] = []
+    total_bytes = 0
+    upload_error: str | None = None
+
+    for local in sorted(db_path.iterdir()):
+        if local.suffix not in _SYNC_EXTENSIONS or not local.is_file():
+            continue
+        size = local.stat().st_size
+        sha = _sha256_file(local)
+        key = f"{snapshot_prefix}/{local.name}"
+        try:
+            client.upload_file(
+                str(local), bucket, key,
+                ExtraArgs={"Metadata": {"sha256": sha}},
+            )
+            files_meta.append({"name": local.name, "sha256": sha, "size_bytes": size})
+            total_bytes += size
+            logger.info("s3_store.snapshot_bundle: uploaded %s → s3://%s/%s",
+                        local.name, bucket, key)
+        except Exception as exc:
+            upload_error = f"upload of {local.name} failed: {exc}"
+            logger.warning("s3_store.snapshot_bundle: %s", upload_error)
+            break
+
+    # Always write the manifest, even when partial — so a restore can
+    # see what *was* meant to be in this bundle and refuse to use it
+    # if integrity is broken.  Mark partial bundles in the manifest.
+    manifest = _build_manifest(snapshot_prefix, files_meta)
+    if upload_error:
+        manifest["partial"] = True
+        manifest["error"] = upload_error
+    try:
+        import json as _json
+        client.put_object(
+            Bucket=bucket,
+            Key=f"{snapshot_prefix}/{_MANIFEST_NAME}",
+            Body=_json.dumps(manifest, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+    except Exception as exc:
+        logger.warning("s3_store.snapshot_bundle: manifest write failed: %s", exc)
+        if upload_error is None:
+            upload_error = f"manifest write failed: {exc}"
+
+    ok = upload_error is None and len(files_meta) > 0
+
+    if ok:
+        global _LAST_SNAPSHOT_BUNDLE_AT, _LAST_SNAPSHOT_BUNDLE_KEY
+        import time as _time
+        _LAST_SNAPSHOT_BUNDLE_AT = _time.time()
+        _LAST_SNAPSHOT_BUNDLE_KEY = snapshot_prefix
+
+    rotation = rotate_snapshots() if ok else {"deleted": [], "kept": [], "skipped": "snapshot failed"}
+
+    # Best-effort lifecycle policy install.  Skipped silently when IAM
+    # blocks PutBucketLifecycleConfiguration (e.g. read-only role).
+    try:
+        ensure_bucket_lifecycle_policy()
+    except Exception as exc:
+        logger.info("s3_store.snapshot_bundle: lifecycle policy not applied (%s)", exc)
+
+    return {
+        "ok": ok,
+        "snapshot_key": snapshot_prefix,
+        "files_uploaded": len(files_meta),
+        "bytes": total_bytes,
+        "error": upload_error,
+        "rotation": rotation,
+    }
+
+
+def list_snapshots() -> list[dict]:
+    """List timestamped snapshot bundles under ``{prefix}/snapshots/``.
+
+    Returns newest-first.  Each entry::
+
+        {
+            "key": "code-indexer/indexes/snapshots/20260507T120000Z",
+            "created_at": float,        # unix epoch (max LastModified of files)
+            "size_bytes": int,          # sum of objects in bundle
+            "file_count": int,          # excluding the manifest
+        }
+    """
+    bucket = _bucket()
+    client = _make_client()
+    if client is None:
+        return []
+
+    prefix = _snapshots_prefix()
+    bundles: dict[str, dict] = {}
+    try:
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                # Strip "{prefix}/" -> "<timestamp>/<filename>"
+                rest = key[len(prefix) + 1:]
+                if "/" not in rest:
+                    continue  # not inside a bundle dir
+                ts_part, fname = rest.split("/", 1)
+                bundle_key = f"{prefix}/{ts_part}"
+                slot = bundles.setdefault(
+                    bundle_key,
+                    {"key": bundle_key, "created_at": 0.0, "size_bytes": 0, "file_count": 0},
+                )
+                slot["size_bytes"] += int(obj.get("Size", 0))
+                if fname != _MANIFEST_NAME:
+                    slot["file_count"] += 1
+                lm = obj.get("LastModified")
+                if lm is not None:
+                    epoch = lm.timestamp() if hasattr(lm, "timestamp") else float(lm)
+                    if epoch > slot["created_at"]:
+                        slot["created_at"] = epoch
+    except Exception as exc:
+        logger.warning("s3_store.list_snapshots: list failed: %s", exc)
+        return []
+
+    return sorted(bundles.values(), key=lambda b: b["created_at"], reverse=True)
+
+
+def rotate_snapshots(
+    retain: int | None = None,
+    min_age_hours: float | None = None,
+) -> dict:
+    """Delete old snapshot bundles, keeping the newest *retain* and a 24h floor.
+
+    The floor protects against accidental purge during a burst of snapshots:
+    no bundle younger than ``min_age_hours`` (default 24h) is ever deleted,
+    even if it pushes us above *retain*.
+
+    Returns ``{"deleted": [keys], "kept": [keys]}`` with every action logged.
+    """
+    bucket = _bucket()
+    client = _make_client()
+    if client is None:
+        return {"deleted": [], "kept": [], "skipped": "s3 not configured"}
+
+    retain_n = retain if retain is not None else _snapshot_retain()
+    floor_hours = min_age_hours if min_age_hours is not None else _snapshot_min_age_hours()
+
+    bundles = list_snapshots()  # newest-first
+    if len(bundles) <= retain_n:
+        return {"deleted": [], "kept": [b["key"] for b in bundles]}
+
+    import time as _time
+    now = _time.time()
+    floor_sec = floor_hours * 3600
+
+    keep: list[dict] = bundles[:retain_n]
+    candidates_for_delete: list[dict] = bundles[retain_n:]
+
+    deleted: list[str] = []
+    kept_keys: list[str] = [b["key"] for b in keep]
+
+    for b in candidates_for_delete:
+        age = now - b["created_at"]
+        if age < floor_sec:
+            logger.info(
+                "s3_store.rotate_snapshots: keeping %s (age %.1fh < floor %.1fh)",
+                b["key"], age / 3600, floor_hours,
+            )
+            kept_keys.append(b["key"])
+            continue
+        try:
+            _delete_prefix_recursive(client, bucket, b["key"] + "/")
+            deleted.append(b["key"])
+            logger.info(
+                "s3_store.rotate_snapshots: deleted %s (age %.1fh)",
+                b["key"], age / 3600,
+            )
+        except Exception as exc:
+            logger.warning(
+                "s3_store.rotate_snapshots: failed to delete %s: %s",
+                b["key"], exc,
+            )
+            kept_keys.append(b["key"])
+
+    return {"deleted": deleted, "kept": kept_keys}
+
+
+def _delete_prefix_recursive(client, bucket: str, prefix: str) -> int:
+    """Delete every object under *prefix*.  Returns count deleted."""
+    paginator = client.get_paginator("list_objects_v2")
+    keys: list[dict] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.append({"Key": obj["Key"]})
+    deleted = 0
+    # delete_objects max batch = 1000
+    while keys:
+        batch, keys = keys[:1000], keys[1000:]
+        try:
+            client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+            deleted += len(batch)
+        except Exception:
+            # Fallback: per-object delete
+            for k in batch:
+                try:
+                    client.delete_object(Bucket=bucket, Key=k["Key"])
+                    deleted += 1
+                except Exception as exc:
+                    logger.warning("s3_store: delete %s failed: %s", k["Key"], exc)
+    return deleted
+
+
+def ensure_bucket_lifecycle_policy() -> dict:
+    """Best-effort: install a lifecycle policy on the bucket.
+
+    Rules:
+        - AbortIncompleteMultipartUpload after 7 days (cost hygiene).
+        - Transition snapshot bundles older than 90 days to GLACIER.
+
+    Skipped silently and logged at INFO when the IAM role lacks
+    ``s3:PutLifecycleConfiguration`` — this is expected on locked-down
+    deployments where bucket-level config is managed out of band.
+    """
+    bucket = _bucket()
+    client = _make_client()
+    if client is None:
+        return {"applied": False, "reason": "s3 not configured"}
+
+    config = {
+        "Rules": [
+            {
+                "ID": "abort-stuck-multipart-uploads-7d",
+                "Status": "Enabled",
+                "Filter": {"Prefix": ""},
+                "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7},
+            },
+            {
+                "ID": "snapshots-glacier-after-90d",
+                "Status": "Enabled",
+                "Filter": {"Prefix": f"{_snapshots_prefix()}/"},
+                "Transitions": [{"Days": 90, "StorageClass": "GLACIER"}],
+            },
+        ]
+    }
+    try:
+        client.put_bucket_lifecycle_configuration(
+            Bucket=bucket, LifecycleConfiguration=config,
+        )
+        logger.info("s3_store.lifecycle: applied policy to bucket %s", bucket)
+        return {"applied": True, "rules": [r["ID"] for r in config["Rules"]]}
+    except Exception as exc:
+        # AccessDenied / NotImplemented (e.g. moto without lifecycle support)
+        # are non-fatal — the snapshots still rotate via rotate_snapshots().
+        logger.info(
+            "s3_store.lifecycle: skipping bucket policy (%s) — rotate_snapshots() still active",
+            exc,
+        )
+        return {"applied": False, "reason": str(exc)}
+
+
+def get_snapshot_health() -> dict:
+    """Snapshot-bundle health for ``GET /admin/s3/health`` + deploy doctor.
+
+    Shape::
+
+        {
+            "last_successful_snapshot_at": float | None,   # epoch
+            "age_seconds": float | None,
+            "retained_count": int,
+            "oldest_retained_at": float | None,
+            "snapshot_key": str | None,                    # most recent
+        }
+    """
+    import time as _time
+    bundles = list_snapshots()
+    last_at: float | None = None
+    last_key: str | None = None
+    if bundles:
+        last_at = bundles[0]["created_at"] or None
+        last_key = bundles[0]["key"]
+    elif _LAST_SNAPSHOT_BUNDLE_AT is not None:
+        last_at = _LAST_SNAPSHOT_BUNDLE_AT
+        last_key = _LAST_SNAPSHOT_BUNDLE_KEY
+
+    age = (_time.time() - last_at) if last_at else None
+    oldest_at = bundles[-1]["created_at"] if bundles else None
+
+    return {
+        "last_successful_snapshot_at": last_at,
+        "age_seconds": age,
+        "retained_count": len(bundles),
+        "oldest_retained_at": oldest_at,
+        "snapshot_key": last_key,
+    }

@@ -63,4 +63,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.15.11",
+    # BUC-1555b: moto[s3] mocks boto3 in tests/test_s3_restore.py so we can
+    # exercise the full snapshot → wipe → restore round-trip without real AWS.
+    "moto[s3]>=5.0.0",
 ]
