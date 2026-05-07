@@ -467,8 +467,24 @@ def get_job(job_id: str) -> Job | None:
     return _row_to_job(row) if row is not None else None
 
 
+# Wall-clock ceiling for an "active" row.  Anything claiming to be
+# queued/running but whose started_at is older than this is almost
+# certainly a phantom — the worker died (SIGKILL, OOM, container
+# restart) without flushing terminal state.  4h matches the embed
+# subprocess timeout in routers/index.py; nothing legitimate runs
+# longer than that.
+_PHANTOM_AGE_SEC = 4 * 60 * 60
+
+
 def find_active_for_repo(repo_slug: str) -> Job | None:
-    """Return the most recent active (queued|running) job for a slug."""
+    """Return the most recent active (queued|running) job for a slug.
+
+    Auto-expires phantom rows whose started_at is older than the wall-clock
+    ceiling — these are jobs whose worker died without flushing terminal
+    state, so reporting them as "still running" makes /index POST 409 on
+    every retry forever.  We mark them ``failed`` with a clear error so
+    they appear in the job history but no longer block new work.
+    """
     conn = _require_conn()
     row = conn.execute(
         """
@@ -479,7 +495,30 @@ def find_active_for_repo(repo_slug: str) -> Job | None:
         """,
         (repo_slug,),
     ).fetchone()
-    return _row_to_job(row) if row is not None else None
+    if row is None:
+        return None
+
+    job = _row_to_job(row)
+    age_sec = time.time() - (job.started_at or 0)
+    if age_sec > _PHANTOM_AGE_SEC:
+        # Auto-expire.  Use the same UPDATE shape as mark_failed but
+        # inline so we can run it during a read path without callers
+        # caring.  The next call to find_active_for_repo for this slug
+        # will return None.
+        with _lock:
+            conn.execute(
+                """
+                UPDATE jobs SET
+                  status = 'failed',
+                  error = COALESCE(error, 'phantom — worker died without flushing'),
+                  updated_at = ?,
+                  finished_at = COALESCE(finished_at, ?)
+                WHERE job_id = ? AND status IN ('queued','running')
+                """,
+                (time.time(), time.time(), job.job_id),
+            )
+        return None
+    return job
 
 
 def list_jobs(
