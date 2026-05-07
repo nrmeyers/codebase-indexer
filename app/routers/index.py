@@ -103,7 +103,7 @@ def _parse_embed_progress(job_id: str) -> tuple[int, int, int] | None:
     visibility into the embed pass without changing the subprocess
     contract.
     """
-    log_path = Path(f"/tmp/cis_embed_{job_id}.log")
+    log_path = Path(f"/tmp/cis_embed_{job_id}-embed.log")
     if not log_path.exists():
         return None
     try:
