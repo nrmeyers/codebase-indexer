@@ -122,11 +122,56 @@ def _make_client():  # type: ignore[return]
         return None
 
 
+def _is_in_sync(local_path: Path, s3_obj: dict, client, bucket: str) -> bool:
+    """Decide whether the local file matches the S3 object.
+
+    Uses object size + a custom ``x-amz-meta-content-md5`` header that
+    snapshot_indexes() writes alongside every PUT.  Plain ETag comparison
+    BREAKS for multipart uploads (any file > 8 MB by default): boto3's
+    TransferManager auto-multiparts those, and the resulting ETag is
+    ``MD5(MD5(part1) + … + MD5(partN))-N`` — never equal to the local
+    file's plain MD5.  Without this fix, every startup re-downloads
+    every file even when nothing changed.
+
+    Falls back to size-only comparison when the metadata header is
+    missing (e.g. files uploaded by an older version of this code).
+    Size+presence is good enough — once a snapshot_indexes() pass runs,
+    the metadata gets stamped on the next push and we move to MD5.
+    """
+    s3_size = int(s3_obj.get("Size", 0))
+    if local_path.stat().st_size != s3_size:
+        return False  # size mismatch = definitely changed
+
+    s3_etag = s3_obj.get("ETag", "").strip('"')
+    is_multipart = "-" in s3_etag
+
+    if not is_multipart:
+        # Single-part upload — ETag IS the plain MD5.  Cheap path.
+        import hashlib
+        local_md5 = hashlib.md5(local_path.read_bytes()).hexdigest()
+        return local_md5 == s3_etag
+
+    # Multipart — fetch the object's user metadata for our content-md5
+    try:
+        head = client.head_object(Bucket=bucket, Key=s3_obj["Key"])
+    except Exception:
+        # HEAD failed — fall back to size match (we already know that's true)
+        return True
+    s3_content_md5 = head.get("Metadata", {}).get("content-md5")
+    if not s3_content_md5:
+        # Old upload without our stamp — accept size match as good enough
+        return True
+    import hashlib
+    local_md5 = hashlib.md5(local_path.read_bytes()).hexdigest()
+    return local_md5 == s3_content_md5
+
+
 def restore_indexes(db_dir: str | Path) -> int:
     """Pull index files from S3 into *db_dir* that are absent or stale locally.
 
-    Compares S3 ETag (MD5 of the object) against the local file's MD5 digest
-    to detect staleness.  Files already up-to-date are skipped.
+    Uses size + custom content-md5 metadata header for staleness detection
+    (see ``_is_in_sync``) so multipart-uploaded files don't get re-downloaded
+    every startup despite being byte-identical.
 
     Args:
         db_dir: Local directory that holds per-repo ``.db`` / ``.duck`` files.
@@ -153,21 +198,17 @@ def restore_indexes(db_dir: str | Path) -> int:
                 if not any(key.endswith(ext) for ext in _SYNC_EXTENSIONS):
                     continue
 
-                filename = key[len(prefix) + 1:]  # strip "prefix/" to get basename
+                filename = key[len(prefix) + 1:]
                 if "/" in filename:
-                    # Unexpected sub-path — skip for safety
-                    continue
+                    continue  # unexpected sub-path
 
                 local = db_path / filename
-                s3_etag = obj.get("ETag", "").strip('"')
 
+                if local.exists() and _is_in_sync(local, obj, client, bucket):
+                    logger.debug("s3_store: %s already up-to-date, skipping", filename)
+                    continue
                 if local.exists():
-                    import hashlib
-                    md5 = hashlib.md5(local.read_bytes()).hexdigest()
-                    if md5 == s3_etag:
-                        logger.debug("s3_store: %s already up-to-date, skipping", filename)
-                        continue
-                    logger.info("s3_store: %s stale (local=%s s3=%s) — refreshing", filename, md5, s3_etag)
+                    logger.info("s3_store: %s out of sync — refreshing", filename)
                 else:
                     logger.info("s3_store: %s absent locally — downloading", filename)
 
@@ -213,14 +254,20 @@ def snapshot_indexes(db_dir: str | Path) -> int:
         logger.info("s3_store: db_dir %s does not exist — nothing to snapshot", db_dir)
         return 0
 
-    # Collect current S3 ETags for fast diff checks
-    s3_etags: dict[str, str] = {}
+    # Index existing S3 objects so we can skip uploads of unchanged files.
+    # Read the user-metadata 'content-md5' we stamp on every PUT (see below).
+    # Plain ETag comparison breaks on multipart uploads (the "-N" suffix
+    # variant); we fall back to size-only when the metadata is absent.
+    s3_state: dict[str, dict] = {}  # key → { size, content_md5 (if known) }
     try:
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
             for obj in page.get("Contents", []):
-                key: str = obj["Key"]
-                s3_etags[key] = obj.get("ETag", "").strip('"')
+                s3_state[obj["Key"]] = {
+                    "size": int(obj.get("Size", 0)),
+                    "etag": obj.get("ETag", "").strip('"'),
+                    # content_md5 lazy-fetched below only when we need it
+                }
     except Exception as exc:
         logger.warning(
             "s3_store.snapshot_indexes: could not list existing objects (%s) — will upload all files",
@@ -238,12 +285,36 @@ def snapshot_indexes(db_dir: str | Path) -> int:
 
         key = f"{prefix}/{local.name}"
         local_md5 = hashlib.md5(local.read_bytes()).hexdigest()
-        if s3_etags.get(key) == local_md5:
+        local_size = local.stat().st_size
+
+        # Decide whether to skip the upload.  Cheap path: size mismatch =>
+        # always upload.  Otherwise compare ETag (single-part) or fetched
+        # metadata (multipart).
+        existing = s3_state.get(key)
+        skip = False
+        if existing and existing["size"] == local_size:
+            etag = existing["etag"]
+            if "-" not in etag and etag == local_md5:
+                skip = True
+            else:
+                # multipart — need a HEAD to read user metadata
+                try:
+                    head = client.head_object(Bucket=bucket, Key=key)
+                    if head.get("Metadata", {}).get("content-md5") == local_md5:
+                        skip = True
+                except Exception:
+                    pass  # treat as changed; safe to re-upload
+        if skip:
             logger.debug("s3_store: %s unchanged — skipping upload", local.name)
             continue
 
         try:
-            client.upload_file(str(local), bucket, key)
+            # Stamp the plain MD5 in user metadata so the next restore can
+            # detect identity even when boto3 multiparts the upload.
+            client.upload_file(
+                str(local), bucket, key,
+                ExtraArgs={"Metadata": {"content-md5": local_md5}},
+            )
             uploaded += 1
             logger.info("s3_store: uploaded %s → s3://%s/%s", local.name, bucket, key)
         except Exception as exc:
