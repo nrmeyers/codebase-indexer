@@ -407,6 +407,28 @@ class FileListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# /search/lexical (Tantivy BM25 — Phase 1.1)
+# ---------------------------------------------------------------------------
+
+
+class LexicalHit(BaseModel):
+    """One hit from ``GET /search/lexical`` — Tantivy BM25 ranked match."""
+
+    symbol_qname: str
+    file_path: str
+    symbol_kind: str
+    score: float
+    start_line: int = 0
+    end_line: int = 0
+
+
+class LexicalSearchResponse(BaseModel):
+    """Response for ``GET /search/lexical`` — top-k lexical hits."""
+
+    results: list[LexicalHit]
+
+
+# ---------------------------------------------------------------------------
 # /search/types
 # ---------------------------------------------------------------------------
 

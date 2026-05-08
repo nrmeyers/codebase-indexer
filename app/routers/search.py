@@ -102,7 +102,7 @@ def _rewrite_descriptive_query(raw: str) -> tuple[str, str]:
         return raw, "skip-overstrip"
     return " ".join(kept), "applied"
 
-from ..config import settings
+from ..config import settings, slugify_repo
 from ..models import (
     CentralityResponse,
     CentralityResult,
@@ -111,6 +111,8 @@ from ..models import (
     GraphEdge,
     GraphNode,
     GraphOverviewResponse,
+    LexicalHit,
+    LexicalSearchResponse,
     NodeTypeStat,
     NodeTypesResponse,
     SemanticResult,
@@ -118,6 +120,7 @@ from ..models import (
     StructuralSearchResponse,
     SymbolResponse,
 )
+from ..services.tantivy_index import TantivyIndex
 
 router = APIRouter(prefix="/search")
 
@@ -974,6 +977,103 @@ def _symbol_lookup_impl(*, fqn: str, repo: str | None) -> SymbolResponse:
 
 
 # ---------------------------------------------------------------------------
+# GET /search/lexical — Tantivy BM25 (Phase 1.1)
+# ---------------------------------------------------------------------------
+
+
+def _open_tantivy_for_repo(repo: str | None) -> TantivyIndex | None:
+    """Open the Tantivy index for ``repo``; return ``None`` if unavailable.
+
+    The index lives at ``<LADYBUG_DB_DIR>/<slug>.tantivy/``.  ``None``
+    return paths cause callers to skip the lexical arm — never to error,
+    so an un-migrated repo degrades gracefully to the existing search
+    surfaces.
+    """
+    if not repo:
+        return None
+    try:
+        idx = TantivyIndex(settings.LADYBUG_DB_DIR, slugify_repo(repo))
+        if idx._unavailable:  # type: ignore[attr-defined]
+            return None
+        return idx
+    except Exception:
+        return None
+
+
+@router.get("/lexical", response_model=LexicalSearchResponse)
+def lexical_search(
+    q: str = Query(description="Free-text query; ranked by Tantivy BM25"),
+    repo: str | None = Query(
+        default=None,
+        description="Repo slug to scope the search to. Required for cross-repo isolation.",
+    ),
+    limit: int = Query(default=20, ge=1, le=200),
+) -> LexicalSearchResponse:
+    """BM25 lexical search over the Tantivy index — Phase 1.1.
+
+    Returns ranked hits with ``score`` ordered descending.  Catches what
+    the dense semantic arm misses: rare identifiers, exact substrings,
+    error codes, file-path fragments.
+
+    Best-effort: a missing / unavailable index returns ``results: []``
+    rather than 503 so the orchestrator's hybrid retrieval merge stays
+    resilient when one repo hasn't been migrated yet.
+
+    Args:
+        q: Free-text query; tokenised and matched against ``content``,
+            ``symbol_qname``, and ``file_path`` Tantivy fields.
+        repo: Required for safe multi-tenant isolation — without it, a
+            query against repo A could match repo B's documents (every
+            repo's index is on disk under the same data dir).
+        limit: Max ranked results to return (1–200; default 20).
+
+    Returns:
+        LexicalSearchResponse: Empty list when no index, no query tokens,
+        or no matches — never raises.
+    """
+    _t0 = time.monotonic()
+    _status_code = 200
+    try:
+        if not q.strip():
+            return LexicalSearchResponse(results=[])
+
+        idx = _open_tantivy_for_repo(repo)
+        if idx is None:
+            return LexicalSearchResponse(results=[])
+
+        try:
+            hits = idx.search(q, k=limit, repo=slugify_repo(repo) if repo else None)
+        finally:
+            idx.close()
+
+        return LexicalSearchResponse(
+            results=[
+                LexicalHit(
+                    symbol_qname=h["symbol_qname"],
+                    file_path=h["file_path"],
+                    symbol_kind=h["symbol_kind"],
+                    score=h["score"],
+                    start_line=h["start_line"],
+                    end_line=h["end_line"],
+                )
+                for h in hits
+            ]
+        )
+    except Exception as exc:
+        # Best-effort: never fail the lexical surface — return empty.
+        logger.debug("lexical_search swallowed error: %s", exc)
+        _status_code = 200
+        return LexicalSearchResponse(results=[])
+    finally:
+        _metrics.record_search(
+            "lexical",
+            reranked=False,
+            duration_seconds=time.monotonic() - _t0,
+            status_code=_status_code,
+        )
+
+
+# ---------------------------------------------------------------------------
 # GET /search/files
 # ---------------------------------------------------------------------------
 
@@ -1011,6 +1111,55 @@ def list_files(
     Returns:
         FileListResponse: matching files + total match count (post-filter).
     """
+    # Phase 1.1 — when a non-empty filter is supplied, try the Tantivy
+    # ``file_path`` field first.  Tantivy returns BM25-ranked path hits
+    # that are dramatically more accurate than the case-insensitive
+    # ``CONTAINS`` substring scan when the filter is multi-token (e.g.
+    # ``github-app-client``).  We fall back to the existing Cypher
+    # behaviour on any failure (no index, query parse error, etc.) so the
+    # contract is preserved bit-for-bit.
+    needle = filter.strip()
+    if needle and repo:
+        try:
+            idx = _open_tantivy_for_repo(repo)
+            if idx is not None:
+                try:
+                    hits = idx.search(
+                        needle,
+                        k=min(int(limit) + int(offset), 5000),
+                        repo=slugify_repo(repo),
+                    )
+                finally:
+                    idx.close()
+                if hits:
+                    # Optional extension post-filter (mirrors Cypher path).
+                    ext_norm = extension.strip().lower()
+                    if ext_norm and not ext_norm.startswith("."):
+                        ext_norm = "." + ext_norm
+                    seen: set[str] = set()
+                    files_acc: list[FileEntry] = []
+                    for h in hits:
+                        fp = h["file_path"]
+                        if not fp or fp in seen:
+                            continue
+                        if ext_norm and not fp.lower().endswith(ext_norm):
+                            continue
+                        seen.add(fp)
+                        base = fp.rsplit("/", 1)[-1]
+                        ext_part = ""
+                        if "." in base:
+                            ext_part = "." + base.rsplit(".", 1)[-1]
+                        files_acc.append(
+                            FileEntry(path=fp, name=base, extension=ext_part)
+                        )
+                    if files_acc:
+                        total = len(files_acc)
+                        page = files_acc[int(offset) : int(offset) + int(limit)]
+                        return FileListResponse(files=page, total=total)
+        except Exception:
+            # Non-fatal — fall through to the Cypher implementation.
+            pass
+
     # Normalise extension — accept both '.ts' and 'ts'.
     ext = extension.strip().lower()
     if ext and not ext.startswith("."):

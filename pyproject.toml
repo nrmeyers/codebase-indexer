@@ -42,6 +42,11 @@ dependencies = [
     "boto3>=1.34.0",
     "prometheus-client>=0.20",
     "prometheus-fastapi-instrumentator>=7.0",
+    # Phase 1.1 — Tantivy BM25 lexical arm. Apache 2.0; embedded full-text
+    # index per repo at .cgr/repos/<slug>.tantivy/. Replaces the in-memory
+    # bm25s rebuild on every search and the substring-only /search/files
+    # filter with a persisted, ranked sparse-retrieval index.
+    "tantivy>=0.24.0",
 ]
 
 [build-system]
