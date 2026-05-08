@@ -188,6 +188,19 @@ class Settings(BaseSettings):
     SAGEMAKER_EMBED_REGION: str = "us-east-1"
     SAGEMAKER_EMBED_BATCH_SIZE: int = 32          # 16–64 per Forge contract
 
+    # --- Phase 1.3: code-specific embedding A/B path ---
+    # Default 'e5-base-v2' preserves the pre-Phase-1.3 behaviour exactly.
+    # Set to 'bge-code-v1' to write to the parallel embedding_v2 column and
+    # have search read from it (with graceful fallback to embedding when v2
+    # is NULL during partial migration).  See app/services/embedder.py.
+    # Read directly by app.services.embedder (no pydantic dep) — the values
+    # below are documentation / IDE discoverability only.
+    EMBEDDING_MODEL_ACTIVE: str = "e5-base-v2"     # 'e5-base-v2' | 'bge-code-v1'
+    SAGEMAKER_BGE_CODE_URL: str = ""               # full invocation URL (preferred)
+    SAGEMAKER_BGE_CODE_ENDPOINT: str = ""          # fallback if URL not set
+    SAGEMAKER_BGE_CODE_REGION: str = "us-east-1"
+    SAGEMAKER_BGE_CODE_BATCH_SIZE: int = 16
+
 
 # Module-level singleton — import this rather than re-instantiating Settings.
 settings = Settings()

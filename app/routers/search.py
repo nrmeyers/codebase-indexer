@@ -528,6 +528,13 @@ def _semantic_search_impl(
             detail=f"DuckDB vector store unavailable: {exc}",
         ) from exc
 
+    # Phase 1.3 — code-specific embedding A/B path.  When the operator flips
+    # EMBEDDING_MODEL_ACTIVE=bge-code-v1 we read the parallel embedding_v2
+    # column.  search_similar_v2 falls back to the legacy `embedding` column
+    # on rows where v2 is still NULL during a partial migration.
+    from ..services.embedder import is_v2_active as _is_v2_active
+    from ..services.embedder import search_similar_v2 as _search_similar_v2  # noqa: PLC0415
+
     # Over-fetch to push past degenerate anonymous/fixture embeddings.
     # When rerank=true, we additionally guarantee at least 50 post-noise
     # candidates reach the reranker (Nomic's eval sweet spot for
@@ -567,7 +574,10 @@ def _semantic_search_impl(
         query_embedding = _embed_query(embed_query_text)
         vec_conn = open_or_create(vec_path)
         try:
-            raw = search_similar(vec_conn, query_embedding, k=fetch_k)
+            if _is_v2_active():
+                raw = _search_similar_v2(vec_conn, query_embedding, k=fetch_k)
+            else:
+                raw = search_similar(vec_conn, query_embedding, k=fetch_k)
 
             filtered = [r for r in raw if not _is_noise(r.qualified_name)]
 
