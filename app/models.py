@@ -619,6 +619,12 @@ class GitHubStatusResponse(BaseModel):
         connected: True iff a token is present AND GitHub accepted it.
         token_source: Where the token came from (``settings``, ``env``,
             or ``none``).  Helps developers diagnose env-var vs .env issues.
+        token_type: Detected GitHub credential family — ``pat`` (classic or
+            fine-grained PAT), ``github_app`` (App installation token,
+            ``ghs_*``), ``unknown`` (token present but unrecognised prefix),
+            or ``none`` (no token configured).  Drives endpoint routing
+            (``/user/repos`` vs ``/installation/repositories``) and the
+            recovery hint shown to operators on 401.
         user: Authenticated GitHub login, or None when unauthenticated.
         scopes: OAuth scopes the token carries (best-effort — GitHub
             exposes these on the ``X-OAuth-Scopes`` header).
@@ -628,6 +634,7 @@ class GitHubStatusResponse(BaseModel):
 
     connected: bool
     token_source: Literal["settings", "env", "none"]
+    token_type: Literal["pat", "github_app", "unknown", "none"] = "none"
     user: str | None
     scopes: list[str]
     rate_limit: GitHubRateLimit | None

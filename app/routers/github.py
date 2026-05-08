@@ -23,6 +23,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
@@ -171,6 +172,37 @@ def _token_source() -> str:
     return "none"
 
 
+def _token_type(token: str | None) -> Literal["pat", "github_app", "unknown", "none"]:
+    """Classify a GitHub token by its prefix.
+
+    GitHub's credential families have stable, documented prefixes that map
+    to distinct REST API capability sets.  In particular, App installation
+    tokens (``ghs_*``) cannot use ``/user/*`` endpoints — they must hit
+    ``/installation/repositories``.  Detecting the family up-front lets the
+    router pick the correct endpoint instead of crashing into a 403
+    "Resource not accessible by integration" at runtime.
+
+    Args:
+        token: Raw token string (``ghp_…``, ``ghs_…``, ``github_pat_…``)
+            or None when no token is configured.
+
+    Returns:
+        ``"pat"`` for classic / OAuth / fine-grained PATs, ``"github_app"``
+        for App installation tokens, ``"unknown"`` when the prefix isn't
+        recognised (still attempt the call, but warn on failure), or
+        ``"none"`` when no token is set at all.
+    """
+    if not token:
+        return "none"
+    # Classic PAT, OAuth user-to-server, fine-grained PAT.
+    if token.startswith(("ghp_", "gho_", "github_pat_")):
+        return "pat"
+    # App installation token (1h TTL, server-to-server, org-scoped).
+    if token.startswith("ghs_"):
+        return "github_app"
+    return "unknown"
+
+
 async def _gh_get(
     client: httpx.AsyncClient, path: str, params: dict[str, str | int] | None = None
 ) -> list[dict] | dict:
@@ -201,7 +233,18 @@ async def _gh_get(
     }
     r = await client.get(f"{_GITHUB_API}{path}", headers=headers, params=params)
     if r.status_code == 401:
-        raise HTTPException(status_code=401, detail="GitHub rejected the token.")
+        if _token_type(token) == "github_app":
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "GitHub rejected the token. Mint a fresh App installation "
+                    "token (1h TTL) or check the App's installation scope."
+                ),
+            )
+        raise HTTPException(
+            status_code=401,
+            detail="GitHub rejected the token. Regenerate the PAT or refresh its scopes.",
+        )
     if r.status_code >= 400:
         raise HTTPException(
             status_code=502,
@@ -230,11 +273,13 @@ async def github_status() -> GitHubStatusResponse:
     """
     source = _token_source()
     token = _github_token()
+    ttype = _token_type(token)
 
     if not token:
         return GitHubStatusResponse(
             connected=False,
             token_source="none",
+            token_type="none",
             user=None,
             scopes=[],
             rate_limit=None,
@@ -247,35 +292,59 @@ async def github_status() -> GitHubStatusResponse:
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
+    # Pick a probe endpoint that the credential family is allowed to hit.
+    # App installation tokens cannot call /user (returns 403 "Resource not
+    # accessible by integration"); /installation/repositories?per_page=1 is
+    # the documented analogue and returns the App's accessible repo set.
+    is_app = ttype == "github_app"
+    probe_path = "/installation/repositories" if is_app else "/user"
+    probe_params = {"per_page": 1} if is_app else None
+
+    rejection_hint = (
+        "Mint a fresh App installation token (1h TTL) or check the App's installation scope."
+        if is_app
+        else "Regenerate the PAT or refresh its scopes."
+    )
+
     # Best-effort probe.  Both calls are wrapped so a network hiccup doesn't
     # turn the readiness endpoint into a 500 — the UI needs a clean response
     # to decide whether to show "connected" or "tap to retry".
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            user_resp = await client.get(f"{_GITHUB_API}/user", headers=headers)
-            if user_resp.status_code == 401:
+            probe_resp = await client.get(
+                f"{_GITHUB_API}{probe_path}", headers=headers, params=probe_params
+            )
+            if probe_resp.status_code == 401 or (is_app and probe_resp.status_code == 403):
                 return GitHubStatusResponse(
                     connected=False,
                     token_source=source,  # type: ignore[arg-type]
+                    token_type=ttype,
                     user=None,
                     scopes=[],
                     rate_limit=None,
-                    message="GitHub rejected the token (401). Regenerate the PAT or refresh its scopes.",
+                    message=f"GitHub rejected the token ({probe_resp.status_code}). {rejection_hint}",
                 )
-            if user_resp.status_code >= 400:
+            if probe_resp.status_code >= 400:
                 return GitHubStatusResponse(
                     connected=False,
                     token_source=source,  # type: ignore[arg-type]
+                    token_type=ttype,
                     user=None,
                     scopes=[],
                     rate_limit=None,
-                    message=f"GitHub API returned {user_resp.status_code}. Check connectivity.",
+                    message=f"GitHub API returned {probe_resp.status_code}. Check connectivity.",
                 )
 
-            user_body = user_resp.json()
-            login = user_body.get("login")
-            scopes_header = user_resp.headers.get("X-OAuth-Scopes") or ""
-            scopes = [s.strip() for s in scopes_header.split(",") if s.strip()]
+            # Only PATs expose a user identity + OAuth scopes.  App
+            # installation tokens authenticate as the App, not a person, so
+            # the UI just shows "Connected via GitHub App".
+            login: str | None = None
+            scopes: list[str] = []
+            if not is_app:
+                user_body = probe_resp.json()
+                login = user_body.get("login") if isinstance(user_body, dict) else None
+                scopes_header = probe_resp.headers.get("X-OAuth-Scopes") or ""
+                scopes = [s.strip() for s in scopes_header.split(",") if s.strip()]
 
             # Pull the current rate-limit snapshot for the primary (core) pool.
             rl_resp = await client.get(f"{_GITHUB_API}/rate_limit", headers=headers)
@@ -288,13 +357,19 @@ async def github_status() -> GitHubStatusResponse:
                     reset_at=float(core.get("reset")) if core.get("reset") else None,
                 )
 
-            msg = f"Connected as @{login}" if login else "Connected"
+            if is_app:
+                msg = "Connected via GitHub App"
+            elif login:
+                msg = f"Connected as @{login}"
+            else:
+                msg = "Connected"
             if rl is not None:
                 msg += f" · {rl.remaining}/{rl.limit} rate-limit"
 
             return GitHubStatusResponse(
                 connected=True,
                 token_source=source,  # type: ignore[arg-type]
+                token_type=ttype,
                 user=login,
                 scopes=scopes,
                 rate_limit=rl,
@@ -304,6 +379,7 @@ async def github_status() -> GitHubStatusResponse:
         return GitHubStatusResponse(
             connected=False,
             token_source=source,  # type: ignore[arg-type]
+            token_type=ttype,
             user=None,
             scopes=[],
             rate_limit=None,
@@ -390,13 +466,37 @@ async def list_repos(
     if limit > 500:
         limit = 500
 
+    token = _github_token()
+    ttype = _token_type(token)
+
     async with httpx.AsyncClient(timeout=15.0) as client:
-        # Personal repos — include private ones the token has access to.
-        user_repos = await _gh_get(
-            client,
-            "/user/repos",
-            params={"per_page": 100, "sort": "updated", "affiliation": "owner,collaborator,organization_member"},
-        )
+        if ttype == "github_app":
+            # App installation tokens (``ghs_*``) cannot use /user/repos —
+            # GitHub returns 403 "Resource not accessible by integration".
+            # The documented equivalent is /installation/repositories,
+            # which returns ``{ total_count, repositories: [...] }`` where
+            # each repo has the same shape as a /user/repos entry.
+            payload = await _gh_get(
+                client,
+                "/installation/repositories",
+                params={"per_page": 100},
+            )
+            if isinstance(payload, dict):
+                user_repos = payload.get("repositories") or []
+            else:
+                user_repos = payload
+        else:
+            # PAT (or unknown — best-effort) — include private repos the
+            # token has access to across owner / collaborator / org-member.
+            user_repos = await _gh_get(
+                client,
+                "/user/repos",
+                params={
+                    "per_page": 100,
+                    "sort": "updated",
+                    "affiliation": "owner,collaborator,organization_member",
+                },
+            )
 
     raw = list(user_repos) if isinstance(user_repos, list) else []
 
