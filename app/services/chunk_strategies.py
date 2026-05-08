@@ -29,8 +29,9 @@ the embed subprocess) are queued for Phase 1.2b — see PR description.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -225,6 +226,91 @@ def estimate_haiku_call_cost_usd(input_tokens: int, output_tokens: int) -> float
         input_tokens * HAIKU_INPUT_USD_PER_TOKEN
         + output_tokens * HAIKU_OUTPUT_USD_PER_TOKEN
     )
+
+
+# ---------------------------------------------------------------------------
+# Module metadata extractor (Phase 1.2b — Python __init__.py only)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ModuleMetadata:
+    """Module-surface metadata extracted from a Python source file.
+
+    Used by the embed driver to decide whether (and how) to emit a
+    :class:`ModuleChunk` for a given ``__init__.py``.
+
+    Attributes:
+        docstring: The module-level docstring, or empty string.
+        public_symbols: ``__all__`` if defined, else top-level
+            non-underscore Class/FunctionDef names.  May be empty for
+            an empty / re-export-free package.
+    """
+
+    docstring: str
+    public_symbols: list[str] = field(default_factory=list)
+
+
+def extract_module_metadata(file_path: str, content: str) -> Optional[ModuleMetadata]:
+    """Parse a Python source file and return its module-surface metadata.
+
+    Returns ``None`` when:
+      * ``file_path`` is not a Python file (extension not ``.py``)
+      * the source fails to parse (``SyntaxError`` or any other
+        :class:`ast` parse error)
+
+    The parser is the stdlib :mod:`ast` — no extra dependency.  Only
+    top-level (module-body) ``Assign`` / ``ClassDef`` / ``FunctionDef``
+    nodes are considered.  This deliberately ignores re-exports
+    declared inside conditionals or function bodies; capturing those
+    would require import-time evaluation, which the indexer never does.
+
+    Args:
+        file_path: Path to the source file (used only for the extension
+            check; the file is *not* read from disk).
+        content: Already-read source text.
+
+    Returns:
+        :class:`ModuleMetadata` with the docstring + public-symbol list,
+        or ``None`` if the file is not Python or cannot be parsed.
+    """
+    if not file_path.endswith(".py"):
+        return None
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return None
+
+    docstring = ast.get_docstring(tree) or ""
+
+    # Look for an explicit ``__all__ = [...]`` / ``__all__ = (...)`` at
+    # module scope.  When present, this is the authoritative export list.
+    all_list: Optional[list[str]] = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "__all__":
+                if isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
+                    names: list[str] = []
+                    for elt in node.value.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            names.append(elt.value)
+                    all_list = names
+                break
+        if all_list is not None:
+            break
+
+    if all_list is not None:
+        return ModuleMetadata(docstring=docstring, public_symbols=all_list)
+
+    # Fallback: collect top-level non-underscore Class / FunctionDef names.
+    public: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                public.append(node.name)
+    return ModuleMetadata(docstring=docstring, public_symbols=public)
 
 
 def make_summary_qname(repo: str, module_path: str, kind: str) -> str:

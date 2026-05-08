@@ -1414,6 +1414,285 @@ if _pending_batches:
 
 print(f"Class summaries: emitted={{_class_emitted}} skipped_unchanged={{_class_skipped_unchanged}} filtered={{_class_skipped_filtered}}", flush=True)
 
+# ------------------------------------------------------------------
+# Phase 1.2b — Module summaries (Python __init__.py, deterministic).
+#
+# Stdlib ``ast``-based: parse each __init__.py we have a Module node
+# for, lift the module docstring and ``__all__`` (or top-level public
+# names) and build a ModuleChunk via build_module_chunk_input.
+# Deterministic — no LLM call, no cost.
+# ------------------------------------------------------------------
+import ast as _ast
+
+def _extract_module_metadata(_path: str, _content: str):
+    if not _path.endswith(".py"):
+        return None
+    try:
+        _tree = _ast.parse(_content)
+    except (SyntaxError, ValueError):
+        return None
+    _doc = _ast.get_docstring(_tree) or ""
+    _all = None
+    for _node in _tree.body:
+        if isinstance(_node, _ast.Assign):
+            for _t in _node.targets:
+                if isinstance(_t, _ast.Name) and _t.id == "__all__":
+                    if isinstance(_node.value, (_ast.List, _ast.Tuple, _ast.Set)):
+                        _names = []
+                        for _elt in _node.value.elts:
+                            if isinstance(_elt, _ast.Constant) and isinstance(_elt.value, str):
+                                _names.append(_elt.value)
+                        _all = _names
+                    break
+            if _all is not None:
+                break
+    if _all is None:
+        _all = []
+        for _node in _tree.body:
+            if isinstance(_node, (_ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef)):
+                if not _node.name.startswith("_"):
+                    _all.append(_node.name)
+    return (_doc, _all)
+
+
+_module_db = lb.Database({repr(repo_db_path)}, read_only=True)
+_module_conn = lb.Connection(_module_db)
+_module_cypher = '''
+MATCH (m:Module)
+RETURN m.qualified_name AS qualified_name, m.path AS rel_path
+'''
+_module_result = _module_conn.execute(_module_cypher)
+_module_cols = _module_result.get_column_names()
+_module_rows = []
+while _module_result.has_next():
+    _module_rows.append(dict(zip(_module_cols, _module_result.get_next())))
+_module_conn.close()
+del _module_conn, _module_db
+
+_module_emitted = 0
+_module_skipped_unchanged = 0
+_module_skipped_filtered = 0
+
+for _row in _module_rows:
+    _rel = _row.get("rel_path") or ""
+    _qname = _row.get("qualified_name") or ""
+    if not _rel or not _qname:
+        continue
+    if not _rel.endswith("__init__.py"):
+        continue
+    if _should_skip_embed(_rel):
+        _module_skipped_filtered += 1
+        continue
+    _abs = _rel if Path(_rel).is_absolute() else (
+        str(Path(_root_path) / _rel) if _root_path else _rel
+    )
+    try:
+        _content = Path(_abs).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        continue
+    _meta = _extract_module_metadata(_rel, _content)
+    if _meta is None:
+        continue
+    _doc, _public = _meta
+
+    _lines = [f"# Module: {{_qname}}"]
+    if _rel:
+        _lines.append(f"# Path: {{_rel}}")
+    if _public:
+        _lines.append(f"# Public: {{', '.join(_public)}}")
+    _lines.append("# ---")
+    if _doc:
+        _lines.append(_doc)
+    _embed_text = "\\n".join(_lines).rstrip()
+
+    _summary_qname = f"{{_qname}}::Module::summary"
+    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
+    if _existing_hashes.get(_summary_qname) == _content_hash:
+        _module_skipped_unchanged += 1
+        continue
+    _batch_texts.append(_embed_text)
+    _batch_meta.append((_summary_qname, _abs, 0, 0, "Module", _content_hash))
+    _module_emitted += 1
+    if len(_batch_texts) >= _BATCH:
+        _pending_batches.append((_batch_texts, _batch_meta))
+        _batch_texts = []
+        _batch_meta = []
+        if len(_pending_batches) >= _CONCURRENCY:
+            _flush_pending(_pool)
+
+if _batch_texts:
+    _pending_batches.append((_batch_texts, _batch_meta))
+if _pending_batches:
+    _flush_pending(_pool)
+
+print(f"Module summaries: emitted={{_module_emitted}} skipped_unchanged={{_module_skipped_unchanged}} filtered={{_module_skipped_filtered}}", flush=True)
+
+
+# ------------------------------------------------------------------
+# Phase 1.2b — File summaries (LLM via Manifest, cost-capped).
+#
+# For every File/Module node we haven't already covered with a Module
+# summary above (i.e. non-__init__.py files), call Manifest Haiku to
+# generate a ~180-token summary of the file and embed it.  Hard cost
+# cap: $1.50 per repo (FILE_SUMMARY_REPO_COST_CAP_USD).  Each call has
+# its OWN 15s timeout and returns None on any failure — the File-summary
+# loop logs WARN and continues without that summary.
+#
+# This block degrades gracefully when MANIFEST_URL / MANIFEST_AGENT_KEY
+# are unset: summarize_file returns None on the very first call and the
+# loop skips every file — no spend, no error.
+# ------------------------------------------------------------------
+_file_db = lb.Database({repr(repo_db_path)}, read_only=True)
+_file_conn = lb.Connection(_file_db)
+_file_cypher = '''
+MATCH (m:Module)
+RETURN m.qualified_name AS qualified_name, m.path AS rel_path
+'''
+_file_result = _file_conn.execute(_file_cypher)
+_file_cols = _file_result.get_column_names()
+_file_rows = []
+while _file_result.has_next():
+    _file_rows.append(dict(zip(_file_cols, _file_result.get_next())))
+_file_conn.close()
+del _file_conn, _file_db
+
+# Inline the File summary helpers so the subprocess doesn't need to
+# import app.services (no sys.path setup in this driver).
+_FILE_SUMMARY_CONTENT_CAP = 8192
+_FILE_SUMMARY_COST_CAP = 1.50
+_HAIKU_IN_USD = 0.80 / 1_000_000
+_HAIKU_OUT_USD = 4.00 / 1_000_000
+_FILE_PROMPT_TEMPLATE = (
+    "Summarize this file in <=180 tokens. Focus on:\\n"
+    "- What it does (one sentence)\\n"
+    "- Top-level exports\\n"
+    "- What it imports / depends on (if relevant)\\n"
+    "- Any non-obvious gotchas\\n"
+    "Avoid vague platitudes and filler.\\n"
+    "File: {{path}}\\n"
+    "Content: {{content}}"
+)
+
+def _build_file_prompt(_p, _c):
+    _enc = _c.encode("utf-8", errors="replace")
+    if len(_enc) > _FILE_SUMMARY_CONTENT_CAP:
+        _enc = _enc[:_FILE_SUMMARY_CONTENT_CAP]
+        _c = _enc.decode("utf-8", errors="ignore")
+    return _FILE_PROMPT_TEMPLATE.format(path=_p, content=_c)
+
+
+def _summarize_file_via_manifest(_p, _c):
+    import httpx as _hx
+    _url = os.environ.get("MANIFEST_URL")
+    _key = os.environ.get("MANIFEST_AGENT_KEY")
+    if not _url or not _key:
+        return None
+    _prompt = _build_file_prompt(_p, _c)
+    _body = {{
+        "model": os.environ.get("MANIFEST_FILE_SUMMARY_MODEL") or "claude-haiku-4-5",
+        "messages": [{{"role": "user", "content": _prompt}}],
+        "max_tokens": 220,
+        "temperature": 0.2,
+    }}
+    try:
+        with _hx.Client(timeout=15.0) as _client:
+            _resp = _client.post(
+                _url.rstrip("/") + "/v1/chat/completions",
+                json=_body,
+                headers={{"Authorization": f"Bearer {{_key}}", "Content-Type": "application/json"}},
+            )
+        if _resp.status_code >= 400:
+            print(f"WARN manifest.summarize_http path={{_p}} status={{_resp.status_code}}", flush=True)
+            return None
+        _data = _resp.json()
+    except Exception as _exc:
+        print(f"WARN manifest.summarize_failed path={{_p}} err={{_exc}}", flush=True)
+        return None
+    try:
+        _summary = (_data["choices"][0]["message"]["content"] or "").strip()
+    except Exception:
+        return None
+    if not _summary:
+        return None
+    _u = _data.get("usage") or {{}}
+    return (_summary, int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
+
+
+_file_emitted = 0
+_file_skipped_filtered = 0
+_file_skipped_unchanged = 0
+_file_skipped_nosum = 0
+_cumulative_cost_usd = 0.0
+_cost_aborted = False
+
+for _row in _file_rows:
+    _rel = _row.get("rel_path") or ""
+    _qname = _row.get("qualified_name") or ""
+    if not _rel or not _qname:
+        continue
+    if _rel.endswith("__init__.py"):
+        # Already covered by the Module summary pass above.
+        continue
+    if _should_skip_embed(_rel):
+        _file_skipped_filtered += 1
+        continue
+    _abs = _rel if Path(_rel).is_absolute() else (
+        str(Path(_root_path) / _rel) if _root_path else _rel
+    )
+    try:
+        _content = Path(_abs).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        continue
+    if not _content.strip():
+        continue
+
+    # Estimate cost upper bound BEFORE the call (verified pricing): a
+    # single Haiku summary at ~600 in + 180 out is ≈ $0.0012.  Cap the
+    # estimate at the worst plausible case to stay under-budget.
+    _est_cost = 600 * _HAIKU_IN_USD + 220 * _HAIKU_OUT_USD
+    if _cumulative_cost_usd + _est_cost > _FILE_SUMMARY_COST_CAP:
+        if not _cost_aborted:
+            print(
+                f"WARN file_summary.cost_cap_exceeded "
+                f"spent={{_cumulative_cost_usd:.4f}} cap={{_FILE_SUMMARY_COST_CAP}} — aborting File-summary pass",
+                flush=True,
+            )
+            _cost_aborted = True
+        break
+
+    _result = _summarize_file_via_manifest(_rel, _content)
+    if _result is None:
+        _file_skipped_nosum += 1
+        continue
+    _summary, _in_tok, _out_tok = _result
+    _cumulative_cost_usd += _in_tok * _HAIKU_IN_USD + _out_tok * _HAIKU_OUT_USD
+
+    # The summary itself is the embed text (with a tiny header so
+    # ranking knows what kind of chunk this is).
+    _embed_text = f"# File: {{_qname}}\\n# Path: {{_rel}}\\n# ---\\n{{_summary}}"
+    _summary_qname = f"{{_qname}}::File::summary"
+    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
+    if _existing_hashes.get(_summary_qname) == _content_hash:
+        _file_skipped_unchanged += 1
+        continue
+    _batch_texts.append(_embed_text)
+    _batch_meta.append((_summary_qname, _abs, 0, 0, "File", _content_hash))
+    _file_emitted += 1
+    if len(_batch_texts) >= _BATCH:
+        _pending_batches.append((_batch_texts, _batch_meta))
+        _batch_texts = []
+        _batch_meta = []
+        if len(_pending_batches) >= _CONCURRENCY:
+            _flush_pending(_pool)
+
+if _batch_texts:
+    _pending_batches.append((_batch_texts, _batch_meta))
+if _pending_batches:
+    _flush_pending(_pool)
+
+print(f"File summaries: emitted={{_file_emitted}} skipped_unchanged={{_file_skipped_unchanged}} filtered={{_file_skipped_filtered}} no_summary={{_file_skipped_nosum}} cost_usd={{_cumulative_cost_usd:.4f}} aborted={{_cost_aborted}}", flush=True)
+
+
 _pool.shutdown(wait=True)
 _vec_conn.close()
 print(f"Embedded {{_embedded_count}} (skipped {{_skipped_unchanged}} unchanged, filtered {{_skipped_filtered}})")
