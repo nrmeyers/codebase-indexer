@@ -44,6 +44,7 @@ from .. import metrics as _metrics
 from ..services import jobs_store as _jobs_store
 from ..models import (
     DeleteIndexResponse,
+    DiffMetrics,
     IndexAccepted,
     IndexRequest,
     IndexStatus,
@@ -223,6 +224,11 @@ class _Job:
     embedded_count: int = 0
     embeddings_skipped_unchanged: int = 0
     embeddings_filtered_out: int = 0
+    # BUC-1574 (Phase 1.4) — diff-metrics instrumentation. Captured from the
+    # embed subprocess so /index/{job_id}/diff_metrics can report the
+    # incremental-embed audit shape without re-tailing the log.
+    embed_started_at: float | None = None
+    embed_finished_at: float | None = None
     cancelled: bool = False
     elapsed_sec: float = 0.0
     eta_sec: float | None = None
@@ -735,9 +741,19 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     _gc.collect()
 
     _phase_embed_start = time.monotonic()
+    job.embed_started_at = time.time()
     _blocking_embed(embed_job)  # raises on failure → job marked "failed"
     _metrics.record_index_phase("embed", time.monotonic() - _phase_embed_start)
     job.embedded_count = embed_job.embedded_count
+    # BUC-1574 (Phase 1.4) — lift incremental-embed totals so the
+    # /index/{job_id}/diff_metrics endpoint works after the job completes.
+    job.embeddings_skipped_unchanged = max(
+        job.embeddings_skipped_unchanged, embed_job.skipped_unchanged
+    )
+    job.embeddings_filtered_out = max(
+        job.embeddings_filtered_out, embed_job.skipped_filtered
+    )
+    job.embed_finished_at = embed_job.finished_at or time.time()
 
     # --- Plan J: PageRank centrality (best-effort, never fail the job) ---
     # Clear before write so qualified names from a previous indexing run don't
@@ -897,8 +913,13 @@ class _EmbedJob:
     status: Literal["running", "done", "failed"] = "running"
     progress_pct: float = 0.0
     embedded_count: int = 0
+    # BUC-1574 (Phase 1.4) — diff-metrics breakdown captured from the
+    # embed subprocess summary line.
+    skipped_unchanged: int = 0
+    skipped_filtered: int = 0
     error: str | None = None
     started_at: float = field(default_factory=time.time)
+    finished_at: float | None = None
 
 
 _embed_jobs: dict[str, _EmbedJob] = {}
@@ -1225,18 +1246,31 @@ print("EMBED_DONE")
         )
 
     # Parse the count out of stdout if possible — successful runs print
-    # "EMBED_DONE" and may emit "Embedded N" earlier.
+    # "EMBED_DONE" and may emit "Embedded N (skipped M unchanged, filtered K)"
+    # earlier. BUC-1574 (Phase 1.4) — also lift the unchanged/filtered
+    # totals onto the embed job so /index/{job_id}/diff_metrics can report
+    # them without re-tailing the log.
     try:
         with log_path.open() as f:
             for line in f:
                 if line.startswith("Embedded"):
                     try:
-                        job.embedded_count = int(line.split()[1])
+                        parts = line.split()
+                        # Format: "Embedded {N} (skipped {M} unchanged, filtered {K})"
+                        job.embedded_count = int(parts[1])
+                        # parts[3] = "{M}", parts[6] = "{K}" — "filtered K)"
+                        # so strip the trailing ')'.
+                        job.skipped_unchanged = int(parts[3])
+                        job.skipped_filtered = int(parts[6].rstrip(")"))
                     except (IndexError, ValueError):
+                        # Best-effort — don't fail the job over a log
+                        # parse glitch; live PROGRESS values still fall
+                        # through to diff_metrics.
                         pass
     except Exception:
         pass
 
+    job.finished_at = time.time()
     job.progress_pct = 100.0
     job.status = "done"
 
@@ -1520,6 +1554,68 @@ def get_index_status(job_id: str) -> IndexStatus:
         elapsed_sec=elapsed,
         eta_sec=job.eta_sec,
         error=job.error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /index/{job_id}/diff_metrics — incremental-embed audit shape
+# ---------------------------------------------------------------------------
+
+
+@router.get("/index/{job_id}/diff_metrics", response_model=DiffMetrics)
+def get_diff_metrics(job_id: str) -> DiffMetrics:
+    """Return the incremental-embed audit shape for a single index run.
+
+    BUC-1574 (Phase 1.4) — instrumentation around the content-hash skip
+    path in the embed subprocess.  For running jobs the values are the
+    running totals from the latest ``PROGRESS`` line; for completed jobs
+    they are the persisted final totals on the in-memory job record.
+
+    Args:
+        job_id: The identifier returned from ``POST /index``.
+
+    Returns:
+        DiffMetrics: ``total_symbols``, ``embedded``, ``skipped_unchanged``,
+        ``skipped_filtered``, ``hash_match_rate``, ``wall_clock_seconds``.
+
+    Raises:
+        HTTPException: 404 when the job_id is unknown.
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    embedded = job.embedded_count
+    skipped_unchanged = job.embeddings_skipped_unchanged
+    skipped_filtered = job.embeddings_filtered_out
+
+    # For running jobs, prefer the freshest PROGRESS line so the metrics
+    # advance in sync with /status. mark_done's parse runs after the
+    # subprocess exits so the persisted values lag by up to one flush.
+    if job.status == "running" and job.phase == "embedding":
+        progress = _parse_embed_progress(job.job_id)
+        if progress is not None:
+            embedded = max(embedded, progress[0])
+            skipped_unchanged = max(skipped_unchanged, progress[1])
+            skipped_filtered = max(skipped_filtered, progress[2])
+
+    in_scope = embedded + skipped_unchanged
+    hash_match_rate = (skipped_unchanged / in_scope) if in_scope > 0 else 0.0
+
+    if job.embed_started_at is None:
+        wall_clock_seconds = 0.0
+    elif job.embed_finished_at is not None:
+        wall_clock_seconds = max(0.0, job.embed_finished_at - job.embed_started_at)
+    else:
+        wall_clock_seconds = max(0.0, time.time() - job.embed_started_at)
+
+    return DiffMetrics(
+        total_symbols=embedded + skipped_unchanged + skipped_filtered,
+        embedded=embedded,
+        skipped_unchanged=skipped_unchanged,
+        skipped_filtered=skipped_filtered,
+        hash_match_rate=round(hash_match_rate, 4),
+        wall_clock_seconds=round(wall_clock_seconds, 3),
     )
 
 

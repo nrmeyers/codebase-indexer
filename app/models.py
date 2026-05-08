@@ -276,6 +276,42 @@ class IndexStatus(BaseModel):
     error: str | None = None
 
 
+class DiffMetrics(BaseModel):
+    """Response for ``GET /index/{job_id}/diff_metrics``.
+
+    BUC-1574 (Phase 1.4) — surfaces the incremental-embed audit shape
+    for a single index run.  Lets the operator confirm that re-indexing
+    an unchanged repo produces a high ``hash_match_rate`` (i.e. the
+    content-hash skip is firing as designed) without grepping the
+    embed subprocess log.
+
+    Attributes:
+        total_symbols: ``embedded + skipped_unchanged + skipped_filtered``.
+            For running jobs this is the running total at the latest
+            ``PROGRESS`` line.
+        embedded: Symbols actually sent to SageMaker on this run.
+        skipped_unchanged: Symbols where the stored ``content_hash``
+            matched the freshly-computed hash and we skipped the embed
+            call entirely.
+        skipped_filtered: Symbols whose source file matched a skip
+            pattern (tests / generated / vendored).
+        hash_match_rate: ``skipped_unchanged / (embedded +
+            skipped_unchanged)`` — the fraction of in-scope symbols that
+            were unchanged since the previous run.  Returns 0.0 when the
+            denominator is zero (very small repos or first-ever index).
+        wall_clock_seconds: Wall-clock seconds spent in the embed phase.
+            For running jobs this is ``now - embed_started_at``; for
+            completed jobs it is ``embed_finished_at - embed_started_at``.
+    """
+
+    total_symbols: int
+    embedded: int
+    skipped_unchanged: int
+    skipped_filtered: int
+    hash_match_rate: float
+    wall_clock_seconds: float
+
+
 # ---------------------------------------------------------------------------
 # /search/structural
 # ---------------------------------------------------------------------------
