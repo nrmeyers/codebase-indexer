@@ -1282,6 +1282,138 @@ if _batch_texts:
 if _pending_batches:
     _flush_pending(_pool)
 
+# ------------------------------------------------------------------
+# Phase 1.2 — Hierarchical chunking: Class summaries (deterministic).
+#
+# Re-open LadybugDB read-only to query Class nodes + their member names
+# (Methods via DEFINES_METHOD).  Embed text is built deterministically
+# — NO LLM call — using the format from
+# app/services/chunk_strategies.build_class_chunk_input.
+#
+# These chunks ride the same SageMaker batcher and DuckDB embeddings
+# table as Function/Method.  symbol_type='Class' is a new label; the
+# existing schema already has a symbol_type column so no migration.
+# qualified_name uses ``<class_qname>::Class::summary`` so it never
+# collides with a real Class symbol's qname.
+#
+# Skip filter (_should_skip_embed) is reused — test/generated/vendored
+# class summaries add noise without value.
+# Cache via content_hash (SHA-1 of embed_text) — re-runs on unchanged
+# classes are 0-cost, just like Function/Method.
+# ------------------------------------------------------------------
+_class_db = lb.Database({repr(repo_db_path)}, read_only=True)
+_class_conn = lb.Connection(_class_db)
+_class_cypher = '''
+MATCH (m:Module)-[:DEFINES]->(c:Class)
+OPTIONAL MATCH (c)-[:DEFINES_METHOD]->(meth:Method)
+WITH m, c, collect(meth.name) AS method_names
+RETURN c.qualified_name AS qualified_name,
+       c.name           AS class_name,
+       c.start_line     AS start_line,
+       c.end_line       AS end_line,
+       c.docstring      AS docstring,
+       m.path           AS rel_path,
+       m.qualified_name AS module_qname,
+       method_names     AS method_names
+'''
+_class_result = _class_conn.execute(_class_cypher)
+_class_cols = _class_result.get_column_names()
+_class_rows = []
+while _class_result.has_next():
+    _raw = _class_result.get_next()
+    _class_rows.append(dict(zip(_class_cols, _raw)))
+_class_conn.close()
+del _class_conn, _class_db
+print(f"class summary candidates: {{len(_class_rows)}}", flush=True)
+
+_class_skipped_filtered = 0
+_class_skipped_unchanged = 0
+_class_emitted = 0
+
+for _row in _class_rows:
+    _qname = _row.get("qualified_name") or ""
+    _cname = _row.get("class_name") or ""
+    _start = _row.get("start_line")
+    _end   = _row.get("end_line")
+    _rel   = _row.get("rel_path") or ""
+    _doc   = _row.get("docstring") or ""
+    _mod_qn = _row.get("module_qname") or ""
+    _members = _row.get("method_names") or []
+
+    if not _qname or not _rel:
+        continue
+    if _should_skip_embed(_rel):
+        _class_skipped_filtered += 1
+        continue
+
+    # Read the class signature line from disk.  The first line of the
+    # class (the actual ``class Foo(Bar):`` line) is captured as the
+    # signature; this is the start_line the parser stored.
+    _abs = _rel if Path(_rel).is_absolute() else (
+        str(Path(_root_path) / _rel) if _root_path else _rel
+    )
+    _signature = ""
+    try:
+        if _start is not None:
+            _all_lines = Path(_abs).read_text(encoding="utf-8", errors="replace").splitlines()
+            _signature = _all_lines[max(0, int(_start) - 1)].rstrip()
+    except Exception:
+        _signature = f"class {{_cname}}:"
+
+    # Filter junk member names (None, empty) — Cypher's collect() can
+    # leave Nones when OPTIONAL MATCH yielded zero rows.
+    _clean_members = [m for m in _members if m]
+
+    # Build embed text deterministically (mirrors
+    # chunk_strategies.build_class_chunk_input — kept inline because the
+    # driver runs as a subprocess f-string and can't easily import the
+    # helper module without sys.path setup).
+    _header = [f"# Class: {{_qname}}"]
+    if _mod_qn:
+        _header.append(f"# Module: {{_mod_qn}}")
+    if _clean_members:
+        _header.append(f"# Members: {{', '.join(_clean_members)}}")
+    _header.append("# ---")
+    if _signature:
+        _header.append(_signature)
+    if _doc:
+        _header.append(_doc)
+    _embed_text = "\\n".join(_header).rstrip()
+
+    # Summary-chunk qname convention: never collides with real qnames.
+    _summary_qname = f"{{_qname}}::Class::summary"
+
+    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
+    if _existing_hashes.get(_summary_qname) == _content_hash:
+        _class_skipped_unchanged += 1
+        continue
+
+    _batch_texts.append(_embed_text)
+    # start_line/end_line stored as the class's own range so the UI can
+    # link the summary back to the source location if a user clicks it.
+    _batch_meta.append((
+        _summary_qname, _abs,
+        int(_start) if _start is not None else 0,
+        int(_end) if _end is not None else 0,
+        "Class", _content_hash,
+    ))
+    _class_emitted += 1
+
+    if len(_batch_texts) >= _BATCH:
+        _pending_batches.append((_batch_texts, _batch_meta))
+        _batch_texts = []
+        _batch_meta = []
+        if len(_pending_batches) >= _CONCURRENCY:
+            _flush_pending(_pool)
+
+# Flush the trailing class-summary batch.
+if _batch_texts:
+    _pending_batches.append((_batch_texts, _batch_meta))
+if _pending_batches:
+    _flush_pending(_pool)
+
+print(f"Class summaries: emitted={{_class_emitted}} skipped_unchanged={{_class_skipped_unchanged}} filtered={{_class_skipped_filtered}}", flush=True)
+
 _pool.shutdown(wait=True)
 _vec_conn.close()
 print(f"Embedded {{_embedded_count}} (skipped {{_skipped_unchanged}} unchanged, filtered {{_skipped_filtered}})")
