@@ -131,7 +131,7 @@ def _get_conn(repo: str | None = None):  # type: ignore[override]
     Returns:
         lb.Connection: A connection usable for Cypher queries.
     """
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    from ..services.ladybug_pool import open_read_conn
 
     from pathlib import Path as _Path
     if repo:
@@ -141,8 +141,9 @@ def _get_conn(repo: str | None = None):  # type: ignore[override]
         dbs = sorted(db_dir.glob("*.db")) if db_dir.is_dir() else []
         db_path = str(dbs[0]) if dbs else settings.LADYBUG_DB_PATH
 
-    db = lb.Database(db_path)
-    conn = lb.Connection(db)
+    # BUC-1571: read-only — context-bundle is a pure read path, no need
+    # to contend with the indexer's exclusive lock.
+    _db, conn = open_read_conn(db_path)
     return conn
 
 

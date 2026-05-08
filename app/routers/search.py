@@ -198,11 +198,12 @@ def _get_conn(repo: str | None = None):  # type: ignore[override]  # returns lb.
     Returns:
         lb.Connection: A connection usable for Cypher queries.
     """
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    from ..services.ladybug_pool import open_read_conn
 
     db_path = _resolve_db_path(repo)
-    db = lb.Database(db_path)
-    conn = lb.Connection(db)
+    # BUC-1571: read-only mode so /search/* never contends with the
+    # exclusive write-lock held by an active /index job.
+    _db, conn = open_read_conn(db_path)
     return conn
 
 
@@ -452,11 +453,17 @@ def _semantic_search_impl(
 
     def _embed_query(text: str) -> list[float]:
         # SageMaker primary — no asymmetric prefix; E5 models handle it natively.
+        # NOTE: ``SageMakerEmbedder.embed(text)`` already returns a *single*
+        # embedding (``list[float] | None``) — it internally calls
+        # ``batch_embed([text])`` and unwraps ``result[0]``.  Indexing again
+        # with ``[0]`` here used to slice a single ``float`` out of the
+        # 768-dim vector and pass it downstream, where ``_l2_normalise`` then
+        # raised ``'float' object is not iterable`` (BUC-1570).
         sm = get_sagemaker_embedder()
         if sm is not None:
-            vecs = sm.embed(text)
-            if vecs:
-                return vecs[0]
+            vec = sm.embed(text)
+            if vec:
+                return vec
 
         # LM Studio dev fallback — uses asymmetric "search_query: " prefix.
         if vec := lm_studio.embed(text, prefix="search_query: "):

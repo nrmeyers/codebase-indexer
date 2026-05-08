@@ -140,10 +140,12 @@ def _probe_repo(name: str) -> RepoHealth:
     count: int | None = None
     readable = False
     try:
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        from ..services.ladybug_pool import open_read_conn
 
-        db = lb.Database(db_path)
-        conn = lb.Connection(db)
+        # BUC-1571: read-only probe — never block on the indexer's
+        # exclusive lock. A locked DB simply reports unreadable and
+        # falls back to the sidecar count below.
+        db, conn = open_read_conn(db_path)
         res = conn.execute("MATCH (n) RETURN count(n) AS cnt")
         if res.has_next():
             count = int(res.get_next()[0])

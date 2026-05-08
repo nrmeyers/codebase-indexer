@@ -296,10 +296,11 @@ def _node_count_by_label(repo_name: str, db_path: str) -> tuple[dict[str, int], 
     db = None
     conn = None
     try:
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        from ..services.ladybug_pool import open_read_conn
 
-        db = lb.Database(db_path)
-        conn = lb.Connection(db)
+        # BUC-1571: /repos counts are pure reads — open read-only so
+        # listing the repos doesn't fight the indexer's exclusive lock.
+        db, conn = open_read_conn(db_path)
         for label in _REPORTED_LABELS:
             try:
                 r = conn.execute(f"MATCH (n:{label}) RETURN count(n) AS cnt")

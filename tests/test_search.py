@@ -356,3 +356,101 @@ def test_semantic_search_503_uses_fast_fail_after_first_import_failure() -> None
     body = resp.json()
     assert "detail" in body
     assert "unavailable" in body["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# /search/semantic — regression: SageMaker embedder must not be double-indexed
+# (BUC-1570: ``'float' object is not iterable`` when the response of
+# ``SageMakerEmbedder.embed()`` was treated as a *list of vectors* and
+# indexed with ``[0]``, sliced one float out, and passed downstream where
+# ``_l2_normalise`` choked on a scalar.)
+# ---------------------------------------------------------------------------
+
+
+def test_semantic_search_passes_full_vector_from_sagemaker(tmp_path) -> None:
+    """The SageMaker code path must hand the full embedding to ``search_similar``.
+
+    Regression for BUC-1570 — we previously did ``vecs[0]`` on the result of
+    ``SageMakerEmbedder.embed(text)`` (which already returns a single vector),
+    leaking a single ``float`` into the search pipeline.  This test asserts
+    that the vector handed to ``search_similar`` is the full 768-dim list.
+    """
+    duck = tmp_path / "fake.duck"
+    duck.write_bytes(b"")
+
+    captured: dict[str, object] = {}
+
+    def _capture_search_similar(conn, query_vec, k=10):
+        captured["query_vec"] = query_vec
+        return []
+
+    fake_embedder = MagicMock()
+    fake_embedder.embed.return_value = [0.1] * 768  # full single vector
+
+    with patch("app.services.sagemaker_embedder.get_sagemaker_embedder",
+               return_value=fake_embedder), \
+         patch("app.routers.search._embed_unavailable", False), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)), \
+         patch("codebase_rag.storage.vector_store.open_or_create",
+               return_value=MagicMock()), \
+         patch("codebase_rag.storage.vector_store.search_similar",
+               side_effect=_capture_search_similar), \
+         patch("codebase_rag.storage.vector_store.read_centrality",
+               return_value={}):
+        resp = client.get(
+            "/search/semantic",
+            params={"q": "code indexer client", "k": 5, "repo": "fake"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    qv = captured.get("query_vec")
+    # Must be the *full* list — not a single float that some prior buggy
+    # version sliced out with ``vecs[0]``.
+    assert isinstance(qv, list), f"expected list, got {type(qv).__name__}"
+    assert len(qv) == 768
+    assert all(isinstance(x, float) for x in qv)
+
+
+def test_semantic_search_does_not_500_on_sagemaker_path(tmp_path) -> None:
+    """End-to-end: SageMaker-backed semantic search must not raise the
+    BUC-1570 ``'float' object is not iterable`` error.
+
+    Uses the *real* ``_l2_normalise`` (no patching of ``search_similar`` arg
+    handling) and a stub embedder whose ``embed()`` returns a full vector.
+    """
+    from codebase_rag.storage import vector_store as _vs
+
+    duck = tmp_path / "fake.duck"
+    duck.write_bytes(b"")
+
+    fake_embedder = MagicMock()
+    fake_embedder.embed.return_value = [0.5] * 768
+
+    # Real _l2_normalise will be called inside our patched search_similar.
+    def _real_search_similar(conn, query_vec, k=10):
+        # Will raise 'float' object is not iterable if BUC-1570 regresses.
+        _vs._l2_normalise(query_vec)
+        return []
+
+    with patch("app.services.sagemaker_embedder.get_sagemaker_embedder",
+               return_value=fake_embedder), \
+         patch("app.routers.search._embed_unavailable", False), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)), \
+         patch("codebase_rag.storage.vector_store.open_or_create",
+               return_value=MagicMock()), \
+         patch("codebase_rag.storage.vector_store.search_similar",
+               side_effect=_real_search_similar), \
+         patch("codebase_rag.storage.vector_store.read_centrality",
+               return_value={}):
+        resp = client.get(
+            "/search/semantic",
+            params={"q": "code indexer client", "k": 5, "repo": "TheForge"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    # No "'float' object is not iterable" anywhere in the response.
+    body = resp.json()
+    detail = str(body.get("detail", ""))
+    assert "not iterable" not in detail

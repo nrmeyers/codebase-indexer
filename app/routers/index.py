@@ -1796,10 +1796,11 @@ def repo_stats(repo: str) -> RepoStatsResponse:
     root_path = ""
     probe_ok = False
     try:
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        from ..services.ladybug_pool import open_read_conn
 
-        db = lb.Database(db_path)
-        conn = lb.Connection(db)
+        # BUC-1571: /index/stats is a pure read — never contend with the
+        # exclusive lock held by a concurrent /index POST.
+        db, conn = open_read_conn(db_path)
 
         for label in _STATS_NODE_LABELS:
             try:
