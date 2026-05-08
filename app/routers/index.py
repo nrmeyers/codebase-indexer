@@ -444,11 +444,20 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
 
     repo = Path(job.repo_path).resolve()
 
+    # BUC-1580: derive the canonical slug from ``git remote get-url origin``.
+    # Falls back to the basename when no GitHub remote is configured (e.g.
+    # bare local checkouts, gitlab/bitbucket, multiple-remote ambiguity).
+    # The App-clone path already uses ``{owner}__{repo}`` as its directory
+    # name, so canonical and basename converge there — no behaviour change.
+    from ..services.slug import derive_slug as _derive_slug  # noqa: PLC0415
+
+    repo_name = _derive_slug(repo, repo.name)
+
     # Per-repo DB file: each indexed repo gets its own ``.db`` so the explorer
     # can open one index at a time and WAL corruption / re-indexing stays
     # scoped.  Parent directory is created lazily because LadybugDB will
     # otherwise fail with "No such file or directory".
-    repo_db_path = settings.db_path_for_repo(repo.name)
+    repo_db_path = settings.db_path_for_repo(repo_name)
     Path(repo_db_path).parent.mkdir(parents=True, exist_ok=True)
 
     # Point code-graph-rag at the per-repo DB. Without this, the two packages
@@ -690,7 +699,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # authoritative node/rel totals in /stats without a separate query.
     _now = time.time()
     _write_meta(
-        repo.name,
+        repo_name,
         last_indexed_at=_now,
         root_path=str(repo),
         node_count=str(job.node_count),
@@ -698,7 +707,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         last_job_id=job.job_id,
         schema_version="1.5",
     )
-    _last_indexed_cache[repo.name] = _now
+    _last_indexed_cache[repo_name] = _now
 
     # -------------------------------------------------------------------
     # Phase 1.1 — Tantivy BM25 lexical index (best-effort)
@@ -729,7 +738,9 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             )
             _res = _t_conn.execute(_cypher)
             _cols = _res.get_column_names()
-            _slug = slugify_repo(repo.name)
+            # BUC-1580: ``repo_name`` is already canonical; pass through
+            # ``slugify_repo`` for the filesystem-safe charset guarantee.
+            _slug = slugify_repo(repo_name)
             _t_idx = TantivyIndex(settings.LADYBUG_DB_DIR, _slug)
             _added = 0
             try:
@@ -758,7 +769,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
                 _t_idx.commit()
             finally:
                 _t_idx.close()
-            logger.info("tantivy.indexed repo=%s symbols=%d", repo.name, _added)
+            logger.info("tantivy.indexed repo=%s symbols=%d", repo_name, _added)
         finally:
             try:
                 _t_conn.close()
@@ -775,11 +786,11 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # Register the repo immediately after the structural graph commits so that
     # /health and /explorer see it even while the embedding pass is running.
     # The structural graph is on disk and fully queryable at this point.
-    indexed_repos.add(repo.name)
-    indexed_repo_paths[repo.name] = str(repo)
+    indexed_repos.add(repo_name)
+    indexed_repo_paths[repo_name] = str(repo)
     try:
         from .health import invalidate_probe_cache
-        invalidate_probe_cache(repo.name)
+        invalidate_probe_cache(repo_name)
     except Exception:
         pass  # cache invalidation is best-effort
 
@@ -801,7 +812,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # as "failed" and surfaces the error to pollers.
     embed_job = _EmbedJob(
         job_id=job.job_id + "-embed",
-        repo_name=repo.name,
+        repo_name=repo_name,
         repo_path=str(repo),
     )
     # Force a GC sweep before spawning the subprocess so that the count-query
@@ -841,7 +852,9 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
 
         pr_scores = compute_pagerank(repo_db_path)
         if pr_scores:
-            _vec_path_pr = settings.vec_db_path_for_repo(job.repo_path and Path(job.repo_path).name or repo.name)
+            # BUC-1580: route via the canonical slug so PageRank lands in
+            # the same .duck file the embedding pass just wrote.
+            _vec_path_pr = settings.vec_db_path_for_repo(repo_name)
             _vec_conn_pr = open_or_create(_vec_path_pr)
             try:
                 clear_centrality(_vec_conn_pr)
@@ -884,19 +897,19 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             # GET /repos listing endpoint (BUC-1561b) can compute fresh/stale
             # status without a LadybugDB read (which contends with the
             # single-writer lock during a re-index).
-            _write_meta(repo.name, last_indexed_sha=head_sha)
+            _write_meta(repo_name, last_indexed_sha=head_sha)
             _stamp_db = lb.Database(repo_db_path)
             _stamp_conn = lb.Connection(_stamp_db)
             try:
                 _rm.stamp(
                     _stamp_conn,
-                    repo.name,
+                    repo_name,
                     last_indexed_sha=head_sha,
                     last_indexed_at=int(job.finished_at),
                 )
                 logger.info(
                     "RepoMeta stamped: repo=%s sha=%s model=%s",
-                    repo.name, head_sha[:8], _rm.MODEL_VERSION,
+                    repo_name, head_sha[:8], _rm.MODEL_VERSION,
                 )
             finally:
                 try:
@@ -908,7 +921,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         else:
             logger.info(
                 "RepoMeta stamp skipped: %s is not a git repo (incremental disabled)",
-                repo.name,
+                repo_name,
             )
     except Exception as _exc:
         # Stamping failures are non-fatal — the index already succeeded;
@@ -960,7 +973,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # UI transitions from "indexing" to fully-complete state immediately.
     try:
         from .health import invalidate_probe_cache
-        invalidate_probe_cache(repo.name)
+        invalidate_probe_cache(repo_name)
     except Exception:
         pass
 

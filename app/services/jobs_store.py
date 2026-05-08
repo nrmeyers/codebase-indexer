@@ -669,6 +669,29 @@ def delete_by_repo(repo_slug: str) -> int:
         return cur.rowcount
 
 
+def rename_repo_slug(old_slug: str, new_slug: str) -> int:
+    """Rename ``repo_slug`` for every existing job row (BUC-1580 migration).
+
+    Used by the canonical-slug migration endpoint to keep historical job
+    records discoverable after the per-repo DB / DuckDB / Tantivy artefacts
+    have been moved to their canonical filename.
+
+    Args:
+        old_slug: The pre-migration ``repo_slug`` (typically the bare basename).
+        new_slug: The post-migration canonical ``{org}__{repo}`` slug.
+
+    Returns:
+        int: Number of rows whose ``repo_slug`` was rewritten.
+    """
+    conn = _require_conn()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE jobs SET repo_slug = ? WHERE repo_slug = ?",
+            (new_slug, old_slug),
+        )
+        return cur.rowcount
+
+
 # ---------------------------------------------------------------------------
 # diagnostics
 # ---------------------------------------------------------------------------
