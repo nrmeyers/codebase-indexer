@@ -736,3 +736,115 @@ def repo_centrality_top_n(
     return CentralityListResponse(
         symbols=[CentralitySymbol(qname=qn, centrality=score) for qn, score in rows]
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /repos/{name}/centroid — Phase 2.5 v1 topic centroid (BUC-1581)
+# ---------------------------------------------------------------------------
+
+
+class RepoCentroidResponse(BaseModel):
+    """Per-repo topic centroid response (BUC-1581).
+
+    Unblocks TheForge's ``getRepoAffinity`` (BUC-1575). Returns a single
+    768-dim vector — the mean of the top-k centrality symbols' embeddings
+    — that callers can compare against a query embedding via cosine
+    similarity to compute repo-vs-query affinity.
+
+    The vector is **not** L2-normalised at compute time. Callers that want
+    cosine arithmetic should normalise client-side.
+    """
+
+    repo: str = Field(description="Repo slug — same key used by /repos/{name}/stats")
+    centroid: list[float] = Field(
+        description="768-dim mean-pooled embedding vector. NOT L2-normalised."
+    )
+    computed_at: str = Field(
+        description="ISO-8601 UTC timestamp when the centroid was computed. "
+        "On a cache hit this reflects the cached entry's compute time, not "
+        "the request time, so callers can detect a stale-but-served centroid."
+    )
+    cache_age_seconds: int = Field(
+        description="Wall-clock seconds since ``computed_at``. 0 on a fresh "
+        "compute; up to ~3600 on a cache hit (TTL is 1h)."
+    )
+    k: int = Field(
+        description="Effective k used for the mean-pool. May be smaller than "
+        "the requested ``k`` query-param when the centrality table has "
+        "fewer rows than asked."
+    )
+
+
+@router.get(
+    "/{name}/centroid",
+    response_model=RepoCentroidResponse,
+    summary="Per-repo topic centroid — mean of top-k centrality embeddings (BUC-1581)",
+)
+def repo_topic_centroid(
+    name: str,
+    k: int = Query(
+        default=20,
+        ge=1,
+        le=200,
+        description="Number of top-centrality symbols to mean-pool.",
+    ),
+) -> RepoCentroidResponse:
+    """Compute (or serve from cache) the topic centroid for ``name``.
+
+    Mean-pools the embedding vectors of the top-``k`` PageRank-central
+    symbols into a single 768-dim vector. TheForge's affinity router uses
+    this as the per-repo "topic signature" against which it scores incoming
+    queries — replacing the v0 stub that returned uniform weights.
+
+    Caching:
+        Per-repo, per-k, in-process LRU with a 1h soft TTL. Re-indexing
+        bumps the .duck mtime which automatically invalidates the entry.
+
+    Args:
+        name: Repo slug.
+        k: Top-k centrality symbols to pool (1–200; default 20).
+
+    Returns:
+        RepoCentroidResponse: ``{ repo, centroid[768], computed_at,
+        cache_age_seconds, k }``.
+
+    Raises:
+        HTTPException 404: Repo has not been indexed at all (no .duck file).
+        HTTPException 503: Repo indexed but the centrality table or
+            embeddings are not yet populated. Callers can poll — TheForge's
+            affinity module already falls back to uniform weights on 503.
+    """
+    from ..services.centroid import (
+        CentroidNotFoundError,
+        CentroidUnavailableError,
+        compute_repo_centroid,
+    )
+
+    duck_path = Path(settings.vec_db_path_for_repo(name))
+
+    try:
+        result = compute_repo_centroid(repo=name, duck_path=duck_path, k=k)
+    except CentroidNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "repo_not_indexed",
+                "message": str(exc),
+            },
+        )
+    except CentroidUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "centroid_unavailable",
+                "message": str(exc),
+            },
+        )
+
+    return RepoCentroidResponse(
+        repo=result.repo,
+        centroid=result.centroid,
+        computed_at=result.computed_at.isoformat().replace("+00:00", "Z"),
+        cache_age_seconds=result.cache_age_seconds,
+        k=result.k,
+    )
