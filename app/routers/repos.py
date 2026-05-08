@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..config import settings
@@ -652,3 +652,87 @@ async def stop_watch(slug: str) -> dict:
         "stopped_at": time.time(),
         "last_partial_job_id": last_partial_job_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /repos/{name}/centrality — Phase 1.5 PageRank top-N (debug surface)
+# ---------------------------------------------------------------------------
+
+
+class CentralitySymbol(BaseModel):
+    """One row in ``GET /repos/{name}/centrality``."""
+
+    qname: str = Field(description="Qualified name of the callable.")
+    centrality: float = Field(
+        description="PageRank score from the per-repo centrality table. "
+        "Plan J persists divide-by-max scores; downstream fusion re-normalises."
+    )
+
+
+class CentralityListResponse(BaseModel):
+    """Envelope for ``GET /repos/{name}/centrality``."""
+
+    symbols: list[CentralitySymbol] = Field(default_factory=list)
+
+
+@router.get(
+    "/{name}/centrality",
+    response_model=CentralityListResponse,
+    summary="Top-N most-central symbols by PageRank (Phase 1.5 debug)",
+)
+def repo_centrality_top_n(
+    name: str,
+    limit: int = Query(default=20, ge=1, le=200),
+) -> CentralityListResponse:
+    """Return the ``limit`` most-central symbols for ``name``.
+
+    Companion endpoint to ``GET /search/centrality`` — same data source
+    (the per-repo ``.duck`` ``centrality`` table populated by Plan J at the
+    end of every full ingest pass), but a simpler shape that TheForge can
+    use to inspect which symbols would be boosted once the
+    ``mergeAndRank`` integration lands. The location-enriched
+    ``/search/centrality`` route stays the FE-facing contract.
+
+    Args:
+        name: Repo slug — the same key used by ``/repos/{name}/stats``.
+        limit: Max rows to return (1–200; default 20 per the brief).
+
+    Returns:
+        CentralityListResponse: ``{ symbols: [{ qname, centrality }] }``.
+        Returns an empty array — never 404 — when the centrality table is
+        empty (PageRank not yet computed for this repo). Graceful
+        degradation lets TheForge poll without special-casing freshly-
+        indexed repos.
+    """
+    duck_path = Path(settings.vec_db_path_for_repo(name))
+    if not duck_path.exists():
+        return CentralityListResponse(symbols=[])
+
+    try:
+        from codebase_rag.storage.vector_store import open_or_create  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("centrality.no_sibling_pkg repo=%s", name)
+        return CentralityListResponse(symbols=[])
+
+    rows: list[tuple[str, float]] = []
+    try:
+        conn = open_or_create(str(duck_path))
+        try:
+            res = conn.execute(
+                "SELECT qualified_name, pagerank FROM centrality "
+                "ORDER BY pagerank DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+            rows = [(r[0], float(r[1])) for r in res]
+        finally:
+            conn.close()
+    except Exception as exc:
+        # Table may not exist yet (PageRank skipped on this repo) or the
+        # `.duck` file was created by a stage that doesn't run the
+        # centrality DDL. Either way, return empty rather than 5xx.
+        logger.warning("centrality.read_failed repo=%s err=%s", name, exc)
+        return CentralityListResponse(symbols=[])
+
+    return CentralityListResponse(
+        symbols=[CentralitySymbol(qname=qn, centrality=score) for qn, score in rows]
+    )

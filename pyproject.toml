@@ -27,6 +27,10 @@ dependencies = [
     # of the editable code-graph-rag dependency.
     "docstring-parser>=0.16",
     "networkx>=3.2",
+    # PageRank in networkx 3.x dispatches to ``_pagerank_scipy`` which
+    # requires scipy at compute time. Phase 1.5 unit tests exercise the
+    # pure-python core directly, so scipy must be a hard dep, not optional.
+    "scipy>=1.11",
     "torch>=2.6.0",
     "transformers>=4.0.0",
     # Plan F: CodeRankEmbed (nomic-ai/CodeRankEmbed) requires einops at model load time
