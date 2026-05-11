@@ -450,23 +450,24 @@ def _semantic_search_impl(
 
     global _embed_fn, _embed_unavailable  # noqa: PLW0603
 
-    # Provider priority: SageMaker (prod) → LM Studio (dev) → in-process torch.
+    # Provider priority: configured embedder backend (prod = SageMaker) →
+    # LM Studio (dev) → in-process torch.
+    from ..embedders.sync_bridge import (  # noqa: PLC0415
+        embed_text_sync,
+        get_embedder_or_none,
+    )
     from ..services import lm_studio          # local import keeps cold-start cheap
-    from ..services.sagemaker_embedder import get_sagemaker_embedder  # noqa: PLC0415
 
     def _embed_query(text: str) -> list[float]:
-        # SageMaker primary — no asymmetric prefix; E5 models handle it natively.
-        # NOTE: ``SageMakerEmbedder.embed(text)`` already returns a *single*
-        # embedding (``list[float] | None``) — it internally calls
-        # ``batch_embed([text])`` and unwraps ``result[0]``.  Indexing again
-        # with ``[0]`` here used to slice a single ``float`` out of the
-        # 768-dim vector and pass it downstream, where ``_l2_normalise`` then
-        # raised ``'float' object is not iterable`` (BUC-1570).
-        sm = get_sagemaker_embedder()
-        if sm is not None:
-            vec = sm.embed(text)
-            if vec:
-                return vec
+        # Configured embedder primary — no asymmetric prefix; E5 models
+        # handle it natively. ``embed_text_sync`` returns the *full*
+        # 768-dim vector (it unwraps the single-element async batch
+        # internally), so no ``[0]`` indexing here. Regression guard from
+        # BUC-1570: indexing the result with ``[0]`` sliced one float out
+        # of the 768-dim vector and crashed downstream in ``_l2_normalise``.
+        vec = embed_text_sync(text)
+        if vec:
+            return vec
 
         # LM Studio dev fallback — uses asymmetric "search_query: " prefix.
         if vec := lm_studio.embed(text, prefix="search_query: "):
@@ -477,7 +478,7 @@ def _semantic_search_impl(
             raise RuntimeError("in-process embedder not initialised")
         return _embed_fn(text)
 
-    _sm_available = get_sagemaker_embedder() is not None
+    _sm_available = get_embedder_or_none() is not None
     _lm_available = lm_studio.can_embed()
 
     if _embed_unavailable and not _sm_available and not _lm_available:

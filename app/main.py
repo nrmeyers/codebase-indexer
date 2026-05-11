@@ -199,28 +199,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         _log.info("metrics: background collectors started")
 
-    # --- Phase 5: SageMaker pre-warm (BUC-1518 D1) ---
-    # Fire a fire-and-forget warmup invocation to absorb the Serverless
-    # Inference cold start (~4-5s observed) in the background.  Without
-    # this, the first user-facing call after restart (semantic search,
-    # /index parse-phase prewarm not yet fired, etc.) pays the cold-start
-    # latency.  Cost: ~$0.0001 per restart.  Safe to skip if no endpoint
-    # is configured; failures are silently swallowed.
+    # --- Phase 5: Embedder pre-warm (BUC-1518 D1, generalised in BUC-1605) ---
+    # Fire a fire-and-forget warmup invocation to absorb the SageMaker
+    # Serverless Inference cold start (~4-5s observed) in the background.
+    # Without this, the first user-facing call after restart (semantic
+    # search, /index parse-phase prewarm not yet fired, etc.) pays the
+    # cold-start latency.  Cost: ~$0.0001 per call when the backend is
+    # SageMaker; effectively free for local / TEI backends.  Safe to skip
+    # if no backend is configured; failures are silently swallowed.
     def _startup_prewarm() -> None:
         try:
-            from .services.sagemaker_embedder import get_sagemaker_embedder
-            sm = get_sagemaker_embedder()
-            if sm is None:
+            from .embedders.sync_bridge import embed_text_sync, get_embedder_or_none
+
+            backend = get_embedder_or_none()
+            if backend is None:
                 return  # not configured
             import time as _t
             t0 = _t.time()
-            sm.embed("warmup")
+            embed_text_sync("warmup")
             _log.info(
-                "SageMaker startup prewarm: endpoint=%s latency=%.2fs",
-                sm.endpoint_name, _t.time() - t0,
+                "Embedder startup prewarm: backend=%s latency=%.2fs",
+                backend.name, _t.time() - t0,
             )
         except Exception as _exc:  # noqa: BLE001
-            _log.debug("SageMaker startup prewarm failed (best-effort): %s", _exc)
+            _log.debug("Embedder startup prewarm failed (best-effort): %s", _exc)
 
     import threading as _threading
     _threading.Thread(target=_startup_prewarm, name="sm-startup-prewarm", daemon=True).start()

@@ -30,15 +30,13 @@ def _clear_factory_cache() -> None:
 
 
 def test_e5_base_v2_embedder_returns_768_dim_vector() -> None:
-    """E5 path delegates to the upstream SageMakerEmbedder verbatim."""
+    """E5 path delegates to the BUC-1605 embedder factory via the sync bridge."""
     fake_vec = [0.01] * 768
-    fake_sm = MagicMock()
-    fake_sm.embed.return_value = fake_vec
 
     with patch(
-        "app.services.sagemaker_embedder.get_sagemaker_embedder",
-        return_value=fake_sm,
-    ):
+        "app.embedders.sync_bridge.embed_text_sync",
+        return_value=fake_vec,
+    ) as fake_embed:
         e5 = emb_mod.E5BaseV2Embedder()
         result = e5.embed("def foo(): return 1")
 
@@ -46,7 +44,7 @@ def test_e5_base_v2_embedder_returns_768_dim_vector() -> None:
     assert len(result) == 768
     assert e5.cost_calls == 1
     assert e5.cost_tokens > 0
-    fake_sm.embed.assert_called_once_with("def foo(): return 1")
+    fake_embed.assert_called_once_with("def foo(): return 1")
 
 
 def test_bge_code_v1_embedder_returns_none_when_endpoint_unset(

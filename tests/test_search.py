@@ -317,7 +317,20 @@ def test_semantic_search_503_when_import_fails() -> None:
         # Setting sys.modules[name] = None causes `from name import …` to
         # raise ImportError — this simulates a missing ML dependency.
         sys.modules["codebase_rag.embedder"] = None  # type: ignore[assignment]
-        resp = client.get("/search/semantic", params={"q": "retry http"})
+        # Force every provider unavailable so the fallback chain reaches
+        # the in-process torch path that the import is faking out.
+        # BUC-1605: the default backend is now ``local`` (no env vars
+        # required), so an unmocked ``get_embedder_or_none`` would return
+        # a valid backend and bypass the 503 path under test.
+        with patch("app.embedders.sync_bridge.get_embedder_or_none",
+                   return_value=None), \
+             patch("app.embedders.sync_bridge.embed_text_sync",
+                   return_value=None), \
+             patch("app.services.lm_studio.can_embed",
+                   return_value=False), \
+             patch("app.services.lm_studio.embed",
+                   return_value=None):
+            resp = client.get("/search/semantic", params={"q": "retry http"})
     finally:
         # Restore everything regardless of outcome.
         _search_mod._embed_fn = original_fn
@@ -347,7 +360,18 @@ def test_semantic_search_503_uses_fast_fail_after_first_import_failure() -> None
     _search_mod._embed_unavailable = True
 
     try:
-        resp = client.get("/search/semantic", params={"q": "anything"})
+        # BUC-1605: force the embedder + LM Studio paths unavailable so the
+        # fast-fail branch can be reached. The default ``local`` backend
+        # would otherwise satisfy ``_sm_available`` and bypass this branch.
+        with patch("app.embedders.sync_bridge.get_embedder_or_none",
+                   return_value=None), \
+             patch("app.embedders.sync_bridge.embed_text_sync",
+                   return_value=None), \
+             patch("app.services.lm_studio.can_embed",
+                   return_value=False), \
+             patch("app.services.lm_studio.embed",
+                   return_value=None):
+            resp = client.get("/search/semantic", params={"q": "anything"})
     finally:
         _search_mod._embed_fn = original_fn
         _search_mod._embed_unavailable = original_unavail
@@ -367,13 +391,16 @@ def test_semantic_search_503_uses_fast_fail_after_first_import_failure() -> None
 # ---------------------------------------------------------------------------
 
 
-def test_semantic_search_passes_full_vector_from_sagemaker(tmp_path) -> None:
-    """The SageMaker code path must hand the full embedding to ``search_similar``.
+def test_semantic_search_passes_full_vector_from_embedder(tmp_path) -> None:
+    """The embedder code path must hand the full embedding to ``search_similar``.
 
-    Regression for BUC-1570 — we previously did ``vecs[0]`` on the result of
-    ``SageMakerEmbedder.embed(text)`` (which already returns a single vector),
-    leaking a single ``float`` into the search pipeline.  This test asserts
-    that the vector handed to ``search_similar`` is the full 768-dim list.
+    Regression for BUC-1570 — we previously did ``vecs[0]`` on the result
+    of the legacy ``SageMakerEmbedder.embed(text)`` (which already returned
+    a single vector), leaking a single ``float`` into the search pipeline.
+    After the BUC-1605 migration the search route calls
+    :func:`app.embedders.sync_bridge.embed_text_sync` which itself unwraps
+    the async batched response. This test asserts that the vector handed
+    to ``search_similar`` is the full 768-dim list.
     """
     duck = tmp_path / "fake.duck"
     duck.write_bytes(b"")
@@ -384,11 +411,13 @@ def test_semantic_search_passes_full_vector_from_sagemaker(tmp_path) -> None:
         captured["query_vec"] = query_vec
         return []
 
-    fake_embedder = MagicMock()
-    fake_embedder.embed.return_value = [0.1] * 768  # full single vector
+    fake_backend = MagicMock()
+    fake_backend.name = "fake"
 
-    with patch("app.services.sagemaker_embedder.get_sagemaker_embedder",
-               return_value=fake_embedder), \
+    with patch("app.embedders.sync_bridge.embed_text_sync",
+               return_value=[0.1] * 768), \
+         patch("app.embedders.sync_bridge.get_embedder_or_none",
+               return_value=fake_backend), \
          patch("app.routers.search._embed_unavailable", False), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
@@ -412,20 +441,21 @@ def test_semantic_search_passes_full_vector_from_sagemaker(tmp_path) -> None:
     assert all(isinstance(x, float) for x in qv)
 
 
-def test_semantic_search_does_not_500_on_sagemaker_path(tmp_path) -> None:
-    """End-to-end: SageMaker-backed semantic search must not raise the
+def test_semantic_search_does_not_500_on_embedder_path(tmp_path) -> None:
+    """End-to-end: backend-driven semantic search must not raise the
     BUC-1570 ``'float' object is not iterable`` error.
 
     Uses the *real* ``_l2_normalise`` (no patching of ``search_similar`` arg
-    handling) and a stub embedder whose ``embed()`` returns a full vector.
+    handling) and a stub bridge whose ``embed_text_sync`` returns a full
+    vector.
     """
     from codebase_rag.storage import vector_store as _vs
 
     duck = tmp_path / "fake.duck"
     duck.write_bytes(b"")
 
-    fake_embedder = MagicMock()
-    fake_embedder.embed.return_value = [0.5] * 768
+    fake_backend = MagicMock()
+    fake_backend.name = "fake"
 
     # Real _l2_normalise will be called inside our patched search_similar.
     def _real_search_similar(conn, query_vec, k=10):
@@ -433,8 +463,10 @@ def test_semantic_search_does_not_500_on_sagemaker_path(tmp_path) -> None:
         _vs._l2_normalise(query_vec)
         return []
 
-    with patch("app.services.sagemaker_embedder.get_sagemaker_embedder",
-               return_value=fake_embedder), \
+    with patch("app.embedders.sync_bridge.embed_text_sync",
+               return_value=[0.5] * 768), \
+         patch("app.embedders.sync_bridge.get_embedder_or_none",
+               return_value=fake_backend), \
          patch("app.routers.search._embed_unavailable", False), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \

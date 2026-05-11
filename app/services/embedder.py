@@ -125,24 +125,25 @@ class CodeEmbedder(ABC):
 
 
 class E5BaseV2Embedder(CodeEmbedder):
-    """Wraps the upstream SageMakerEmbedder (``e5-base-v2``).
+    """Wraps the configured embedder backend (``e5-base-v2``).
 
-    This intentionally delegates to ``app.services.sagemaker_embedder`` so
-    the production code path is identical to the pre-Phase-1.3 behaviour —
-    only the cost counters are added on top.
+    Originally delegated to ``app.services.sagemaker_embedder``; after the
+    BUC-1605 pluggable-backend migration this delegates to the
+    :mod:`app.embedders` factory so the A/B harness picks up whatever
+    backend the operator has configured (``local`` for laptops,
+    ``sagemaker`` for the Navistone prod deploy). The production path is
+    identical to the pre-Phase-1.3 behaviour when ``EMBEDDER_BACKEND=sagemaker``
+    — only the cost counters are added on top.
     """
 
     model_name = MODEL_E5_BASE_V2
 
     def embed(self, text: str) -> list[float] | None:
         # Local import — keeps cold-start cheap and avoids a circular ref
-        # if app.services.sagemaker_embedder ever pulls from this module.
-        from .sagemaker_embedder import get_sagemaker_embedder
+        # if app.embedders ever pulls from this module.
+        from app.embedders.sync_bridge import embed_text_sync
 
-        sm = get_sagemaker_embedder()
-        if sm is None:
-            return None
-        vec = sm.embed(text)
+        vec = embed_text_sync(text)
         if vec:
             self._record_cost(text)
             return vec
@@ -169,11 +170,15 @@ class BgeCodeV1Embedder(CodeEmbedder):
         self._tried_init = False
 
     def _build_inner(self) -> Any | None:
-        """Construct an upstream SageMakerEmbedder pointing at the v2 endpoint.
+        """Construct a SageMaker backend pointing at the v2 endpoint.
 
         Reads ``SAGEMAKER_BGE_CODE_*`` env vars rather than the standard
         ``SAGEMAKER_EMBED_*`` ones so the v1 (E5) and v2 (BGE) endpoints can
         coexist.  Returns ``None`` when the endpoint is not configured.
+
+        Uses :class:`app.embedders.sagemaker.SageMakerEmbedder` directly
+        (not the env-var-driven factory) so the v2 endpoint stays isolated
+        from the production E5 backend selection.
         """
         url = (os.environ.get("SAGEMAKER_BGE_CODE_URL") or "").strip()
         endpoint = (os.environ.get("SAGEMAKER_BGE_CODE_ENDPOINT") or "").strip()
@@ -183,7 +188,7 @@ class BgeCodeV1Embedder(CodeEmbedder):
 
         region = (os.environ.get("SAGEMAKER_BGE_CODE_REGION") or "us-east-1").strip()
         try:
-            from codebase_rag.embedder import SageMakerEmbedder
+            from app.embedders.sagemaker import SageMakerEmbedder
         except ImportError as exc:  # pragma: no cover — surfaced clearly
             logger.warning("BGE-Code v2 embedder unavailable: %s", exc)
             return None
@@ -200,11 +205,17 @@ class BgeCodeV1Embedder(CodeEmbedder):
         except (TypeError, ValueError):
             batch_size = 16
 
-        return SageMakerEmbedder(
-            endpoint_name=endpoint,
-            region=region,
-            batch_size=batch_size,
-        )
+        try:
+            return SageMakerEmbedder(
+                endpoint_name=endpoint,
+                region=region,
+                batch_size=batch_size,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # SageMakerEmbedder raises EmbedderError on misconfig; treat
+            # that as "unavailable" so the caller falls back to E5.
+            logger.warning("BGE-Code v2 embedder unavailable: %s", exc)
+            return None
 
     @staticmethod
     def _warn_once() -> None:
@@ -227,10 +238,21 @@ class BgeCodeV1Embedder(CodeEmbedder):
             self._inner = self._build_inner()
         if self._inner is None:
             return None
-        vec = self._inner.embed(text)
-        if vec:
+        # ``app.embedders.sagemaker.SageMakerEmbedder.embed`` is async and
+        # batched. Run it on a fresh event loop and unwrap the single
+        # result so the legacy sync ``list[float] | None`` contract is
+        # preserved for this A/B harness.
+        import asyncio
+
+        try:
+            vectors = asyncio.run(self._inner.embed([text]))
+        except Exception as exc:  # noqa: BLE001 — preserve fail-soft contract
+            logger.warning("BGE-Code v2 embed failed: %s", exc)
+            return None
+
+        if vectors and vectors[0]:
             self._record_cost(text)
-            return vec
+            return vectors[0]
         return None
 
 

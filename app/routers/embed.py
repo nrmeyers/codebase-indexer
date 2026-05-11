@@ -1,5 +1,5 @@
-"""POST /embed — embed an arbitrary text string via the same SageMaker
-endpoint used for symbol ingestion.
+"""POST /embed — embed an arbitrary text string via the configured embedder
+backend (typically SageMaker in production; ``local`` for standalone installs).
 
 Returns a 768-dim e5-base-v2 vector ready for KNN / cosine ops against the
 indexer's per-repo centroids (``GET /repos/{name}/centroid``, BUC-1581).
@@ -9,8 +9,9 @@ BUC-1592: unblocks TheForge's cross-repo affinity weighting in real chat —
 it was the *query vector* (not the per-repo centroids) that was missing.
 
 Design notes:
-    * The SageMaker embedder is synchronous and returns ``list[float] | None``
-      on failure. We translate ``None`` to 503 so callers can fail-open at
+    * The embedder factory (:mod:`app.embedders`, BUC-1605) raises
+      :class:`EmbedderError` on hard failures (no endpoint, protocol
+      mismatch). We translate those to 503 so callers can fail-open at
       the orchestrator layer (uniform repo weights on failure, audit row,
       chat continues).
     * Auth middleware (BUC-1431 bearer) applies automatically — no extra
@@ -27,7 +28,7 @@ import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..services.sagemaker_embedder import get_sagemaker_embedder
+from ..embedders import EmbedderError, get_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,8 @@ class EmbedResponse(BaseModel):
 
 
 @router.post("/embed", response_model=EmbedResponse)
-def embed(req: EmbedRequest) -> EmbedResponse:
-    """Embed ``req.text`` via the shared SageMaker e5-base-v2 endpoint.
+async def embed(req: EmbedRequest) -> EmbedResponse:
+    """Embed ``req.text`` via the configured embedder backend.
 
     Returns:
         EmbedResponse: ``embedding`` (768-dim float list), ``dims`` (== 768
@@ -70,44 +71,57 @@ def embed(req: EmbedRequest) -> EmbedResponse:
         ``"e5-base-v2"``).
 
     Raises:
-        HTTPException: 503 when the SageMaker endpoint is unconfigured,
+        HTTPException: 503 when the embedder backend is unconfigured,
             unreachable, or returns no vector. Callers (TheForge
             orchestrator) treat this as "fall back to uniform weights",
             audit the failure, and let the chat turn complete normally.
     """
-    sm = get_sagemaker_embedder()
-    if sm is None:
-        # No endpoint configured — return 503 so the orchestrator can
-        # fail-open. We never want to 500 here because this endpoint is
-        # explicitly an optimisation, not a hard dependency.
+    # Resolve the backend lazily — EmbedderError surfaces both
+    # "no backend configured" and "backend misconfigured" as a single
+    # 503 with a descriptive detail. The legacy shim conflated these by
+    # returning ``None``; the new factory raises, which is strictly more
+    # informative.
+    try:
+        backend = get_embedder()
+    except EmbedderError as exc:
+        logger.warning("embed: backend unavailable: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail="embed unavailable: SageMaker endpoint not configured",
-        )
+            detail=f"embed unavailable: {exc}",
+        ) from exc
 
     t0 = time.time()
     try:
-        vec = sm.embed(req.text)
+        vectors = await backend.embed([req.text])
+    except EmbedderError as exc:
+        logger.warning("embed: backend %s call failed: %s", backend.name, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"embed failed: {exc}",
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — translate any backend error to 503
-        logger.warning("embed: SageMaker call failed: %s", exc)
+        logger.warning("embed: backend %s unexpected error: %s", backend.name, exc)
         raise HTTPException(
             status_code=503,
             detail=f"embed failed: {exc}",
         ) from exc
 
-    if vec is None or len(vec) == 0:
-        # Backend returned no vector — typically a transient SageMaker
-        # cold-start failure or a downstream HTTP timeout already swallowed
-        # inside ``SageMakerEmbedder.embed``. 503 keeps the contract simple
-        # for the orchestrator.
-        logger.warning("embed: SageMaker returned no vector for %d-char input", len(req.text))
+    if not vectors or not vectors[0]:
+        # Backend returned no vector — typically a transient cold-start
+        # failure or a downstream HTTP timeout already swallowed inside
+        # the backend. 503 keeps the contract simple for the orchestrator.
+        logger.warning(
+            "embed: backend %s returned no vector for %d-char input",
+            backend.name, len(req.text),
+        )
         raise HTTPException(
             status_code=503,
             detail="embed failed: empty vector from backend",
         )
 
+    vec = vectors[0]
     logger.info(
-        "embed: model=%s dims=%d latency_ms=%d",
-        _MODEL_NAME, len(vec), int((time.time() - t0) * 1000),
+        "embed: backend=%s model=%s dims=%d latency_ms=%d",
+        backend.name, _MODEL_NAME, len(vec), int((time.time() - t0) * 1000),
     )
     return EmbedResponse(embedding=vec, dims=len(vec), model=_MODEL_NAME)

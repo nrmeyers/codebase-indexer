@@ -135,16 +135,18 @@ _prewarmed_jobs: set[str] = set()
 
 
 def _prewarm_sagemaker_endpoint(job_id: str) -> None:
-    """Fire-and-forget warmup ping to the SageMaker embedding endpoint.
+    """Fire-and-forget warmup ping to the configured embedder backend.
 
-    Hides the 30-60s Serverless Inference cold start by running in parallel
-    with the parsing phase (~70s for typical repos).  By the time embedding
-    starts, the endpoint is already hot and the first real batch returns
-    in normal latency.
+    Originally added (BUC-1518 D1) to hide the 30-60s SageMaker Serverless
+    Inference cold start by running in parallel with the parsing phase
+    (~70s for typical repos). Still useful for the SageMaker backend after
+    the BUC-1605 generalisation; effectively a no-op for ``local`` / ``tei``
+    backends but cheap enough not to gate on backend type.
 
     Idempotent per job — only fires once even if the parsing-phase callback
-    runs multiple times for the same job_id.  Cheap (~$0.0001 per call) and
-    failures are silently swallowed since this is purely a latency optimisation.
+    runs multiple times for the same job_id.  Cheap (~$0.0001 per call on
+    SageMaker) and failures are silently swallowed since this is purely a
+    latency optimisation.
     """
     if job_id in _prewarmed_jobs:
         return
@@ -152,27 +154,31 @@ def _prewarm_sagemaker_endpoint(job_id: str) -> None:
 
     def _ping() -> None:
         try:
-            from ..services.sagemaker_embedder import get_sagemaker_embedder
-            sm = get_sagemaker_embedder()
-            if sm is None:
+            from ..embedders.sync_bridge import (
+                embed_text_sync,
+                get_embedder_or_none,
+            )
+
+            backend = get_embedder_or_none()
+            if backend is None:
                 return  # not configured; nothing to warm
             t0 = time.time()
-            sm.embed("warmup")
+            embed_text_sync("warmup")
             logger.info(
-                "SageMaker prewarm: endpoint=%s, latency=%.2fs (job=%s)",
-                sm.endpoint_name,
+                "Embedder prewarm: backend=%s, latency=%.2fs (job=%s)",
+                backend.name,
                 time.time() - t0,
                 job_id[:8],
             )
         except Exception as exc:  # noqa: BLE001
             # Warmup is best-effort — never fail the job over a missed ping.
             logger.debug(
-                "SageMaker prewarm failed (best-effort): %s: %s",
+                "Embedder prewarm failed (best-effort): %s: %s",
                 type(exc).__name__,
                 exc,
             )
 
-    threading.Thread(target=_ping, name=f"sm-prewarm-{job_id[:8]}", daemon=True).start()
+    threading.Thread(target=_ping, name=f"embed-prewarm-{job_id[:8]}", daemon=True).start()
 
 
 class _IndexCancelledError(RuntimeError):

@@ -14,15 +14,59 @@ be exercised in CI without network. This test instead pins the
 
 If the driver's hash composition is ever changed without also bumping
 the persistence layer, the round-trip assertion catches it.
+
+------------------------------------------------------------------------
+TODO(BUC-1518): upstream ``codebase_rag.storage.vector_store`` on
+``navistone/main`` does not currently expose ``read_content_hashes`` (nor
+the ``content_hash`` column).  The function was added in upstream commit
+``a4b3fd7`` ("feat(storage): add content_hash column to enable incremental
+embedding (BUC-1518 C2)") but that commit only lives on the side branch
+``feat/phase-8-hnsw-scaffold`` and was never merged to main.
+
+This test module is therefore **collection-skipped** until that branch is
+either rebased onto main or its functionality is re-derived.  Re-enable
+this file in one of two follow-ups:
+
+* land BUC-1518 on ``navistone/main`` and ``uv sync`` here, **or**
+* port ``read_content_hashes`` + the schema migration into a local helper
+  under ``app/embedders/`` and rewrite the imports here to target it.
+
+The production embed driver (``app/scripts/embed_driver.py`` line ~317)
+*also* imports ``read_content_hashes`` lazily; the lazy import means
+embed jobs degrade rather than crash, but the incremental-skip
+optimisation it gates is silently dead on ``navistone/main``.  That is a
+production gap, not just a test gap.
 """
 from __future__ import annotations
 
 import hashlib
+from importlib import util as _importlib_util
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("duckdb")
+
+# Collection-time guard: if ``read_content_hashes`` is absent from the
+# editable upstream we are pinned against, skip the whole module rather
+# than raising ImportError at collection.  Using ``find_spec`` + a
+# guarded ``getattr`` keeps the rest of pytest collection healthy.
+_vs_spec = _importlib_util.find_spec("codebase_rag.storage.vector_store")
+if _vs_spec is None:  # pragma: no cover — defensive
+    pytest.skip(
+        "codebase_rag.storage.vector_store is not importable",
+        allow_module_level=True,
+    )
+
+from codebase_rag.storage import vector_store as _vs  # noqa: E402
+
+if not hasattr(_vs, "read_content_hashes"):
+    pytest.skip(
+        "codebase_rag.storage.vector_store.read_content_hashes is missing on "
+        "the upstream branch this repo is pinned to (see module docstring "
+        "TODO(BUC-1518)).  Skipping incremental-embed persistence tests.",
+        allow_module_level=True,
+    )
 
 from codebase_rag.storage.vector_store import (  # noqa: E402
     EmbeddingRow,
