@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel
 
 from ..config import settings
@@ -799,6 +799,18 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # The structural graph is on disk and fully queryable at this point.
     indexed_repos.add(repo_name)
     indexed_repo_paths[repo_name] = str(repo)
+    # BUC-1599 — register / refresh the authoritative ``indexed_repos`` row
+    # so the next service restart can rehydrate without globbing the disk.
+    try:
+        _jobs_store.upsert_indexed_repo(
+            slug=repo_name,
+            display_name=repo_name,
+            db_path=repo_db_path,
+        )
+    except RuntimeError:
+        pass  # jobs_store not initialised (tests without lifespan)
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("jobs_store.upsert_indexed_repo non-fatal: %s", _exc)
     try:
         from .health import invalidate_probe_cache
         invalidate_probe_cache(repo_name)
@@ -914,6 +926,16 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             # status without a LadybugDB read (which contends with the
             # single-writer lock during a re-index).
             _write_meta(repo_name, last_indexed_sha=head_sha)
+            # BUC-1599 — advance the canonical ``indexed_repos`` row so
+            # restart-time rehydration sees the fresh SHA + timestamp.
+            try:
+                _jobs_store.mark_indexed(repo_name, last_commit_sha=head_sha)
+            except RuntimeError:
+                pass
+            except Exception as _mi_exc:  # noqa: BLE001
+                logger.debug(
+                    "jobs_store.mark_indexed non-fatal: %s", _mi_exc
+                )
             _stamp_db = lb.Database(repo_db_path)
             _stamp_conn = lb.Connection(_stamp_db)
             try:
@@ -939,6 +961,16 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
                 "RepoMeta stamp skipped: %s is not a git repo (incremental disabled)",
                 repo_name,
             )
+            # BUC-1599 — non-git case still advances ``last_indexed_at`` so
+            # /repos surfaces a fresh timestamp post-restart.
+            try:
+                _jobs_store.mark_indexed(repo_name)
+            except RuntimeError:
+                pass
+            except Exception as _mi_exc:  # noqa: BLE001
+                logger.debug(
+                    "jobs_store.mark_indexed non-fatal: %s", _mi_exc
+                )
     except Exception as _exc:
         # Stamping failures are non-fatal — the index already succeeded;
         # we just lose the ability to do incremental on the NEXT call.
@@ -1279,6 +1311,14 @@ async def _run_embed(job: _EmbedJob) -> None:
 async def start_index(
     req: IndexRequest,
     background_tasks: BackgroundTasks,
+    x_forge_triggered_by: str | None = Header(
+        default=None,
+        description=(
+            "Optional provenance hint persisted on the jobs row "
+            "(BUC-1599). One of 'manual' | 'webhook' | 'cron' | "
+            "'reindex_admin'. Defaults to 'manual' when absent."
+        ),
+    ),
 ) -> IndexAccepted:
     """Kick off a background indexing job for the given repository.
 
@@ -1415,6 +1455,10 @@ async def start_index(
     _jobs[job_id] = job
 
     # Phase 2: persist to jobs_store (best-effort — never fail the request).
+    # BUC-1599: ``triggered_by`` defaults to 'manual'; callers (webhook
+    # receiver, cron scheduler, admin reindex flow) set the header to
+    # mark a different provenance.
+    _triggered_by = (x_forge_triggered_by or "manual").strip().lower() or "manual"
     try:
         _jobs_store.create_job(
             kind="index",
@@ -1426,6 +1470,7 @@ async def start_index(
             worker_token=_WORKER_TOKEN,
             initial_status="running",
             initial_phase="queued",
+            triggered_by=_triggered_by,
         )
         # Override the UUID to match the in-memory job so pollers get consistent ids.
         # jobs_store.create_job generates its own UUID; we keep the in-memory job_id
@@ -2140,6 +2185,20 @@ def _delete_jobs_for_repo(repo: str) -> str:
         return f"error: {msg}"
 
 
+def _delete_indexed_repo_row(repo: str) -> str:
+    """Drop the ``indexed_repos`` row for ``repo`` (BUC-1599).
+
+    Returns status string: "deleted" | "not found" | "error: <msg>".
+    """
+    try:
+        removed = _jobs_store.delete_indexed_repo(repo)
+        return "deleted" if removed else "not found"
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        logger.warning("_delete_indexed_repo_row(%s) failed: %s", repo, msg)
+        return f"error: {msg}"
+
+
 def _delete_repo_meta(repo: str) -> str:
     """Delete repo metadata entry (no-op for now — repo_metadata is in .duck file).
 
@@ -2197,6 +2256,7 @@ def delete_index(repo: str) -> DeleteIndexResponse:
     cleanup["embedding_cache"] = _drop_embedding_cache_entries(repo)
     cleanup["embed_logs"] = _delete_embed_logs(repo)
     cleanup["jobs_store"] = _delete_jobs_for_repo(repo)
+    cleanup["indexed_repos"] = _delete_indexed_repo_row(repo)
     cleanup["repo_meta"] = _delete_repo_meta(repo)
 
     # Build list of removed files (for backward compatibility).
@@ -2349,3 +2409,42 @@ def delete_job(job_id: str) -> JobClearResponse:
         )
     del _jobs[job_id]
     return JobClearResponse(cleared=1, remaining=len(_jobs))
+
+
+
+# ---------------------------------------------------------------------------
+# BUC-1599 — job_events surface for the FE timeline
+# ---------------------------------------------------------------------------
+
+
+class JobEventOut(BaseModel):
+    """One row in ``GET /jobs/{job_id}/events``."""
+
+    id: int
+    job_id: str
+    ts: int
+    level: Literal["info", "warn", "error"]
+    message: str
+
+
+class JobEventsResponse(BaseModel):
+    """Envelope for ``GET /jobs/{job_id}/events``."""
+
+    job_id: str
+    events: list[JobEventOut]
+
+
+@router.get("/jobs/{job_id}/events", response_model=JobEventsResponse)
+def get_job_events(job_id: str, limit: int = 100) -> JobEventsResponse:
+    """Return the recorded events for ``job_id``, oldest-first.
+
+    No pagination in v1 — capped at ``limit`` (default 100, hard ceiling
+    1000 inside the DAO). The FE renders this as the per-job activity
+    timeline; future structured progress events will reuse the same
+    surface without a schema change.
+    """
+    rows = _jobs_store.list_job_events(job_id, limit=limit)
+    return JobEventsResponse(
+        job_id=job_id,
+        events=[JobEventOut(**r) for r in rows],  # type: ignore[arg-type]
+    )

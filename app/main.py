@@ -160,15 +160,75 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if swept or stale:
         _log.info("Reaped %d orphan job(s) and %d stale lock(s).", swept, stale)
 
-    # Rehydrate the in-memory `indexed_repo_paths` map from the per-repo
-    # ``.duck`` ``repo_metadata`` rows left behind by past index jobs.
-    # Without this, every restart loses the repo→abs-path mapping and
-    # callers (the orchestrator's chat flow, /context-bundle validation)
-    # can no longer resolve a repo slug back to a path until a fresh
-    # index runs.
+    # Rehydrate the in-memory `indexed_repo_paths` map. Two stores
+    # cooperate here (BUC-1599):
+    #   1. ``jobs_store.indexed_repos`` — authoritative table created in
+    #      v2, keyed by canonical slug. Tells us which repos we've ever
+    #      indexed and where their DB lives.
+    #   2. per-repo DuckDB ``repo_metadata`` — written by every index
+    #      job's ``_write_meta`` call. Still the source-of-truth for the
+    #      absolute filesystem path of the repo working tree.
+    #
+    # First boot after the v2 migration, ``indexed_repos`` is empty even
+    # on a system that has plenty of ``.cgr/repos/*.db`` files on disk.
+    # The reconcile pass below glob-discovers any orphans and back-
+    # populates the table from their DuckDB ``repo_metadata`` rows.
     from .routers.index import indexed_repo_paths, indexed_repos, _read_meta
-    for db_file in sorted(db_dir.glob("*.db")):
-        _slug = db_file.stem  # "TheForge.db" → "TheForge"
+
+    def _reconcile_indexed_repos() -> int:
+        """Back-populate ``indexed_repos`` from on-disk artefacts.
+
+        Walks ``LADYBUG_DB_DIR/*.db``; for every DB whose slug isn't
+        already in ``indexed_repos`` we look up its DuckDB
+        ``repo_metadata`` and upsert a row. Returns the number of rows
+        added so the lifespan can log it.
+        """
+        existing = {r["slug"] for r in _jobs_store.list_indexed_repos()}
+        added = 0
+        for db_file in sorted(db_dir.glob("*.db")):
+            _slug = db_file.stem
+            if _slug in existing:
+                continue
+            try:
+                _meta = _read_meta(_slug)
+            except Exception:
+                _meta = {}
+            try:
+                _jobs_store.upsert_indexed_repo(
+                    slug=_slug,
+                    display_name=_slug,
+                    db_path=str(db_file),
+                    last_commit_sha=_meta.get("last_indexed_sha") or None,
+                )
+                _li = _meta.get("last_indexed_at")
+                if _li is not None:
+                    try:
+                        _ = float(_li)
+                        _jobs_store.mark_indexed(
+                            _slug,
+                            last_commit_sha=_meta.get("last_indexed_sha") or None,
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                added += 1
+            except Exception as _exc:  # noqa: BLE001
+                _log.warning(
+                    "reconcile_indexed_repos: upsert %s failed (non-fatal): %s",
+                    _slug, _exc,
+                )
+        return added
+
+    _reconciled = _reconcile_indexed_repos()
+    if _reconciled:
+        _log.info(
+            "reconcile_indexed_repos: back-populated %d row(s) from on-disk artefacts.",
+            _reconciled,
+        )
+
+    for _row in _jobs_store.list_indexed_repos():
+        _slug = str(_row.get("slug") or "")
+        if not _slug:
+            continue
         try:
             _meta = _read_meta(_slug)
         except Exception:
@@ -177,8 +237,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if _root and _Path(_root).exists():
             indexed_repo_paths[_slug] = _root
             indexed_repos.add(_slug)
+        else:
+            # No DuckDB metadata, but the indexed_repos row exists: surface
+            # the slug to /health anyway so callers don't see the repo
+            # vanish across a restart.
+            indexed_repos.add(_slug)
     _log.info(
-        "Rehydrated %d repo path(s) from DuckDB repo_metadata.",
+        "Rehydrated %d repo path(s) from indexed_repos + DuckDB repo_metadata.",
         len(indexed_repo_paths),
     )
 

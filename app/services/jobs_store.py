@@ -44,7 +44,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-_DDL = """
+_SCHEMA_VERSION = 2
+
+
+_DDL_V1 = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
@@ -93,6 +96,39 @@ INSERT OR IGNORE INTO schema_meta(key,value) VALUES ('version','1');
 """
 
 
+# ---------------------------------------------------------------------------
+# v2 additions (BUC-1599): indexed_repos table, triggered_by column on jobs,
+# and an optional job_events log. Applied on top of v1 by _migrate_v1_to_v2().
+# ---------------------------------------------------------------------------
+_DDL_V2_ADDITIONS = """
+CREATE TABLE IF NOT EXISTS indexed_repos (
+  id TEXT PRIMARY KEY,
+  slug TEXT UNIQUE NOT NULL,
+  display_name TEXT NOT NULL,
+  remote_url TEXT,
+  db_path TEXT NOT NULL,
+  last_indexed_at INTEGER,
+  last_commit_sha TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_indexed_repos_slug ON indexed_repos(slug);
+
+CREATE TABLE IF NOT EXISTS job_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  level TEXT NOT NULL CHECK(level IN ('info','warn','error')),
+  message TEXT NOT NULL,
+  FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_events_job_id ON job_events(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_events_ts     ON job_events(ts);
+"""
+
+
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"done", "failed", "cancelled", "interrupted"}
 )
@@ -138,6 +174,7 @@ class Job:
     started_at: float
     updated_at: float
     finished_at: float | None
+    triggered_by: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +221,25 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         finished_at=(
             float(row["finished_at"]) if row["finished_at"] is not None else None
         ),
+        triggered_by=_row_get(row, "triggered_by"),
     )
+
+
+def _row_get(row: sqlite3.Row, key: str) -> str | None:
+    """Safe column-fetch — returns None when the column is missing.
+
+    ``sqlite3.Row`` raises ``IndexError`` if the key isn't in the cursor
+    description, so we trap that and treat it as ``None``. Lets us add
+    columns over time without breaking callers that fetched rows before
+    the migration ran.
+    """
+    try:
+        val = row[key]
+    except (IndexError, KeyError):
+        return None
+    if val is None:
+        return None
+    return str(val)
 
 
 # ---------------------------------------------------------------------------
@@ -192,13 +247,62 @@ def _row_to_job(row: sqlite3.Row) -> Job:
 # ---------------------------------------------------------------------------
 
 
+def _read_schema_version(conn: sqlite3.Connection) -> int:
+    """Return the schema_meta 'version' as an int (defaults to 1 on miss)."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'version'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 1
+    if row is None:
+        return 1
+    try:
+        return int(row["value"] if isinstance(row, sqlite3.Row) else row[0])
+    except (TypeError, ValueError):
+        return 1
+
+
+def _jobs_has_column(conn: sqlite3.Connection, column: str) -> bool:
+    """Return True iff ``jobs`` already has ``column``."""
+    rows = conn.execute("PRAGMA table_info(jobs)").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Apply the v2 schema additions on top of an existing v1 database.
+
+    Steps:
+        1. ``ALTER TABLE jobs ADD COLUMN triggered_by TEXT`` (idempotent —
+           skipped when the column already exists).
+        2. Create ``indexed_repos`` + ``job_events`` tables and their
+           indexes (``IF NOT EXISTS`` makes this idempotent).
+        3. Bump ``schema_meta.version`` to ``'2'``.
+    """
+    if not _jobs_has_column(conn, "triggered_by"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN triggered_by TEXT")
+    conn.executescript(_DDL_V2_ADDITIONS)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('version', ?)",
+        (str(_SCHEMA_VERSION),),
+    )
+
+
 def init(db_path: str) -> None:
     """Open (or reopen) the persistent jobs database at ``db_path``.
 
-    Creates the parent directory if missing, applies WAL/PRAGMAs, and
-    runs the idempotent ``CREATE TABLE IF NOT EXISTS`` DDL. Safe to call
+    Creates the parent directory if missing, applies WAL/PRAGMAs, runs the
+    idempotent v1 DDL, and then promotes the schema to the current
+    ``_SCHEMA_VERSION`` via the version-bump migrations. Safe to call
     multiple times — subsequent calls swap the underlying connection so
     tests can re-init against a fresh ``:memory:`` or ``tmp_path`` DB.
+
+    Migration policy (BUC-1599):
+        * v1 → v2 adds the ``triggered_by`` column on ``jobs`` and the
+          ``indexed_repos`` + ``job_events`` tables. Idempotent.
+        * Migrations are irreversible by design — rolling back would
+          require dropping columns/tables that may already hold production
+          data. Tag releases before deploying a schema bump.
     """
     global _conn, _db_path
     with _lock:
@@ -216,10 +320,13 @@ def init(db_path: str) -> None:
             db_path, check_same_thread=False, isolation_level=None
         )
         conn.row_factory = sqlite3.Row
-        conn.executescript(_DDL)
+        conn.executescript(_DDL_V1)
+        _migrate_v1_to_v2(conn)
         _conn = conn
         _db_path = db_path
-    logger.info("jobs_store initialised at %s", db_path)
+    logger.info(
+        "jobs_store initialised at %s (schema_version=%d)", db_path, _SCHEMA_VERSION
+    )
 
 
 def _require_conn() -> sqlite3.Connection:
@@ -246,6 +353,7 @@ def create_job(
     worker_token: str | None = None,
     initial_status: str = "running",
     initial_phase: str = "queued",
+    triggered_by: str = "manual",
 ) -> Job:
     """Insert a new ``running`` job row and return the snapshot.
 
@@ -282,11 +390,13 @@ def create_job(
               status, phase, progress_pct, files_total, files_done,
               current_file, node_count, rel_count, embedding_count,
               force_reindex, exclude_paths, error, cancel_requested,
-              pid, worker_token, started_at, updated_at, finished_at
+              pid, worker_token, started_at, updated_at, finished_at,
+              triggered_by
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0, 0,
                       NULL, 0, 0, 0,
                       ?, ?, NULL, 0,
-                      ?, ?, ?, ?, NULL)
+                      ?, ?, ?, ?, NULL,
+                      ?)
             """,
             (
                 job_id,
@@ -303,6 +413,7 @@ def create_job(
                 worker_token,
                 now,
                 now,
+                triggered_by,
             ),
         )
         row = conn.execute(
@@ -401,6 +512,13 @@ def mark_done(
                 job_id,
             ),
         )
+    # BUC-1599 — record terminal-success event for the FE timeline.
+    _record_event_unlocked(
+        job_id,
+        "info",
+        f"done: nodes={int(node_count)} rels={int(rel_count)} "
+        f"embeddings={int(embedding_count)}",
+    )
 
 
 def mark_failed(
@@ -428,6 +546,12 @@ def mark_failed(
             """,
             (terminal_status, error, now, now, job_id),
         )
+    # BUC-1599 — record terminal-failure event. ``cancelled`` is an
+    # explicit user action, not a fault, so log it as ``warn``.
+    _level = "error" if terminal_status == "failed" else "warn"
+    _record_event_unlocked(
+        job_id, _level, f"{terminal_status}: {error[:500]}"
+    )
 
 
 def request_cancel(job_id: str) -> bool:
@@ -707,6 +831,194 @@ def journal_mode() -> str:
 def db_path() -> str:
     """Return the path the store was initialised against."""
     return _db_path
+
+
+
+# ---------------------------------------------------------------------------
+# indexed_repos DAO (BUC-1599)
+# ---------------------------------------------------------------------------
+#
+# Authoritative record of which repos have a usable index on disk. Replaces
+# the filesystem-glob rehydration in ``app/main.py``'s lifespan. The
+# per-repo DuckDB ``repo_metadata`` table stays as a redundant read path
+# (and as the source-of-truth for ``reconcile_indexed_repos`` to back-fill
+# from when this table is empty on first upgrade).
+
+
+def init_indexed_repos() -> None:
+    """No-op kept for API parity with ``init()``."""
+    _require_conn()
+
+
+def upsert_indexed_repo(
+    *,
+    slug: str,
+    display_name: str,
+    db_path: str,
+    remote_url: str | None = None,
+    last_commit_sha: str | None = None,
+) -> None:
+    """Insert or update a row in ``indexed_repos``.
+
+    Sets ``updated_at`` to wall-clock now on every call. Preserves
+    ``created_at`` and ``last_indexed_at`` on update — the latter is
+    advanced via :func:`mark_indexed` after a successful index run.
+    """
+    conn = _require_conn()
+    now = int(time.time())
+    new_id = str(uuid.uuid4())
+    with _lock:
+        if last_commit_sha is None:
+            conn.execute(
+                """
+                INSERT INTO indexed_repos (
+                  id, slug, display_name, remote_url, db_path,
+                  last_indexed_at, last_commit_sha,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                ON CONFLICT(slug) DO UPDATE SET
+                  display_name = excluded.display_name,
+                  remote_url   = excluded.remote_url,
+                  db_path      = excluded.db_path,
+                  updated_at   = excluded.updated_at
+                """,
+                (new_id, slug, display_name, remote_url, db_path, now, now),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO indexed_repos (
+                  id, slug, display_name, remote_url, db_path,
+                  last_indexed_at, last_commit_sha,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                ON CONFLICT(slug) DO UPDATE SET
+                  display_name    = excluded.display_name,
+                  remote_url      = excluded.remote_url,
+                  db_path         = excluded.db_path,
+                  last_commit_sha = excluded.last_commit_sha,
+                  updated_at      = excluded.updated_at
+                """,
+                (
+                    new_id, slug, display_name, remote_url, db_path,
+                    last_commit_sha, now, now,
+                ),
+            )
+
+
+def get_indexed_repo(slug: str) -> dict[str, object] | None:
+    """Return the row dict for ``slug``, or None when no row matches."""
+    conn = _require_conn()
+    row = conn.execute(
+        "SELECT * FROM indexed_repos WHERE slug = ?", (slug,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_indexed_repos() -> list[dict[str, object]]:
+    """Return every row in ``indexed_repos``, newest-first by ``updated_at``."""
+    conn = _require_conn()
+    rows = conn.execute(
+        "SELECT * FROM indexed_repos ORDER BY updated_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_indexed(slug: str, *, last_commit_sha: str | None = None) -> bool:
+    """Advance ``last_indexed_at`` (and optionally ``last_commit_sha``)."""
+    conn = _require_conn()
+    now = int(time.time())
+    with _lock:
+        if last_commit_sha is None:
+            cur = conn.execute(
+                """
+                UPDATE indexed_repos
+                   SET last_indexed_at = ?, updated_at = ?
+                 WHERE slug = ?
+                """,
+                (now, now, slug),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE indexed_repos
+                   SET last_indexed_at = ?,
+                       last_commit_sha = ?,
+                       updated_at = ?
+                 WHERE slug = ?
+                """,
+                (now, last_commit_sha, now, slug),
+            )
+        return cur.rowcount > 0
+
+
+def delete_indexed_repo(slug: str) -> bool:
+    """Drop a row from ``indexed_repos``. Returns True iff one was deleted."""
+    conn = _require_conn()
+    with _lock:
+        cur = conn.execute(
+            "DELETE FROM indexed_repos WHERE slug = ?", (slug,)
+        )
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# job_events DAO (BUC-1599)
+# ---------------------------------------------------------------------------
+
+
+def _record_event_unlocked(job_id: str, level: str, message: str) -> None:
+    """Internal helper used by ``mark_done`` / ``mark_failed``.
+
+    Wraps :func:`record_event` so a write-fail can never bubble out of a
+    terminal transition. Skipped silently when the store is not
+    initialised (test fixtures that don't call ``init``).
+    """
+    if _conn is None:
+        return
+    try:
+        record_event(job_id, level, message)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "jobs_store: record_event(%s, %s) failed (non-fatal)", job_id, level
+        )
+
+
+def record_event(job_id: str, level: str, message: str) -> int:
+    """Append a row to ``job_events``. Returns the new event id.
+
+    ``level`` is one of ``info`` | ``warn`` | ``error`` — other values are
+    rejected by the CHECK constraint at the DB level.
+    """
+    conn = _require_conn()
+    now = int(time.time())
+    with _lock:
+        cur = conn.execute(
+            "INSERT INTO job_events (job_id, ts, level, message) VALUES (?, ?, ?, ?)",
+            (job_id, now, level, message),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def list_job_events(job_id: str, limit: int = 100) -> list[dict[str, object]]:
+    """Return up to ``limit`` events for ``job_id``, oldest-first.
+
+    Capped at 1000 to keep the response bounded; pagination is intentionally
+    deferred to a follow-up PR.
+    """
+    capped = max(1, min(int(limit), 1000))
+    conn = _require_conn()
+    rows = conn.execute(
+        """
+        SELECT id, job_id, ts, level, message
+          FROM job_events
+         WHERE job_id = ?
+         ORDER BY ts ASC, id ASC
+         LIMIT ?
+        """,
+        (job_id, capped),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

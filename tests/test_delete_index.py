@@ -102,7 +102,7 @@ class TestDeleteIndex:
         body = resp.json()
         cleanup = body["cleanup"]
 
-        # All 7 resource types should be present
+        # All 8 resource types should be present (added indexed_repos in BUC-1599).
         assert set(cleanup.keys()) == {
             "ladybug_db",
             "duckdb",
@@ -110,6 +110,7 @@ class TestDeleteIndex:
             "embedding_cache",
             "embed_logs",
             "jobs_store",
+            "indexed_repos",
             "repo_meta",
         }
 
