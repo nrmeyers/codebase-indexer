@@ -224,6 +224,11 @@ class _Job:
     embedded_count: int = 0
     embeddings_skipped_unchanged: int = 0
     embeddings_filtered_out: int = 0
+    # BUC-1601 (Fix A) — count of source-file read failures the embed
+    # driver hit and explicitly dropped.  Should be 0 on healthy runs;
+    # a non-zero value means the working tree was mutated mid-index or
+    # the graph references files that no longer exist on disk.
+    embeddings_dropped_unreadable: int = 0
     # BUC-1574 (Phase 1.4) — diff-metrics instrumentation. Captured from the
     # embed subprocess so /index/{job_id}/diff_metrics can report the
     # incremental-embed audit shape without re-tailing the log.
@@ -836,6 +841,11 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     job.embeddings_filtered_out = max(
         job.embeddings_filtered_out, embed_job.skipped_filtered
     )
+    # BUC-1601 (Fix A) — lift the read-failure count so it surfaces in
+    # /diff_metrics alongside the other skip categories.
+    job.embeddings_dropped_unreadable = max(
+        job.embeddings_dropped_unreadable, embed_job.dropped_unreadable
+    )
     job.embed_finished_at = embed_job.finished_at or time.time()
 
     # --- Plan J: PageRank centrality (best-effort, never fail the job) ---
@@ -1002,12 +1012,49 @@ class _EmbedJob:
     # embed subprocess summary line.
     skipped_unchanged: int = 0
     skipped_filtered: int = 0
+    # BUC-1601 (Fix A) — count of source files the embed subprocess
+    # tried to read off disk and failed.  Should be 0 on healthy runs.
+    dropped_unreadable: int = 0
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
 
 
 _embed_jobs: dict[str, _EmbedJob] = {}
+
+
+def _parse_reconcile_line(line: str) -> dict[str, int]:
+    """Parse the trailing ``RECONCILE k=v k=v ...`` line from the embed log.
+
+    BUC-1601 Fix A — the driver emits this line once at end-of-pass.
+    Lifted to a module-level helper so the post-subprocess parsing path
+    can be exercised by a unit test without spawning a subprocess.
+
+    Args:
+        line: One line from the embed subprocess log, leading and
+            trailing whitespace allowed.  Expected to start with the
+            literal token ``RECONCILE`` followed by ``key=integer``
+            tokens separated by whitespace.
+
+    Returns:
+        Dict mapping each ``key`` to its integer value.  Non-integer
+        values and tokens without ``=`` are silently dropped — the
+        caller falls back to live job-record counts in that case.  When
+        ``line`` does not start with ``RECONCILE`` the result is empty.
+    """
+    parts = line.strip().split()
+    if not parts or parts[0] != "RECONCILE":
+        return {}
+    out: dict[str, int] = {}
+    for tok in parts[1:]:
+        if "=" not in tok:
+            continue
+        _k, _v = tok.split("=", 1)
+        try:
+            out[_k] = int(_v)
+        except ValueError:
+            continue
+    return out
 
 
 def _blocking_embed(job: _EmbedJob) -> None:
@@ -1036,681 +1083,18 @@ def _blocking_embed(job: _EmbedJob) -> None:
     #   4. Writes rows to the per-repo .duck file (DuckDB FLOAT[768])
     # Running in a subprocess means an OOM kill doesn't affect uvicorn.
     vec_db_path = settings.vec_db_path_for_repo(job.repo_name)
-    driver = f"""
-import hashlib
-import os
-import re
-import signal
-import sys
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-
-import real_ladybug as lb
-from codebase_rag.embedder import embed_code_batch
-from codebase_rag.storage.vector_store import (
-    EmbeddingRow,
-    bulk_insert,
-    open_or_create,
-    read_content_hashes,
-    write_metadata,
-)
-from codebase_rag.storage.docstring_format import format_docstring
-
-
-# Per-batch wall-clock watchdog.  If a single embed_code_batch call takes
-# longer than this, we abort the subprocess with a clear error rather than
-# hanging indefinitely.  150s is generous: batch=16 with cold start is
-# ~30s, sustained is ~16s; 150s catches genuinely stuck calls fast.
-def _alarm_handler(signum, frame):
-    raise TimeoutError("embed_code_batch exceeded 150s — single call wedged")
-signal.signal(signal.SIGALRM, _alarm_handler)
-
-# BUC-1517: number of concurrent SageMaker invocations.  Capped at 2
-# because Serverless Inference has a hard 60s per-call timeout.  Each
-# outer batch of 50 items splits into ~4 inner SageMaker calls; with
-# concurrency=2 we submit 8 simultaneous calls into a 5-worker endpoint,
-# which fits in 2 worker rounds × ~30s = under the 60s ceiling.
-# Concurrency >= 3 risks one of the queued calls timing out and tripping
-# the local-torch fallback, which is dramatically slower than just being
-# patient with serverless.  Override via SAGEMAKER_EMBED_CONCURRENCY.
-_CONCURRENCY = int(os.environ.get("SAGEMAKER_EMBED_CONCURRENCY") or "2")
-
-# BUC-1519: skip-embed heuristics. Symbols whose source files match these
-# patterns add nothing to semantic search but cost SageMaker time and money.
-# Test files dominate this list (often 25-35% of repos); generated code
-# is usually 5-10%.
-_SKIP_PATTERNS = [
-    re.compile(p) for p in [
-        r"(^|/)tests?/",                           # /tests/ or /test/ dir
-        r"_test\.(py|go|rs|js|ts|tsx)$",           # foo_test.go etc.
-        r"\\.test\\.(js|ts|tsx|jsx)$",             # foo.test.ts
-        r"\\.spec\\.(js|ts|tsx|jsx)$",             # foo.spec.ts
-        r"(^|/)__tests__/",                        # JS/TS __tests__/
-        r"(^|/)test_[^/]+\\.py$",                  # test_foo.py
-        r"(^|/)conftest\\.py$",                    # pytest fixtures
-        r"\\.pb\\.(go|py|cc|h)$",                  # protobuf-generated
-        r"_pb2\\.py$",                             # protobuf-generated python
-        r"_pb2_grpc\\.py$",                        # grpc-generated
-        r"(^|/)generated/",                        # */generated/* dirs
-        r"_generated\\.(go|py|ts|tsx)$",
-        r"(^|/)vendor/",                           # vendored deps
-        r"(^|/)node_modules/",                     # JS deps
-        r"(^|/)\\.venv/",                          # python venv
-        r"(^|/)dist/",                             # build outputs
-        r"(^|/)build/",                            # build outputs
+    # BUC-1601: shell out to app/scripts/embed_driver.py via
+    # ``python -m`` instead of the legacy ``python -c`` f-string.
+    # The module is unit-testable and lives at app/scripts/embed_driver.py.
+    # All previous flags (SAGEMAKER_EMBED_CONCURRENCY, MANIFEST_URL,
+    # MANIFEST_AGENT_KEY, MANIFEST_FILE_SUMMARY_MODEL) are still read
+    # from the inherited environment.
+    driver_argv = [
+        sys.executable, "-m", "app.scripts.embed_driver",
+        "--repo-db-path", str(repo_db_path),
+        "--vec-db-path", str(vec_db_path),
+        "--repo-path", repo_path_str,
     ]
-]
-
-
-# Return True for file paths whose symbols are not worth embedding
-# (test / generated / vendored).  Single-line def — no docstring because
-# this whole module body is itself inside a triple-quoted f-string driver
-# and apostrophes in docstrings collide with the outer delimiters.
-def _should_skip_embed(file_path: str) -> bool:
-    return any(p.search(file_path) for p in _SKIP_PATTERNS)
-
-# Open LadybugDB read-only to query symbol locations.
-#
-# ``read_only=True`` is critical here: when /index/embed is invoked
-# while uvicorn is also live, the parent process already holds the DB
-# file open via the count-query block above (and FastAPI tooling can
-# also keep handles around).  LadybugDB takes a write lock by default
-# (``IO exception: Could not set lock on file: …``) and the embed
-# subprocess fails with exit 1 before the user ever sees progress.
-# Read-only opens skip the write lock and multiple readers can coexist
-# with the live indexer — exactly what we want here, since the embed
-# pass only QUERIES the graph and writes vectors to a separate .duck
-# file.
-_db = lb.Database({repr(repo_db_path)}, read_only=True)
-_conn_lb = lb.Connection(_db)
-
-_cypher = '''
-MATCH (m:Module)-[:DEFINES]->(n:Function)
-OPTIONAL MATCH (_caller)-[:CALLS]->(n)
-WITH m, n, count(_caller) AS caller_count
-RETURN n.qualified_name AS qualified_name,
-       n.start_line     AS start_line,
-       n.end_line       AS end_line,
-       m.path           AS rel_path,
-       n.docstring      AS docstring,
-       'Function'       AS symbol_type,
-       caller_count     AS caller_count
-UNION ALL
-MATCH (m:Module)-[:DEFINES]->(_c:Class)-[:DEFINES_METHOD]->(n:Method)
-OPTIONAL MATCH (_caller)-[:CALLS]->(n)
-WITH m, n, count(_caller) AS caller_count
-RETURN n.qualified_name AS qualified_name,
-       n.start_line     AS start_line,
-       n.end_line       AS end_line,
-       m.path           AS rel_path,
-       n.docstring      AS docstring,
-       'Method'         AS symbol_type,
-       caller_count     AS caller_count
-'''
-_result = _conn_lb.execute(_cypher)
-_col_names = _result.get_column_names()
-_rows = []
-while _result.has_next():
-    _raw = _result.get_next()
-    _rows.append(dict(zip(_col_names, _raw)))
-
-_conn_lb.close()
-del _conn_lb, _db
-
-_root_path = {repr(repo_path_str)}
-
-# Open (or create) the DuckDB vector store (.duck)
-_vec_conn = open_or_create({repr(vec_db_path)})
-
-# BUC-1518 C2 — incremental embedding. Pre-load every existing
-# content_hash from the .duck file. For each candidate symbol, hash its
-# source range and skip the SageMaker call entirely if the hash matches
-# the stored one (== content unchanged since last index).  For typical
-# commits touching a few files, this skips 95-99% of the work.
-_existing_hashes = read_content_hashes(_vec_conn)
-print(f"existing content_hashes: {{len(_existing_hashes)}}", flush=True)
-
-_BATCH = 50
-_embedded_count = 0
-_skipped_unchanged = 0
-_skipped_filtered = 0
-_batch_texts: list[str] = []
-# Now also carry the content_hash for each item — written back to .duck
-# alongside the embedding so future re-indexes can skip them too.
-_batch_meta: list[tuple[str, str, int, int, str, str]] = []
-# BUC-1517 — concurrency: pending outer batches that haven't been
-# dispatched to SageMaker yet.  When this list reaches _CONCURRENCY, we
-# flush them all in parallel via a ThreadPoolExecutor.
-_pending_batches: list[tuple[list[str], list[tuple[str, str, int, int, str, str]]]] = []
-
-
-# Submit each pending outer batch to a thread, gather results, bulk insert
-def _flush_pending(pool):
-    global _embedded_count
-    if not _pending_batches:
-        return
-    signal.alarm(150 + 30 * len(_pending_batches))  # +30s margin per concurrent batch
-    try:
-        # Submit all batches; futures preserve insertion order so results align
-        futures = [
-            pool.submit(embed_code_batch, texts)
-            for texts, _meta in _pending_batches
-        ]
-        all_inserts = []
-        for fut, (_texts, meta) in zip(futures, _pending_batches):
-            embs = fut.result()
-            for _m, _e in zip(meta, embs):
-                all_inserts.append(EmbeddingRow(
-                    qualified_name=_m[0], embedding=_e,
-                    file_path=_m[1], start_line=_m[2], end_line=_m[3],
-                    symbol_type=_m[4], content_hash=_m[5],
-                ))
-        bulk_insert(_vec_conn, all_inserts)
-        _embedded_count += len(all_inserts)
-    finally:
-        signal.alarm(0)
-    _pending_batches.clear()
-    print(f"PROGRESS embedded={{_embedded_count}} skipped={{_skipped_unchanged}} filtered={{_skipped_filtered}}", flush=True)
-
-
-_pool = ThreadPoolExecutor(max_workers=_CONCURRENCY)
-
-for _row in _rows:
-    _qname = _row.get("qualified_name")
-    _start  = _row.get("start_line")
-    _end    = _row.get("end_line")
-    _rel    = _row.get("rel_path") or ""
-    _doc    = _row.get("docstring") or ""
-    _stype  = _row.get("symbol_type") or "Function"
-    _callers = int(_row.get("caller_count") or 0)
-
-    if not _qname or _start is None or _end is None or not _rel:
-        continue
-
-    # BUC-1519 — skip embedding for tests / generated / vendored files.
-    # Test files are rarely the target of semantic search and dominate
-    # the symbol count in many repos.  Filter on the relative path so
-    # patterns like /tests/ or .test.ts work portably.
-    if _should_skip_embed(_rel):
-        _skipped_filtered += 1
-        continue
-
-    _abs = _rel if Path(_rel).is_absolute() else (
-        str(Path(_root_path) / _rel) if _root_path else _rel
-    )
-
-    try:
-        _lines = Path(_abs).read_text(encoding="utf-8", errors="replace").splitlines()
-        _src = "\\n".join(_lines[max(0, int(_start) - 1):int(_end)])
-        if not _src.strip():
-            continue
-    except Exception:
-        continue
-
-    # Double-braces below escape the OUTER f-string (this entire `driver`
-    # block is an f-string in the parent process); the subprocess sees
-    # single-brace f-strings that interpolate _stype/_qname/_mod_path/_callers
-    # in the loop-local scope. Same trick already used on the EMBED_DONE
-    # print near the bottom of this driver. Fix for the regression in
-    # commit b12df5d.
-    _header_parts = [f"# {{_stype}}: {{_qname}}"]
-    _mod_path = ".".join(_qname.split(".")[:-1])
-    if _mod_path:
-        _header_parts.append(f"# Module: {{_mod_path}}")
-    if _callers > 0:
-        _header_parts.append(f"# Callers: {{_callers}}")
-    _header_parts.append("# ---")
-    _formatted_doc = format_docstring(_doc)
-    if _formatted_doc:
-        _header_parts.append(_formatted_doc)
-    _header_parts.append(_src)
-    _embed_text = "\\n".join(_header_parts)
-    # BUC-1518 C2 — incremental skip:  hash the actual embed input (header
-    # + source) so any change to source, docstring, or caller-count flips
-    # the hash and triggers re-embedding.  SHA-1 is fine here — we're not
-    # using it cryptographically, only as a content fingerprint.
-    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
-    if _existing_hashes.get(_qname) == _content_hash:
-        _skipped_unchanged += 1
-        continue
-    _batch_texts.append(_embed_text)
-    _batch_meta.append((_qname, _abs, int(_start), int(_end), _stype, _content_hash))
-
-    if len(_batch_texts) >= _BATCH:
-        # Queue this outer batch instead of dispatching immediately.  When
-        # _CONCURRENCY batches are queued, _flush_pending fans them out in
-        # parallel via the thread pool.  This gives us 5x throughput against
-        # the Serverless endpoint (which has MaxConcurrency=5 configured).
-        _pending_batches.append((_batch_texts, _batch_meta))
-        _batch_texts = []
-        _batch_meta = []
-        if len(_pending_batches) >= _CONCURRENCY:
-            _flush_pending(_pool)
-
-# Queue the trailing partial outer batch (if any) and flush whatever's
-# left in the pending queue concurrently.
-if _batch_texts:
-    _pending_batches.append((_batch_texts, _batch_meta))
-if _pending_batches:
-    _flush_pending(_pool)
-
-# ------------------------------------------------------------------
-# Phase 1.2 — Hierarchical chunking: Class summaries (deterministic).
-#
-# Re-open LadybugDB read-only to query Class nodes + their member names
-# (Methods via DEFINES_METHOD).  Embed text is built deterministically
-# — NO LLM call — using the format from
-# app/services/chunk_strategies.build_class_chunk_input.
-#
-# These chunks ride the same SageMaker batcher and DuckDB embeddings
-# table as Function/Method.  symbol_type='Class' is a new label; the
-# existing schema already has a symbol_type column so no migration.
-# qualified_name uses ``<class_qname>::Class::summary`` so it never
-# collides with a real Class symbol's qname.
-#
-# Skip filter (_should_skip_embed) is reused — test/generated/vendored
-# class summaries add noise without value.
-# Cache via content_hash (SHA-1 of embed_text) — re-runs on unchanged
-# classes are 0-cost, just like Function/Method.
-# ------------------------------------------------------------------
-_class_db = lb.Database({repr(repo_db_path)}, read_only=True)
-_class_conn = lb.Connection(_class_db)
-_class_cypher = '''
-MATCH (m:Module)-[:DEFINES]->(c:Class)
-OPTIONAL MATCH (c)-[:DEFINES_METHOD]->(meth:Method)
-WITH m, c, collect(meth.name) AS method_names
-RETURN c.qualified_name AS qualified_name,
-       c.name           AS class_name,
-       c.start_line     AS start_line,
-       c.end_line       AS end_line,
-       c.docstring      AS docstring,
-       m.path           AS rel_path,
-       m.qualified_name AS module_qname,
-       method_names     AS method_names
-'''
-_class_result = _class_conn.execute(_class_cypher)
-_class_cols = _class_result.get_column_names()
-_class_rows = []
-while _class_result.has_next():
-    _raw = _class_result.get_next()
-    _class_rows.append(dict(zip(_class_cols, _raw)))
-_class_conn.close()
-del _class_conn, _class_db
-print(f"class summary candidates: {{len(_class_rows)}}", flush=True)
-
-_class_skipped_filtered = 0
-_class_skipped_unchanged = 0
-_class_emitted = 0
-
-for _row in _class_rows:
-    _qname = _row.get("qualified_name") or ""
-    _cname = _row.get("class_name") or ""
-    _start = _row.get("start_line")
-    _end   = _row.get("end_line")
-    _rel   = _row.get("rel_path") or ""
-    _doc   = _row.get("docstring") or ""
-    _mod_qn = _row.get("module_qname") or ""
-    _members = _row.get("method_names") or []
-
-    if not _qname or not _rel:
-        continue
-    if _should_skip_embed(_rel):
-        _class_skipped_filtered += 1
-        continue
-
-    # Read the class signature line from disk.  The first line of the
-    # class (the actual ``class Foo(Bar):`` line) is captured as the
-    # signature; this is the start_line the parser stored.
-    _abs = _rel if Path(_rel).is_absolute() else (
-        str(Path(_root_path) / _rel) if _root_path else _rel
-    )
-    _signature = ""
-    try:
-        if _start is not None:
-            _all_lines = Path(_abs).read_text(encoding="utf-8", errors="replace").splitlines()
-            _signature = _all_lines[max(0, int(_start) - 1)].rstrip()
-    except Exception:
-        _signature = f"class {{_cname}}:"
-
-    # Filter junk member names (None, empty) — Cypher's collect() can
-    # leave Nones when OPTIONAL MATCH yielded zero rows.
-    _clean_members = [m for m in _members if m]
-
-    # Build embed text deterministically (mirrors
-    # chunk_strategies.build_class_chunk_input — kept inline because the
-    # driver runs as a subprocess f-string and can't easily import the
-    # helper module without sys.path setup).
-    _header = [f"# Class: {{_qname}}"]
-    if _mod_qn:
-        _header.append(f"# Module: {{_mod_qn}}")
-    if _clean_members:
-        _header.append(f"# Members: {{', '.join(_clean_members)}}")
-    _header.append("# ---")
-    if _signature:
-        _header.append(_signature)
-    if _doc:
-        _header.append(_doc)
-    _embed_text = "\\n".join(_header).rstrip()
-
-    # Summary-chunk qname convention: never collides with real qnames.
-    _summary_qname = f"{{_qname}}::Class::summary"
-
-    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
-    if _existing_hashes.get(_summary_qname) == _content_hash:
-        _class_skipped_unchanged += 1
-        continue
-
-    _batch_texts.append(_embed_text)
-    # start_line/end_line stored as the class's own range so the UI can
-    # link the summary back to the source location if a user clicks it.
-    _batch_meta.append((
-        _summary_qname, _abs,
-        int(_start) if _start is not None else 0,
-        int(_end) if _end is not None else 0,
-        "Class", _content_hash,
-    ))
-    _class_emitted += 1
-
-    if len(_batch_texts) >= _BATCH:
-        _pending_batches.append((_batch_texts, _batch_meta))
-        _batch_texts = []
-        _batch_meta = []
-        if len(_pending_batches) >= _CONCURRENCY:
-            _flush_pending(_pool)
-
-# Flush the trailing class-summary batch.
-if _batch_texts:
-    _pending_batches.append((_batch_texts, _batch_meta))
-if _pending_batches:
-    _flush_pending(_pool)
-
-print(f"Class summaries: emitted={{_class_emitted}} skipped_unchanged={{_class_skipped_unchanged}} filtered={{_class_skipped_filtered}}", flush=True)
-
-# ------------------------------------------------------------------
-# Phase 1.2b — Module summaries (Python __init__.py, deterministic).
-#
-# Stdlib ``ast``-based: parse each __init__.py we have a Module node
-# for, lift the module docstring and ``__all__`` (or top-level public
-# names) and build a ModuleChunk via build_module_chunk_input.
-# Deterministic — no LLM call, no cost.
-# ------------------------------------------------------------------
-import ast as _ast
-
-def _extract_module_metadata(_path: str, _content: str):
-    if not _path.endswith(".py"):
-        return None
-    try:
-        _tree = _ast.parse(_content)
-    except (SyntaxError, ValueError):
-        return None
-    _doc = _ast.get_docstring(_tree) or ""
-    _all = None
-    for _node in _tree.body:
-        if isinstance(_node, _ast.Assign):
-            for _t in _node.targets:
-                if isinstance(_t, _ast.Name) and _t.id == "__all__":
-                    if isinstance(_node.value, (_ast.List, _ast.Tuple, _ast.Set)):
-                        _names = []
-                        for _elt in _node.value.elts:
-                            if isinstance(_elt, _ast.Constant) and isinstance(_elt.value, str):
-                                _names.append(_elt.value)
-                        _all = _names
-                    break
-            if _all is not None:
-                break
-    if _all is None:
-        _all = []
-        for _node in _tree.body:
-            if isinstance(_node, (_ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef)):
-                if not _node.name.startswith("_"):
-                    _all.append(_node.name)
-    return (_doc, _all)
-
-
-_module_db = lb.Database({repr(repo_db_path)}, read_only=True)
-_module_conn = lb.Connection(_module_db)
-_module_cypher = '''
-MATCH (m:Module)
-RETURN m.qualified_name AS qualified_name, m.path AS rel_path
-'''
-_module_result = _module_conn.execute(_module_cypher)
-_module_cols = _module_result.get_column_names()
-_module_rows = []
-while _module_result.has_next():
-    _module_rows.append(dict(zip(_module_cols, _module_result.get_next())))
-_module_conn.close()
-del _module_conn, _module_db
-
-_module_emitted = 0
-_module_skipped_unchanged = 0
-_module_skipped_filtered = 0
-
-for _row in _module_rows:
-    _rel = _row.get("rel_path") or ""
-    _qname = _row.get("qualified_name") or ""
-    if not _rel or not _qname:
-        continue
-    if not _rel.endswith("__init__.py"):
-        continue
-    if _should_skip_embed(_rel):
-        _module_skipped_filtered += 1
-        continue
-    _abs = _rel if Path(_rel).is_absolute() else (
-        str(Path(_root_path) / _rel) if _root_path else _rel
-    )
-    try:
-        _content = Path(_abs).read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        continue
-    _meta = _extract_module_metadata(_rel, _content)
-    if _meta is None:
-        continue
-    _doc, _public = _meta
-
-    _lines = [f"# Module: {{_qname}}"]
-    if _rel:
-        _lines.append(f"# Path: {{_rel}}")
-    if _public:
-        _lines.append(f"# Public: {{', '.join(_public)}}")
-    _lines.append("# ---")
-    if _doc:
-        _lines.append(_doc)
-    _embed_text = "\\n".join(_lines).rstrip()
-
-    _summary_qname = f"{{_qname}}::Module::summary"
-    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
-    if _existing_hashes.get(_summary_qname) == _content_hash:
-        _module_skipped_unchanged += 1
-        continue
-    _batch_texts.append(_embed_text)
-    _batch_meta.append((_summary_qname, _abs, 0, 0, "Module", _content_hash))
-    _module_emitted += 1
-    if len(_batch_texts) >= _BATCH:
-        _pending_batches.append((_batch_texts, _batch_meta))
-        _batch_texts = []
-        _batch_meta = []
-        if len(_pending_batches) >= _CONCURRENCY:
-            _flush_pending(_pool)
-
-if _batch_texts:
-    _pending_batches.append((_batch_texts, _batch_meta))
-if _pending_batches:
-    _flush_pending(_pool)
-
-print(f"Module summaries: emitted={{_module_emitted}} skipped_unchanged={{_module_skipped_unchanged}} filtered={{_module_skipped_filtered}}", flush=True)
-
-
-# ------------------------------------------------------------------
-# Phase 1.2b — File summaries (LLM via Manifest, cost-capped).
-#
-# For every File/Module node we haven't already covered with a Module
-# summary above (i.e. non-__init__.py files), call Manifest Haiku to
-# generate a ~180-token summary of the file and embed it.  Hard cost
-# cap: $1.50 per repo (FILE_SUMMARY_REPO_COST_CAP_USD).  Each call has
-# its OWN 15s timeout and returns None on any failure — the File-summary
-# loop logs WARN and continues without that summary.
-#
-# This block degrades gracefully when MANIFEST_URL / MANIFEST_AGENT_KEY
-# are unset: summarize_file returns None on the very first call and the
-# loop skips every file — no spend, no error.
-# ------------------------------------------------------------------
-_file_db = lb.Database({repr(repo_db_path)}, read_only=True)
-_file_conn = lb.Connection(_file_db)
-_file_cypher = '''
-MATCH (m:Module)
-RETURN m.qualified_name AS qualified_name, m.path AS rel_path
-'''
-_file_result = _file_conn.execute(_file_cypher)
-_file_cols = _file_result.get_column_names()
-_file_rows = []
-while _file_result.has_next():
-    _file_rows.append(dict(zip(_file_cols, _file_result.get_next())))
-_file_conn.close()
-del _file_conn, _file_db
-
-# Inline the File summary helpers so the subprocess doesn't need to
-# import app.services (no sys.path setup in this driver).
-_FILE_SUMMARY_CONTENT_CAP = 8192
-_FILE_SUMMARY_COST_CAP = 1.50
-_HAIKU_IN_USD = 0.80 / 1_000_000
-_HAIKU_OUT_USD = 4.00 / 1_000_000
-_FILE_PROMPT_TEMPLATE = (
-    "Summarize this file in <=180 tokens. Focus on:\\n"
-    "- What it does (one sentence)\\n"
-    "- Top-level exports\\n"
-    "- What it imports / depends on (if relevant)\\n"
-    "- Any non-obvious gotchas\\n"
-    "Avoid vague platitudes and filler.\\n"
-    "File: {{path}}\\n"
-    "Content: {{content}}"
-)
-
-def _build_file_prompt(_p, _c):
-    _enc = _c.encode("utf-8", errors="replace")
-    if len(_enc) > _FILE_SUMMARY_CONTENT_CAP:
-        _enc = _enc[:_FILE_SUMMARY_CONTENT_CAP]
-        _c = _enc.decode("utf-8", errors="ignore")
-    return _FILE_PROMPT_TEMPLATE.format(path=_p, content=_c)
-
-
-def _summarize_file_via_manifest(_p, _c):
-    import httpx as _hx
-    _url = os.environ.get("MANIFEST_URL")
-    _key = os.environ.get("MANIFEST_AGENT_KEY")
-    if not _url or not _key:
-        return None
-    _prompt = _build_file_prompt(_p, _c)
-    _body = {{
-        "model": os.environ.get("MANIFEST_FILE_SUMMARY_MODEL") or "claude-haiku-4-5",
-        "messages": [{{"role": "user", "content": _prompt}}],
-        "max_tokens": 220,
-        "temperature": 0.2,
-    }}
-    try:
-        with _hx.Client(timeout=15.0) as _client:
-            _resp = _client.post(
-                _url.rstrip("/") + "/v1/chat/completions",
-                json=_body,
-                headers={{"Authorization": f"Bearer {{_key}}", "Content-Type": "application/json"}},
-            )
-        if _resp.status_code >= 400:
-            print(f"WARN manifest.summarize_http path={{_p}} status={{_resp.status_code}}", flush=True)
-            return None
-        _data = _resp.json()
-    except Exception as _exc:
-        print(f"WARN manifest.summarize_failed path={{_p}} err={{_exc}}", flush=True)
-        return None
-    try:
-        _summary = (_data["choices"][0]["message"]["content"] or "").strip()
-    except Exception:
-        return None
-    if not _summary:
-        return None
-    _u = _data.get("usage") or {{}}
-    return (_summary, int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
-
-
-_file_emitted = 0
-_file_skipped_filtered = 0
-_file_skipped_unchanged = 0
-_file_skipped_nosum = 0
-_cumulative_cost_usd = 0.0
-_cost_aborted = False
-
-for _row in _file_rows:
-    _rel = _row.get("rel_path") or ""
-    _qname = _row.get("qualified_name") or ""
-    if not _rel or not _qname:
-        continue
-    if _rel.endswith("__init__.py"):
-        # Already covered by the Module summary pass above.
-        continue
-    if _should_skip_embed(_rel):
-        _file_skipped_filtered += 1
-        continue
-    _abs = _rel if Path(_rel).is_absolute() else (
-        str(Path(_root_path) / _rel) if _root_path else _rel
-    )
-    try:
-        _content = Path(_abs).read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        continue
-    if not _content.strip():
-        continue
-
-    # Estimate cost upper bound BEFORE the call (verified pricing): a
-    # single Haiku summary at ~600 in + 180 out is ≈ $0.0012.  Cap the
-    # estimate at the worst plausible case to stay under-budget.
-    _est_cost = 600 * _HAIKU_IN_USD + 220 * _HAIKU_OUT_USD
-    if _cumulative_cost_usd + _est_cost > _FILE_SUMMARY_COST_CAP:
-        if not _cost_aborted:
-            print(
-                f"WARN file_summary.cost_cap_exceeded "
-                f"spent={{_cumulative_cost_usd:.4f}} cap={{_FILE_SUMMARY_COST_CAP}} — aborting File-summary pass",
-                flush=True,
-            )
-            _cost_aborted = True
-        break
-
-    _result = _summarize_file_via_manifest(_rel, _content)
-    if _result is None:
-        _file_skipped_nosum += 1
-        continue
-    _summary, _in_tok, _out_tok = _result
-    _cumulative_cost_usd += _in_tok * _HAIKU_IN_USD + _out_tok * _HAIKU_OUT_USD
-
-    # The summary itself is the embed text (with a tiny header so
-    # ranking knows what kind of chunk this is).
-    _embed_text = f"# File: {{_qname}}\\n# Path: {{_rel}}\\n# ---\\n{{_summary}}"
-    _summary_qname = f"{{_qname}}::File::summary"
-    _content_hash = hashlib.sha1(_embed_text.encode("utf-8")).hexdigest()
-    if _existing_hashes.get(_summary_qname) == _content_hash:
-        _file_skipped_unchanged += 1
-        continue
-    _batch_texts.append(_embed_text)
-    _batch_meta.append((_summary_qname, _abs, 0, 0, "File", _content_hash))
-    _file_emitted += 1
-    if len(_batch_texts) >= _BATCH:
-        _pending_batches.append((_batch_texts, _batch_meta))
-        _batch_texts = []
-        _batch_meta = []
-        if len(_pending_batches) >= _CONCURRENCY:
-            _flush_pending(_pool)
-
-if _batch_texts:
-    _pending_batches.append((_batch_texts, _batch_meta))
-if _pending_batches:
-    _flush_pending(_pool)
-
-print(f"File summaries: emitted={{_file_emitted}} skipped_unchanged={{_file_skipped_unchanged}} filtered={{_file_skipped_filtered}} no_summary={{_file_skipped_nosum}} cost_usd={{_cumulative_cost_usd:.4f}} aborted={{_cost_aborted}}", flush=True)
-
-
-_pool.shutdown(wait=True)
-_vec_conn.close()
-print(f"Embedded {{_embedded_count}} (skipped {{_skipped_unchanged}} unchanged, filtered {{_skipped_filtered}})")
-print("EMBED_DONE")
-"""
 
     # Pipe subprocess output through a log file rather than OS pipes.  The
     # embedding pass emits tens of thousands of loguru DEBUG lines for
@@ -1719,7 +1103,7 @@ print("EMBED_DONE")
     log_path = Path(f"/tmp/cis_embed_{job.job_id}.log")
     with log_path.open("w") as log_fh:
         proc = subprocess.run(
-            [sys.executable, "-c", driver],
+            driver_argv,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1746,6 +1130,12 @@ print("EMBED_DONE")
     # earlier. BUC-1574 (Phase 1.4) — also lift the unchanged/filtered
     # totals onto the embed job so /index/{job_id}/diff_metrics can report
     # them without re-tailing the log.
+    #
+    # BUC-1601 (Fix A) — also parse the trailing ``RECONCILE`` line the
+    # driver emits.  Surfaces the per-category skip breakdown into the
+    # parent's logger so ops can spot read-failure drift without grepping
+    # /tmp/cis_embed_*.log.
+    reconcile_line: str | None = None
     try:
         with log_path.open() as f:
             for line in f:
@@ -1763,8 +1153,66 @@ print("EMBED_DONE")
                         # parse glitch; live PROGRESS values still fall
                         # through to diff_metrics.
                         pass
+                elif line.startswith("RECONCILE "):
+                    # Keep the LAST RECONCILE line — driver emits one per
+                    # full embed pass; if Function/Method, Class and Module
+                    # passes ever each get their own (Phase 2), the latest
+                    # is the most relevant.
+                    reconcile_line = line.rstrip("\n")
     except Exception:
         pass
+
+    # ------------------------------------------------------------------
+    # BUC-1601 Fix A — reconcile pass.
+    #
+    # The driver writes a line of the form::
+    #
+    #     RECONCILE expected=N embedded=A skipped_unchanged=B
+    #               skipped_filtered=C dropped_unreadable=D unaccounted=E
+    #
+    # We parse the dropped_unreadable count onto the job (so it surfaces
+    # in /index/.../diff_metrics) and emit one structured log line so the
+    # delta is grep-able without re-reading the embed log.
+    # ------------------------------------------------------------------
+    reconcile_fields: dict[str, int] = (
+        _parse_reconcile_line(reconcile_line) if reconcile_line else {}
+    )
+    if reconcile_fields:
+        job.dropped_unreadable = reconcile_fields.get("dropped_unreadable", 0)
+        logger.info(
+            "embed.reconcile job_id=%s repo=%s expected=%d embedded=%d "
+            "skipped_unchanged=%d skipped_filtered=%d "
+            "dropped_unreadable=%d unaccounted=%d",
+            job.job_id,
+            job.repo_name,
+            reconcile_fields.get("expected", 0),
+            reconcile_fields.get("embedded", job.embedded_count),
+            reconcile_fields.get("skipped_unchanged", job.skipped_unchanged),
+            reconcile_fields.get("skipped_filtered", job.skipped_filtered),
+            reconcile_fields.get("dropped_unreadable", 0),
+            reconcile_fields.get("unaccounted", 0),
+        )
+        if reconcile_fields.get("dropped_unreadable", 0) > 0:
+            logger.warning(
+                "embed.reconcile dropped_unreadable=%d on repo=%s — "
+                "graph references files missing from the working tree; "
+                "see %s for per-path WARN lines.",
+                reconcile_fields["dropped_unreadable"],
+                job.repo_name,
+                log_path,
+            )
+    else:
+        # Driver completed but never emitted a RECONCILE line.  That is
+        # itself a regression — surface as WARN so ops notice without
+        # failing the job (counts on the record are still populated from
+        # the "Embedded ..." summary).
+        logger.warning(
+            "embed.reconcile_missing job_id=%s repo=%s — driver finished "
+            "without RECONCILE line; see %s",
+            job.job_id,
+            job.repo_name,
+            log_path,
+        )
 
     job.finished_at = time.time()
     job.progress_pct = 100.0
@@ -2046,6 +1494,7 @@ def get_index_status(job_id: str) -> IndexStatus:
         embedding_count=live_embedded,
         embeddings_skipped_unchanged=live_skipped,
         embeddings_filtered_out=live_filtered,
+        embeddings_dropped_unreadable=job.embeddings_dropped_unreadable,
         started_at=job.started_at,
         elapsed_sec=elapsed,
         eta_sec=job.eta_sec,
@@ -2110,6 +1559,7 @@ def get_diff_metrics(job_id: str) -> DiffMetrics:
         embedded=embedded,
         skipped_unchanged=skipped_unchanged,
         skipped_filtered=skipped_filtered,
+        dropped_unreadable=job.embeddings_dropped_unreadable,
         hash_match_rate=round(hash_match_rate, 4),
         wall_clock_seconds=round(wall_clock_seconds, 3),
     )

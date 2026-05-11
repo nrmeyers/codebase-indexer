@@ -270,6 +270,10 @@ class IndexStatus(BaseModel):
     # cache skips vs filtered-out files.
     embeddings_skipped_unchanged: int = 0
     embeddings_filtered_out: int = 0
+    # BUC-1601 (Fix A) — read-failure count from the embed subprocess.
+    # 0 on healthy runs; non-zero means files referenced by the graph
+    # were unreadable at embed time (each emitted a WARN line).
+    embeddings_dropped_unreadable: int = 0
     started_at: float = 0.0
     elapsed_sec: float = 0.0
     eta_sec: float | None = None
@@ -295,6 +299,11 @@ class DiffMetrics(BaseModel):
             call entirely.
         skipped_filtered: Symbols whose source file matched a skip
             pattern (tests / generated / vendored).
+        dropped_unreadable: BUC-1601 — symbols whose source file could
+            not be read off disk at embed time (file deleted out from
+            under the indexer, permission denied, etc.).  Each drop also
+            emitted a WARN line to the per-job embed log.  Should be 0
+            on a clean run.
         hash_match_rate: ``skipped_unchanged / (embedded +
             skipped_unchanged)`` — the fraction of in-scope symbols that
             were unchanged since the previous run.  Returns 0.0 when the
@@ -308,6 +317,7 @@ class DiffMetrics(BaseModel):
     embedded: int
     skipped_unchanged: int
     skipped_filtered: int
+    dropped_unreadable: int = 0
     hash_match_rate: float
     wall_clock_seconds: float
 
