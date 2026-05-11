@@ -8,6 +8,9 @@ GET  /admin/s3/health     — last successful snapshot age + retained count
                              (probed by TheForge `pnpm doctor`)
 POST /admin/migrate-slugs — rename bare-basename slugs to canonical
                              ``{org}__{repo}`` form (BUC-1580)
+POST /admin/resolve-cross-repo-imports — re-scan External Module nodes across
+                             every indexed repo and rewire IMPORTS that match
+                             a sibling repo's package identity (BUC-1598)
 
 All endpoints are best-effort and return HTTP 200 with an ``ok`` field;
 upstream callers (deploy doctor, dashboards) read ``ok`` and ``error``
@@ -484,3 +487,122 @@ def admin_migrate_slugs() -> SlugMigrationResponse:
         ))
 
     return SlugMigrationResponse(ok=True, migrated=migrated, skipped=skipped)
+
+
+# ---------------------------------------------------------------------------
+# BUC-1598 — cross-repo IMPORTS resolution
+# ---------------------------------------------------------------------------
+
+
+class CrossRepoResolveEntry(BaseModel):
+    """Per-repo summary in the ``POST /admin/resolve-cross-repo-imports`` response."""
+
+    slug: str
+    scanned: int
+    matched: int
+    unmatched: int
+    duration_ms: float
+    errors: list[str] = []
+
+
+class CrossRepoResolveResponse(BaseModel):
+    """Response for ``POST /admin/resolve-cross-repo-imports``.
+
+    The endpoint is idempotent — a second call on the same set of repos
+    will report ``matched == 0`` because the resolved Modules already
+    carry the cross-repo prefix (and the resolver filters those out at
+    the SQL level).
+
+    Attributes:
+        ok: True iff the pass ran (i.e. the feature flag is enabled).
+        enabled: Mirrors ``CROSS_REPO_IMPORTS_ENABLED`` so the operator
+            can see at a glance why a pass returned zeros.
+        results: One :class:`CrossRepoResolveEntry` per indexed repo
+            that had an on-disk DB file.
+        total_matched: Sum of ``matched`` across every entry — what
+            BUC-1598's acceptance test asserts is > 0.
+        error: Top-level error message when the pass aborted before
+            scanning any repo (e.g. registry empty).  Null otherwise.
+    """
+
+    ok: bool
+    enabled: bool
+    results: list[CrossRepoResolveEntry]
+    total_matched: int
+    error: str | None = None
+
+
+@router.post(
+    "/resolve-cross-repo-imports",
+    response_model=CrossRepoResolveResponse,
+)
+def admin_resolve_cross_repo_imports() -> CrossRepoResolveResponse:
+    """Re-scan every indexed repo's External Module nodes and rewire
+    IMPORTS that match a sibling repo's package identity (BUC-1598).
+
+    The pass is idempotent — Modules already carrying the cross-repo
+    ``{slug}::`` prefix are filtered out at fetch time, so calling this
+    endpoint twice in a row returns ``total_matched == 0`` on the second
+    call (everything was matched on the first).
+
+    Honors the ``CROSS_REPO_IMPORTS_ENABLED`` feature flag: when unset
+    or false, the response reports ``enabled=False`` and an empty
+    ``results`` list (fail-closed, zero behaviour change for callers
+    who didn't opt in).
+    """
+    from ..services import cross_repo_imports as cri
+
+    if not cri.is_enabled():
+        return CrossRepoResolveResponse(
+            ok=True,
+            enabled=False,
+            results=[],
+            total_matched=0,
+            error=None,
+        )
+
+    # Lazy import to avoid circular import (admin → routers/index → admin).
+    from .index import indexed_repo_paths
+
+    # Snapshot the registry so concurrent /index calls don't shift the
+    # set mid-pass.  copy() is cheap (dozens of entries at most).
+    repos = dict(indexed_repo_paths)
+    if not repos:
+        return CrossRepoResolveResponse(
+            ok=True,
+            enabled=True,
+            results=[],
+            total_matched=0,
+            error="no_indexed_repos",
+        )
+
+    try:
+        results = cri.resolve_all(repos)
+    except Exception as exc:
+        logger.error("admin.resolve_cross_repo_imports failed: %s", exc)
+        return CrossRepoResolveResponse(
+            ok=False,
+            enabled=True,
+            results=[],
+            total_matched=0,
+            error=str(exc),
+        )
+
+    entries = [
+        CrossRepoResolveEntry(
+            slug=r.slug,
+            scanned=r.scanned,
+            matched=r.matched,
+            unmatched=r.unmatched,
+            duration_ms=r.duration_ms,
+            errors=r.errors,
+        )
+        for r in results
+    ]
+    return CrossRepoResolveResponse(
+        ok=True,
+        enabled=True,
+        results=entries,
+        total_matched=sum(e.matched for e in entries),
+        error=None,
+    )

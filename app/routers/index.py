@@ -985,6 +985,32 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     except Exception as _exc:
         logger.debug("S3 snapshot dispatch failed: %s", _exc)
 
+    # BUC-1598 — Cross-repo IMPORTS resolution.  When the feature flag is
+    # enabled, rewire any external Module nodes that match another indexed
+    # repo's package identity (npm name / pyproject project.name).  The
+    # call is a fast no-op when the flag is off, so the import + invocation
+    # cost is bounded — no need to gate the import on the flag here.
+    # Failures are logged but never fail the index job: the structural
+    # graph is already committed, cross-repo wiring is purely additive.
+    try:
+        from ..services import cross_repo_imports as _cri
+
+        if _cri.is_enabled():
+            _siblings = [
+                _cri.extract_repo_identity(_s, _p)
+                for _s, _p in indexed_repo_paths.items()
+                if _s != repo_name
+            ]
+            _stats = _cri.resolve_cross_repo_imports(
+                repo_name, repo_db_path, _siblings,
+            )
+            logger.info(
+                "cross_repo.post_ingest slug=%s matched=%d duration_ms=%.1f",
+                repo_name, _stats.matched, _stats.duration_ms,
+            )
+    except Exception as _exc:
+        logger.warning("cross_repo.post_ingest failed (non-fatal): %s", _exc)
+
     # Bust the health probe cache again now that embeddings are done so the
     # UI transitions from "indexing" to fully-complete state immediately.
     try:

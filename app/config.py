@@ -209,6 +209,21 @@ class Settings(BaseSettings):
     TEI_TIMEOUT_MS: int = 30000
     TEI_BATCH_SIZE: int = 32
 
+    # --- BUC-1598: cross-repo IMPORTS resolution ---
+    # Master switch for the cross-repo IMPORTS resolution pass that runs
+    # after every successful /index job (and on-demand via
+    # POST /admin/resolve-cross-repo-imports).  When False (default), the
+    # pass is a no-op — external Module nodes stay as leaves, exactly
+    # mirroring pre-BUC-1598 behaviour.  When True, external Modules that
+    # match another indexed repo's package.json / pyproject.toml identity
+    # are rewired to the canonical ``{target_slug}::{qname}`` form.
+    #
+    # Read directly by app.services.cross_repo_imports.is_enabled() at
+    # call time (not import time) so tests can toggle via monkey-patching
+    # os.environ without reloading the module.  The duplicated declaration
+    # here is purely for IDE discoverability + .env.template documentation.
+    CROSS_REPO_IMPORTS_ENABLED: bool = False
+
     # --- Phase 1.3: code-specific embedding A/B path ---
     # Default 'e5-base-v2' preserves the pre-Phase-1.3 behaviour exactly.
     # Set to 'bge-code-v1' to write to the parallel embedding_v2 column and
