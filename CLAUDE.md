@@ -1,5 +1,28 @@
 # code-indexer-service — Claude Instructions
 
+## Cross-Repo Agent Dispatch — Worktree Isolation (READ FIRST if you arrived here from another repo's session)
+
+If this repo is **not** the session-rooted repo (i.e. you started in `~/TheForge`
+or `~/code-graph-rag` and were directed here by a prompt), DO NOT touch
+`~/code-indexer-service` directly. The harness's `isolation: worktree` only
+isolates the session-rooted repo; foreign-repo work in this clone collides with
+other agents and corrupts the working tree (confirmed via reflog 2026-05-11;
+see `~/TheForge/docs/_diagnostics/worktree-isolation-investigation-2026-05-11.md`).
+
+Required preamble before any code work:
+
+```bash
+cd ~/code-indexer-service
+git fetch --all
+git worktree add /tmp/agent-${RANDOM}-buc-NNNN -b feat/buc-NNNN main
+cd /tmp/agent-...   # all work happens here
+# Commit + push frequently. Remote branch is canonical.
+```
+
+NEVER skip steps 3–4. Concurrent agents WILL be operating in this repo.
+
+---
+
 ## What This Repo Is
 
 A **thin FastAPI HTTP gateway** over the `code-graph-rag` engine. TheForge
