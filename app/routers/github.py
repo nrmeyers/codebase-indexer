@@ -19,6 +19,7 @@ No tokens are returned to the browser; the service acts as a proxy.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
 import uuid
@@ -32,6 +33,8 @@ from pydantic import BaseModel, Field
 from ..config import settings, slugify_repo
 from ..models import GitHubRateLimit, GitHubStatusResponse, IndexAccepted
 from .index import _Job, _jobs, _run_ingestion
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/github")
 
@@ -109,6 +112,17 @@ class GitHubIndexRequest(BaseModel):
     force_reindex: bool = Field(
         default=False,
         description="Clear existing graph before re-indexing",
+    )
+    github_token: str | None = Field(
+        default=None,
+        description=(
+            "Per-request GitHub auth token (BUC-1578 contract). When supplied "
+            "takes precedence over the indexer's env-var PAT — TheForge mints "
+            "a short-lived GitHub App installation token and forwards it here "
+            "so the clone runs as the App rather than the indexer's static "
+            "PAT. Omit to fall back to the indexer's GITHUB_TOKEN env var."
+        ),
+        repr=False,  # keep the token out of logs / Pydantic repr
     )
 
 
@@ -546,7 +560,12 @@ async def list_repos(
 _CLONES_DIR = ".cgr/clones"
 
 
-def _clone_or_update(full_name: str, branch: str | None, token: str | None) -> Path:
+def _clone_or_update(
+    full_name: str,
+    branch: str | None,
+    token: str | None,
+    token_source: str = "unknown",
+) -> Path:
     """Clone the repo into ``.cgr/clones`` or fast-forward an existing clone.
 
     The auth token is injected into the URL only for private repos to avoid
@@ -559,6 +578,9 @@ def _clone_or_update(full_name: str, branch: str | None, token: str | None) -> P
         branch: Branch to check out, or None to stick with the default.
         token: GitHub PAT for private repos.  When None, the clone is
             anonymous and only public repos will succeed.
+        token_source: Provenance tag for audit logging — one of
+            ``request | settings | env | none``.  Used purely for
+            observability; does not affect clone behaviour.
 
     Returns:
         Path: Filesystem path to the freshly-prepared working tree.
@@ -574,6 +596,20 @@ def _clone_or_update(full_name: str, branch: str | None, token: str | None) -> P
 
     dest = Path(_CLONES_DIR) / f"{owner}__{name}"
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # Audit log — classify the token and surface only the last 4 chars so the
+    # operator can correlate a clone with the credential source without
+    # leaking the secret into logs.  ``token_source`` distinguishes
+    # request-supplied (BUC-1578 App-minted) from indexer env-var fallback.
+    ttype = _token_type(token)
+    last4 = token[-4:] if token else "none"
+    logger.info(
+        "github_clone: target=%s token_source=%s token_type=%s last4=%s",
+        full_name,
+        token_source,
+        ttype,
+        last4,
+    )
 
     # Build auth URL when a token is set so private repos work.  Token
     # embedded in the URL is the simplest, CI-friendly approach; ``git
@@ -634,11 +670,28 @@ async def index_github_repo(
 
     # Clone runs off-loop because subprocess.run blocks; keep the HTTP handler
     # snappy so the UI doesn't see a multi-second hang before the job id comes back.
-    token = _github_token()
+    #
+    # Prefer the per-request App-minted token (BUC-1578 contract) when
+    # supplied — TheForge mints a 1h-TTL installation token per request so
+    # the clone runs as the org's GitHub App rather than the indexer's
+    # long-lived PAT.  Fall back to the indexer's env-var resolver only
+    # when the request body has no token (useful for local dev / direct
+    # ``curl`` against the sidecar where TheForge isn't in the loop).
+    if req.github_token:
+        token = req.github_token
+        token_source = "request"
+    else:
+        token = _github_token()
+        token_source = _token_source() if token else "none"
     loop = asyncio.get_running_loop()
     try:
         repo_path = await loop.run_in_executor(
-            None, _clone_or_update, req.full_name, req.branch, token
+            None,
+            _clone_or_update,
+            req.full_name,
+            req.branch,
+            token,
+            token_source,
         )
     except HTTPException:
         raise
