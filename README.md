@@ -81,8 +81,99 @@ uv sync
 | `TARGET_REPO_PATH` | `.` | Default repo when request omits `repo_path` |
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server bind port |
+| `EMBEDDER_BACKEND` | `local` | Which embedder to use — see **Embedder backends** below |
 
 Copy `.env.example` → `.env` and adjust paths for your machine.
+
+---
+
+## Embedder backends
+
+The Code Indexer supports three interchangeable embedder backends behind a
+single protocol (`app/embedders/base.py`). All three produce **768-dim
+`intfloat/e5-base-v2` vectors**, so switching backends needs no migration
+of the DuckDB `FLOAT[768]` schema — flip the env var and restart.
+
+Select with `EMBEDDER_BACKEND={local|sagemaker|tei}` (default `local`).
+
+| Backend | When to use | Tradeoffs |
+|---|---|---|
+| `local` | Standalone / laptop / no AWS | ~440 MB model download on first run; ~50-200ms per batch on modern CPU; zero infra cost; **default** |
+| `sagemaker` | Navistone production deploy | Lowest latency, GPU-backed batching; requires AWS creds + the `forge-e5-embed-v2` endpoint; per-invocation cost |
+| `tei` | GPU box without AWS | Fastest throughput when you already have a GPU sidecar; one extra container to operate; no AWS coupling |
+
+### `local` — sentence-transformers in-process
+
+Default for standalone installs. Runs the model on your CPU/GPU directly.
+Requires the optional `[local-embed]` extras group:
+
+```bash
+uv sync --group local-embed   # installs sentence-transformers>=3.2
+```
+
+```dotenv
+EMBEDDER_BACKEND=local
+# LOCAL_EMBED_MODEL=intfloat/e5-base-v2   # default — only change if you know what you're doing
+```
+
+First call downloads the model (~440 MB) into `~/.cache/huggingface/hub`
+and takes 30-60s. Subsequent calls are ~50-200ms per batch on a modern CPU.
+
+### `sagemaker` — AWS SageMaker Serverless Inference
+
+Default for the Navistone production deploy. Requires AWS credentials in
+the standard boto3 chain (env vars / instance profile / SSO profile) with
+`sagemaker:InvokeEndpoint` on the target endpoint.
+
+```dotenv
+EMBEDDER_BACKEND=sagemaker
+SAGEMAKER_ENDPOINT_NAME=forge-e5-embed-v2
+SAGEMAKER_EMBED_REGION=us-east-1
+SAGEMAKER_EMBED_BATCH_SIZE=32
+```
+
+For Navistone deploys already on the legacy `SAGEMAKER_EMBED_URL` config:
+that env var is still honoured — the endpoint name is extracted
+automatically. The migration plan for Navistone is **no-op**: set
+`EMBEDDER_BACKEND=sagemaker` in the production `.env` (or leave it unset
+on a Navistone machine where it is the documented default in
+`.env.example`) and the existing endpoint config is reused.
+
+### `tei` — Hugging Face Text-Embeddings-Inference sidecar
+
+For users who want GPU-batched embedding without AWS. Bring up the sidecar
+with Docker:
+
+```bash
+docker run -d --name tei \
+    -p 8080:80 \
+    --gpus all \
+    ghcr.io/huggingface/text-embeddings-inference:1.5 \
+    --model-id intfloat/e5-base-v2
+```
+
+Then point the Code Indexer at it:
+
+```dotenv
+EMBEDDER_BACKEND=tei
+TEI_URL=http://localhost:8080
+TEI_TIMEOUT_MS=30000
+TEI_BATCH_SIZE=32
+```
+
+### Switching backends
+
+A typical flow when validating index quality on a non-Navistone machine:
+
+1. Set `EMBEDDER_BACKEND=local` in `.env`.
+2. Restart the service (`uvicorn app.main:app --port 8000`).
+3. Re-index the target repos (`POST /index`).
+4. Run your evaluation queries via `/search/semantic` or `/context-bundle`.
+
+Because all three backends produce the same 768-dim e5-base-v2 vectors,
+indexes built with one backend are compatible with searches issued via
+another — but you should still re-embed if switching across backends
+that drift in tokenisation behaviour.
 
 ---
 

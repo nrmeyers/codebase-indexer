@@ -175,18 +175,39 @@ class Settings(BaseSettings):
     S3_INDEX_PREFIX: str = "code-indexer/indexes"   # key prefix inside the bucket
     S3_INDEX_REGION: str = "us-east-1"
 
-    # --- SageMaker embedding endpoint (production primary) ---
-    # Priority: SageMaker (this) → LM Studio → in-process torch.
-    # Set SAGEMAKER_EMBED_ENDPOINT to the endpoint name to activate.
+    # --- Pluggable embedder backend (BUC-1605) ---
+    # Selects which embedder implementation `app.embedders.get_embedder()`
+    # returns at startup. Read directly by `app.embedders` (no pydantic
+    # dep); values below exist purely for IDE discoverability + .env
+    # documentation. Keep names in sync with `app.embedders.VALID_BACKENDS`.
+    #
+    #   local      sentence-transformers in-process (no AWS, no sidecar).
+    #              Default for standalone installs.
+    #   sagemaker  Navistone's AWS SageMaker e5-base-v2 endpoint.
+    #              Default for the Navistone production deploy.
+    #   tei        Hugging Face Text-Embeddings-Inference HTTP sidecar
+    #              (http://localhost:8080 by default).
+    EMBEDDER_BACKEND: str = "local"
+
+    # --- SageMaker backend config (used when EMBEDDER_BACKEND=sagemaker) ---
+    # Priority: SAGEMAKER_ENDPOINT_NAME > SAGEMAKER_EMBED_ENDPOINT > derived from URL.
     # Requires AWS credentials with sagemaker:InvokeEndpoint on the endpoint.
-    # Read directly by app.services.sagemaker_embedder (no pydantic dep).
-    # Keep names in sync with sagemaker_embedder.SageMakerEmbedder.from_env().
-    # Prefer SAGEMAKER_EMBED_URL (full invocation URL) — no name lookup needed.
-    # If only ENDPOINT is set the URL is derived automatically.
-    SAGEMAKER_EMBED_URL: str = ""                 # https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/forge-e5-embed-v1/invocations
-    SAGEMAKER_EMBED_ENDPOINT: str = ""            # fallback if URL not set: forge-e5-embed-v1
+    # Read directly by app.embedders.sagemaker.SageMakerEmbedder.from_env().
+    SAGEMAKER_ENDPOINT_NAME: str = ""             # BUC-1605 preferred name (e.g. forge-e5-embed-v2)
+    SAGEMAKER_EMBED_URL: str = ""                 # legacy alias: https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/forge-e5-embed-v1/invocations
+    SAGEMAKER_EMBED_ENDPOINT: str = ""            # legacy alias: forge-e5-embed-v1
     SAGEMAKER_EMBED_REGION: str = "us-east-1"
     SAGEMAKER_EMBED_BATCH_SIZE: int = 32          # 16–64 per Forge contract
+
+    # --- TEI backend config (used when EMBEDDER_BACKEND=tei) ---
+    # Hugging Face Text-Embeddings-Inference HTTP sidecar. Bring up via:
+    #   docker run -d -p 8080:80 --gpus all \
+    #     ghcr.io/huggingface/text-embeddings-inference:1.5 \
+    #     --model-id intfloat/e5-base-v2
+    # Read directly by app.embedders.tei.TEIEmbedder.from_env().
+    TEI_URL: str = "http://localhost:8080"
+    TEI_TIMEOUT_MS: int = 30000
+    TEI_BATCH_SIZE: int = 32
 
     # --- Phase 1.3: code-specific embedding A/B path ---
     # Default 'e5-base-v2' preserves the pre-Phase-1.3 behaviour exactly.

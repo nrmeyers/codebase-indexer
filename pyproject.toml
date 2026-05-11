@@ -76,3 +76,13 @@ dev = [
     # exercise the full snapshot → wipe → restore round-trip without real AWS.
     "moto[s3]>=5.0.0",
 ]
+
+# BUC-1605: pluggable embedder backends. The `local` backend runs
+# sentence-transformers in-process — kept as an optional extra so the
+# default container install stays slim. Install with:
+#   uv pip install --group local-embed
+# or for editable installs:
+#   uv sync --group local-embed
+local-embed = [
+    "sentence-transformers>=3.2",
+]
