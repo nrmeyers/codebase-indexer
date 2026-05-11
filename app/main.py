@@ -41,6 +41,7 @@ from .routers import (  # noqa: E402  -- must run AFTER load_dotenv()
     admin,
     context_bundle,
     disk,
+    embed,
     explorer,
     github,
     health,
@@ -327,6 +328,9 @@ def create_app() -> FastAPI:
     app.include_router(index.router, tags=["index"])
     app.include_router(search.router, tags=["search"])
     app.include_router(context_bundle.router, tags=["context"])
+    # BUC-1592 — query-embedding surface for TheForge's cross-repo affinity
+    # weighting. Single-string input → 768-dim e5-base-v2 vector.
+    app.include_router(embed.router, tags=["embed"])
     app.include_router(explorer.router, tags=["explorer"])
     app.include_router(github.router, tags=["github"])
     app.include_router(admin.router, tags=["admin"])
