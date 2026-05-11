@@ -11,16 +11,17 @@ TheForge API (Express :3001)
         │  HTTP :8000
         ▼
 Code Indexer Service (FastAPI — this repo)
-        │  Python import
+        │  Python import + pluggable embedder backend
         ▼
-code-graph-rag (LadybugIngestor + CodeRankEmbed + MCP)
+code-graph-rag (LadybugIngestor + DuckDB vector store)
         │
         ├─► LadybugDB (.cgr/repos/{slug}.db — embedded kuzu, no Docker)
-        └─► DuckDB    (.cgr/repos/{slug}.duck — FLOAT[768] embeddings,
-                       v5.3 §6.5 + §8.4)
+        └─► DuckDB    (.cgr/repos/{slug}.duck — FLOAT[768] e5-base-v2 vectors)
 
-  Optional: LM Studio (localhost) — CodeRankEmbed at query time +
-  CodeRankLLM listwise rerank (?rerank=true). Opt-in via LM_STUDIO_URL.
+  Embedder (BUC-1605): pluggable via EMBEDDER_BACKEND={local|sagemaker|tei}.
+  All three produce 768-dim intfloat/e5-base-v2 vectors. `local` is the default
+  (sentence-transformers in-process); `sagemaker` is the Navistone prod default;
+  `tei` is a Hugging Face TEI sidecar. See README §Embedder backends.
 ```
 
 ---
@@ -49,8 +50,9 @@ code-graph-rag (LadybugIngestor + CodeRankEmbed + MCP)
 | `app/routers/search.py` | `GET /search/structural|semantic|symbol`, `POST /context-bundle` |
 | `app/routers/stats.py` | `GET /stats/{repo}` |
 | `app/routers/explorer.py` | `GET /explorer/info` — LadybugDB Explorer launcher |
-| `app/services/lm_studio.py` | OpenAI-compatible adapter for local LM Studio (embed + chat) |
-| `app/services/reranker.py` | Listwise rerank via `nomic-ai/CodeRankLLM` |
+| `app/embedders/` | Pluggable embedder backends (`local`, `sagemaker`, `tei`). Use `get_embedder()` factory (async) or `app.embedders.sync_bridge.embed_text_sync` / `get_embedder_or_none` for sync callers. The legacy `app/services/sagemaker_embedder.py` shim was removed in BUC-1608 (PR #58). |
+| `app/services/lm_studio.py` | OpenAI-compatible adapter for legacy LM Studio path (retired in TheForge PR #168) |
+| `app/services/reranker.py` | Listwise rerank via `nomic-ai/CodeRankLLM` (legacy; future rerank backends TBD) |
 
 ---
 
@@ -105,6 +107,7 @@ See `.env.example`. Critical ones:
 | `TARGET_REPO_PATH` | `.` | Default repo when request omits `repo_path` |
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8000` | Bind port |
+| `EMBEDDER_BACKEND` | `local` | Selects embedder backend (`local`/`sagemaker`/`tei`). See README §Embedder backends. Navistone prod sets `sagemaker`. |
 
 ---
 

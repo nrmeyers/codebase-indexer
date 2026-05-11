@@ -1,7 +1,7 @@
 # Embedding Pipeline Reliability — Fix Plan
 
 **Date:** 2026-05-06
-**Status:** Drafted, not started
+**Status:** SUPERSEDED — most phases shipped under BUC-1601 (driver promoted to module, PR #56) and BUC-1605 (pluggable embedder backends, PR #57). The legacy `SageMakerEmbedder` class referenced below was retired with the shim removal in BUC-1608 (PR #58). Retained for historical context.
 **Owner:** TBD
 **Related Linear epic:** TBD (created from this doc)
 
