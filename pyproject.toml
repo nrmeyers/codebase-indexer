@@ -51,7 +51,17 @@ dependencies = [
     # bm25s rebuild on every search and the substring-only /search/files
     # filter with a persisted, ranked sparse-retrieval index.
     "tantivy>=0.24.0",
+    # Standalone CLI (app.cli) — Typer for ergonomic arg parsing, Rich for
+    # formatted output. Both pure-Python and very light, safe to ship in
+    # the default install so `code-indexer` is available as an entry point
+    # without an extras flag.
+    "typer>=0.15.0",
+    "rich>=13.7.0",
+    "httpx>=0.28.1",
 ]
+
+[project.scripts]
+code-indexer = "app.cli.main:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -75,6 +85,9 @@ dev = [
     # BUC-1555b: moto[s3] mocks boto3 in tests/test_s3_restore.py so we can
     # exercise the full snapshot → wipe → restore round-trip without real AWS.
     "moto[s3]>=5.0.0",
+    # CLI tests mock HTTPX calls to the FastAPI service so they exercise
+    # the Typer command surface without needing the daemon running.
+    "respx>=0.21.1",
 ]
 
 # BUC-1605: pluggable embedder backends. The `local` backend runs

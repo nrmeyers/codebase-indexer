@@ -2,14 +2,92 @@
 
 FastAPI HTTP gateway over [code-graph-rag](../code-graph-rag). Indexes
 repositories into LadybugDB (embedded kuzu graph, no Docker) with a
-DuckDB-backed vector store for semantic search. Exposes structural,
-semantic, symbol, and context-bundle search to TheForge's dev-agent.
+DuckDB-backed vector store for semantic search.
+
+Two ways to run it:
+
+1. **Standalone developer tool** — drive it from your shell via the
+   `code-indexer` CLI (see below).
+2. **Embedded in TheForge** — TheForge auto-starts the FastAPI service
+   and proxies it under `/api/code-indexer/*`. See the
+   [Embedded in TheForge](#embedded-in-theforge) section.
 
 Per-repo storage is two sibling files under `.cgr/repos/`:
 * `<slug>.db` — LadybugDB graph (typed nodes/relationships)
 * `<slug>.duck` — DuckDB store (`embeddings` + `repo_metadata` tables)
 
-**Default Port:** 8000
+**Default Port:** 8000 (FastAPI). The CLI defaults to `http://localhost:8003`
+to match the port TheForge proxies through; override with
+`CODE_INDEXER_BASE_URL` or `--base-url`.
+
+---
+
+## Use as a standalone tool
+
+The `code-indexer` CLI wraps every public FastAPI endpoint so you can
+index and search local repos without TheForge.
+
+### Option 1 — from a clone
+
+```bash
+git clone https://github.com/navistone/code-indexer-service.git
+cd code-indexer-service
+uv sync
+uv run code-indexer setup           # one-time interactive wizard
+uv run code-indexer index ~/my-project
+uv run code-indexer search "where is the auth code"
+```
+
+### Option 2 — with pipx
+
+```bash
+pipx install git+https://github.com/navistone/code-indexer-service.git
+code-indexer setup
+code-indexer index ~/my-project
+code-indexer search "where is the auth code"
+```
+
+### Subcommand reference
+
+| Command | Description |
+|---|---|
+| `code-indexer setup` | Interactive wizard. Writes `~/.code-indexer/config.toml`. |
+| `code-indexer serve [--port 8003]` | Run FastAPI in the foreground. |
+| `code-indexer start` | Spawn the service in the background. |
+| `code-indexer stop` | Stop the background daemon. |
+| `code-indexer status` | Show daemon liveness + indexed repos. |
+| `code-indexer index <path> [--watch] [--force]` | Index a directory; polls until done. |
+| `code-indexer reindex <slug>` | Force a clean re-index of an indexed repo. |
+| `code-indexer list` | List every indexed repo. |
+| `code-indexer search "<query>" [-k 10] [--repo X]` | Semantic search. |
+| `code-indexer symbol <fqn> [--repo X]` | Look up a symbol's source. |
+| `code-indexer callers <fqn> [--repo X]` | List upstream callers. |
+| `code-indexer callees <fqn> [--repo X]` | List downstream callees. |
+| `code-indexer bundle "<task>" --repo <path>` | Build a grounded context bundle. |
+| `code-indexer explore` | Open the LadybugDB Explorer URL. |
+| `code-indexer remove <slug> [-y]` | Delete a repo's index (cascade). |
+
+When you run `code-indexer index <path>` and the service isn't already
+listening, the CLI auto-starts it in the background.
+
+### Configuration
+
+The setup wizard writes `~/.code-indexer/config.toml`:
+
+```toml
+[server]
+base_url = "http://localhost:8003"
+port = 8003
+
+[embedder]
+backend = "local"     # local | sagemaker | tei
+
+[paths]
+data_dir = "/Users/jane/.code-indexer"
+```
+
+Override the base URL at any time with `--base-url` or
+`CODE_INDEXER_BASE_URL`.
 
 ---
 
@@ -40,16 +118,23 @@ Per-repo storage is two sibling files under `.cgr/repos/`:
 
 ---
 
-## Run
+## Run (raw FastAPI)
 
 ```bash
 # From the code-indexer-service directory:
 uv run uvicorn app.main:app --port 8000 --log-level info
 ```
 
+Equivalent via the CLI: `uv run code-indexer serve --port 8000`.
+
+### Embedded in TheForge
+
 TheForge auto-starts this service when you run `pnpm dev` (via
 `scripts/start-indexer.sh`). Set `CODE_INDEXER_PATH` if the service lives
-somewhere other than `~/code-indexer-service`.
+somewhere other than `~/code-indexer-service`. The TheForge integration
+talks to the FastAPI endpoints directly under `/api/code-indexer/*` —
+the CLI added in this repo is a parallel, optional surface and does
+not change any HTTP contract.
 
 ## Test
 
