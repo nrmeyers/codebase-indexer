@@ -1,76 +1,130 @@
-# Code Indexer Service
+# code-indexer-service
 
-FastAPI HTTP gateway over [code-graph-rag](../code-graph-rag). Indexes
-repositories into LadybugDB (embedded kuzu graph, no Docker) with a
-DuckDB-backed vector store for semantic search.
+> Ask your codebase questions. Index any repo into a typed symbol graph plus a vector store, then query it from the shell or over HTTP.
 
-Two ways to run it:
+[![Python](https://img.shields.io/badge/python-3.12%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.136%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Ruff](https://img.shields.io/badge/code%20style-ruff-d7ff64?logo=ruff)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-1. **Standalone developer tool** — drive it from your shell via the
-   `code-indexer` CLI (see below).
-2. **Embedded in TheForge** — TheForge auto-starts the FastAPI service
-   and proxies it under `/api/code-indexer/*`. See the
-   [Embedded in TheForge](#embedded-in-theforge) section.
+`code-indexer-service` is a FastAPI gateway and CLI that indexes source repositories into a [tree-sitter](https://tree-sitter.github.io/)–parsed symbol graph (LadybugDB, an embedded kuzu fork — no Docker) backed by a DuckDB vector store. It is powered by the [`code-graph-rag`](https://github.com/navistone/code-graph-rag) engine and supports 11 languages out of the box.
 
-Per-repo storage is two sibling files under `.cgr/repos/`:
-* `<slug>.db` — LadybugDB graph (typed nodes/relationships)
-* `<slug>.duck` — DuckDB store (`embeddings` + `repo_metadata` tables)
+Use it standalone from your shell, or embed it as a sidecar — the same HTTP surface drives both.
 
-**Default Port:** 8000 (FastAPI). The CLI defaults to `http://localhost:8003`
-to match the port TheForge proxies through; override with
-`CODE_INDEXER_BASE_URL` or `--base-url`.
+You can ask it things like:
+
+- "Where is `process_file` defined and who calls it?"
+- "Find the auth handler" — semantic search over symbols.
+- "Show me every function downstream of `httpClient.send`."
+- "Give me a grounded context bundle for _add retry logic to the HTTP client_."
+- "What does this Cypher query return against the repo graph?"
 
 ---
 
-## Use as a standalone tool
+## Contents
 
-The `code-indexer` CLI wraps every public FastAPI endpoint so you can
-index and search local repos without TheForge.
+- [Quickstart](#quickstart)
+- [Demo](#demo)
+- [Why not grep](#why-not-grep)
+- [Two ways to use it](#two-ways-to-use-it)
+- [Standalone CLI](#standalone-cli)
+- [REST API](#rest-api)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Development](#development)
+- [License](#license)
 
-### Option 1 — from a clone
+---
 
-```bash
-git clone https://github.com/navistone/code-indexer-service.git
-cd code-indexer-service
-uv sync
-uv run code-indexer setup           # one-time interactive wizard
-uv run code-indexer index ~/my-project
-uv run code-indexer search "where is the auth code"
-```
-
-### Option 2 — with pipx
+## Quickstart
 
 ```bash
 pipx install git+https://github.com/navistone/code-indexer-service.git
-code-indexer setup
-code-indexer index ~/my-project
+code-indexer setup                       # one-time interactive wizard
+code-indexer index ~/path/to/your/repo   # indexes in the background, polls to completion
 code-indexer search "where is the auth code"
+code-indexer callers myproject.parser.process_file
 ```
 
-### Subcommand reference
+The CLI auto-starts the FastAPI service in the background on first use. To run the HTTP gateway directly, see [Standalone CLI § serve](#cli-reference).
 
-| Command | Description |
-|---|---|
-| `code-indexer setup` | Interactive wizard. Writes `~/.code-indexer/config.toml`. |
-| `code-indexer serve [--port 8003]` | Run FastAPI in the foreground. |
-| `code-indexer start` | Spawn the service in the background. |
-| `code-indexer stop` | Stop the background daemon. |
-| `code-indexer status` | Show daemon liveness + indexed repos. |
-| `code-indexer index <path> [--watch] [--force]` | Index a directory; polls until done. |
-| `code-indexer reindex <slug>` | Force a clean re-index of an indexed repo. |
-| `code-indexer list` | List every indexed repo. |
-| `code-indexer search "<query>" [-k 10] [--repo X]` | Semantic search. |
-| `code-indexer symbol <fqn> [--repo X]` | Look up a symbol's source. |
-| `code-indexer callers <fqn> [--repo X]` | List upstream callers. |
-| `code-indexer callees <fqn> [--repo X]` | List downstream callees. |
-| `code-indexer bundle "<task>" --repo <path>` | Build a grounded context bundle. |
-| `code-indexer explore` | Open the LadybugDB Explorer URL. |
-| `code-indexer remove <slug> [-y]` | Delete a repo's index (cascade). |
+---
 
-When you run `code-indexer index <path>` and the service isn't already
-listening, the CLI auto-starts it in the background.
+## Demo
 
-### Configuration
+> _Screencast coming — drop an asciinema or `vhs`-generated GIF here when one is recorded._
+
+---
+
+## Why not grep
+
+`grep` and your IDE's "Find Usages" both top out where this tool starts:
+
+- **Semantic, not lexical.** Query "the auth handler" without knowing the function is called `verify_session_token`. Backed by 768-dim [`intfloat/e5-base-v2`](https://huggingface.co/intfloat/e5-base-v2) embeddings stored in DuckDB.
+- **Cross-file and cross-repo by default.** Imports, calls, inheritance, and references are first-class graph edges. Ask "who calls X" across the entire indexed corpus, not just the current file.
+- **Structural Cypher queries.** The symbol graph is queryable directly — return every `Function` that imports from a given module, list all `Class` nodes with more than 20 methods, etc.
+- **Grounded context bundles for LLMs.** `/context-bundle` returns the symbols, snippets, and call graph relevant to a task — primary use case is feeding a coding agent without dumping whole files.
+
+---
+
+## Two ways to use it
+
+### Standalone tool
+
+`pipx install` (or `uv sync` from a clone), `code-indexer setup`, point it at a directory. The CLI manages the service daemon, indexes repos, and wraps every endpoint. This is the path you want for personal use, evaluation, or scripting against your own repos.
+
+### Embedded in TheForge
+
+[TheForge](https://github.com/navistone/TheForge) auto-starts this service when you run `pnpm dev` (via `scripts/start-indexer.sh`) and proxies it under `/api/code-indexer/*`. Set `CODE_INDEXER_PATH` if the service lives somewhere other than `~/code-indexer-service`. The CLI is a parallel, optional surface — it does not change any HTTP contract.
+
+---
+
+## Standalone CLI
+
+### Install
+
+```bash
+# Option 1 — pipx (recommended for users)
+pipx install git+https://github.com/navistone/code-indexer-service.git
+
+# Option 2 — from a clone (recommended for contributors)
+git clone https://github.com/navistone/code-indexer-service.git
+cd code-indexer-service
+uv sync
+# Then prefix all commands with: uv run code-indexer ...
+```
+
+### First run
+
+```bash
+code-indexer setup        # writes ~/.code-indexer/config.toml
+code-indexer index ~/proj # auto-starts daemon, polls until done
+code-indexer status       # shows daemon + indexed repos
+```
+
+### CLI reference
+
+| Command                               | Description                                               |
+| ------------------------------------- | --------------------------------------------------------- |
+| `setup`                               | Interactive wizard. Writes `~/.code-indexer/config.toml`. |
+| `serve [--port 8003]`                 | Run the FastAPI service in the foreground.                |
+| `start`                               | Spawn the service in the background.                      |
+| `stop`                                | Stop the background daemon.                               |
+| `status`                              | Show daemon liveness + indexed repos.                     |
+| `index <path> [--watch] [--force]`    | Index a directory; polls until done.                      |
+| `reindex <slug>`                      | Force a clean re-index of an indexed repo.                |
+| `list`                                | List every indexed repo.                                  |
+| `search "<query>" [-k 10] [--repo X]` | Semantic search over symbols.                             |
+| `symbol <fqn> [--repo X]`             | Look up a symbol's source + location.                     |
+| `callers <fqn> [--repo X]`            | Upstream callers of a symbol.                             |
+| `callees <fqn> [--repo X]`            | Downstream callees of a symbol.                           |
+| `bundle "<task>" --repo <path>`       | Build a grounded context bundle for an LLM.               |
+| `explore`                             | Print the LadybugDB Explorer launch command + URL.        |
+| `remove <slug> [-y]`                  | Delete a repo's index (cascade).                          |
+
+Pass `--base-url` to any command to talk to a remote service; the CLI otherwise reads `[server].base_url` from the config.
+
+### Config file
 
 The setup wizard writes `~/.code-indexer/config.toml`:
 
@@ -80,408 +134,168 @@ base_url = "http://localhost:8003"
 port = 8003
 
 [embedder]
-backend = "local"     # local | sagemaker | tei
+backend = "local"      # local | sagemaker | tei
 
 [paths]
 data_dir = "/Users/jane/.code-indexer"
 ```
 
-Override the base URL at any time with `--base-url` or
-`CODE_INDEXER_BASE_URL`.
+Override the base URL at any time with `--base-url` or `CODE_INDEXER_BASE_URL`.
 
 ---
 
-## Endpoints (core)
+## REST API
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Liveness check + indexed repo list |
-| `POST` | `/index` | Start a background indexing job (202 Accepted) |
-| `GET` | `/index/{job_id}/status` | Poll job progress |
-| `GET` | `/search/structural` | Cypher passthrough against LadybugDB |
-| `GET` | `/search/semantic` | Vector-similarity search over the DuckDB embedding store |
-| `GET` | `/search/symbol` | Exact FQN lookup returning source + location |
-| `GET` | `/search/browse` | Package tree / file list browser |
-| `GET` | `/search/callers` | Upstream callers of a symbol |
-| `GET` | `/search/callees` | Downstream callees of a symbol |
-| `POST` | `/context-bundle` | Grounded code context for the dev-agent |
-| `GET` | `/stats/{repo}` | Node/rel counts + embedding count |
-| `GET` | `/repos` | List all indexed repos |
-| `DELETE` | `/repos/{repo}` | Remove a repo from the index |
-| `GET` | `/graph/neighborhood` | N-hop subgraph around a symbol |
-| `GET` | `/graph/schema` | Node labels, rel types, counts |
-| `GET` | `/jobs` | List background jobs |
-| `DELETE` | `/jobs/{job_id}` | Cancel a job |
-| `GET` | `/explorer/info` | LadybugDB Explorer launch command (optional) |
-| `GET` | `/metrics` | Prometheus metrics |
-| `GET` | `/openapi.json` | OpenAPI spec |
+The HTTP service listens on port `8000` by default when run directly (`uv run uvicorn app.main:app`), or `8003` when launched by the CLI to match TheForge's proxy.
 
----
+Full schema lives at `GET /openapi.json`. The most-used endpoints:
 
-## Run (raw FastAPI)
+| Method   | Path                     | Description                                             |
+| -------- | ------------------------ | ------------------------------------------------------- |
+| `GET`    | `/health`                | Liveness + list of indexed repos.                       |
+| `POST`   | `/index`                 | Start a background index job. Returns `202` + `job_id`. |
+| `GET`    | `/index/{job_id}/status` | Poll job progress.                                      |
+| `POST`   | `/index/{job_id}/cancel` | Cancel a running job.                                   |
+| `GET`    | `/index/jobs`            | List background jobs.                                   |
+| `GET`    | `/search/semantic?q=&k=` | Vector-similarity search.                               |
+| `GET`    | `/search/structural?q=`  | Arbitrary Cypher against LadybugDB.                     |
+| `GET`    | `/search/lexical?q=`     | BM25 search via Tantivy.                                |
+| `GET`    | `/search/symbol?fqn=`    | Exact FQN lookup.                                       |
+| `GET`    | `/search/callers?fqn=`   | Upstream callers.                                       |
+| `GET`    | `/search/callees?fqn=`   | Downstream callees.                                     |
+| `GET`    | `/search/centrality`     | PageRank scores over the symbol graph.                  |
+| `GET`    | `/search/files`          | Browse the package/file tree.                           |
+| `GET`    | `/search/types`          | Enumerate node labels + counts.                         |
+| `POST`   | `/context-bundle`        | Grounded context for a task description.                |
+| `GET`    | `/repos`                 | List all indexed repos.                                 |
+| `GET`    | `/repos/{name}/stats`    | Node, relationship, and embedding counts.               |
+| `POST`   | `/repos/{name}/reindex`  | Force re-index.                                         |
+| `DELETE` | `/repos/{name}`          | Remove a repo from the index.                           |
+| `GET`    | `/explorer/info`         | LadybugDB Explorer launch command.                      |
+| `GET`    | `/metrics`               | Prometheus metrics.                                     |
 
-```bash
-# From the code-indexer-service directory:
-uv run uvicorn app.main:app --port 8000 --log-level info
-```
+### Examples
 
-Equivalent via the CLI: `uv run code-indexer serve --port 8000`.
-
-### Embedded in TheForge
-
-TheForge auto-starts this service when you run `pnpm dev` (via
-`scripts/start-indexer.sh`). Set `CODE_INDEXER_PATH` if the service lives
-somewhere other than `~/code-indexer-service`. The TheForge integration
-talks to the FastAPI endpoints directly under `/api/code-indexer/*` —
-the CLI added in this repo is a parallel, optional surface and does
-not change any HTTP contract.
-
-## Test
+Start an index job:
 
 ```bash
-uv run pytest tests/ -v   # 51 tests
+curl -sX POST http://localhost:8000/index \
+     -H 'content-type: application/json' \
+     -d '{"repo_path": "/abs/path/to/repo"}'
+# → {"job_id": "3f2a…", "status": "running"}
 ```
 
-## Install (first run)
-
-The service depends on the local `code-graph-rag` fork as a path dependency.
-Run `uv sync` once to pull everything:
+Poll until done:
 
 ```bash
-cd ~/code-indexer-service
-uv sync
+curl -s http://localhost:8000/index/3f2a…/status
+# → {"status": "done", "progress_pct": 100, "node_count": 1842, "rel_count": 3107, "embedding_count": 892}
 ```
 
-`real-ladybug>=0.15.3` (LadybugDB) and `duckdb` are installed automatically.
-
----
-
-## Config
-
-| Env var | Default | Notes |
-|---|---|---|
-| `LADYBUG_DB_DIR` | `.cgr/repos` | Per-repo `.db`+`.duck` storage root |
-| `LADYBUG_DB_PATH` | (legacy) | Single-DB fallback for code-graph-rag callers |
-| `LADYBUG_BATCH_SIZE` | `1000` | Ingestor flush batch size |
-| `TARGET_REPO_PATH` | `.` | Default repo when request omits `repo_path` |
-| `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `8000` | Server bind port |
-| `EMBEDDER_BACKEND` | `local` | Which embedder to use — see **Embedder backends** below |
-
-Copy `.env.example` → `.env` and adjust paths for your machine.
-
----
-
-## Embedder backends
-
-The Code Indexer supports three interchangeable embedder backends behind a
-single protocol (`app/embedders/base.py`). All three produce **768-dim
-`intfloat/e5-base-v2` vectors**, so switching backends needs no migration
-of the DuckDB `FLOAT[768]` schema — flip the env var and restart.
-
-Select with `EMBEDDER_BACKEND={local|sagemaker|tei}` (default `local`).
-
-| Backend | When to use | Tradeoffs |
-|---|---|---|
-| `local` | Standalone / laptop / no AWS | ~440 MB model download on first run; ~50-200ms per batch on modern CPU; zero infra cost; **default** |
-| `sagemaker` | Navistone production deploy | Lowest latency, GPU-backed batching; requires AWS creds + the `forge-e5-embed-v2` endpoint; per-invocation cost |
-| `tei` | GPU box without AWS | Fastest throughput when you already have a GPU sidecar; one extra container to operate; no AWS coupling |
-
-### `local` — sentence-transformers in-process
-
-Default for standalone installs. Runs the model on your CPU/GPU directly.
-Requires the optional `[local-embed]` extras group:
+Semantic search:
 
 ```bash
-uv sync --group local-embed   # installs sentence-transformers>=3.2
+curl -s 'http://localhost:8000/search/semantic?q=session+token+validation&k=5'
 ```
 
-```dotenv
-EMBEDDER_BACKEND=local
-# LOCAL_EMBED_MODEL=intfloat/e5-base-v2   # default — only change if you know what you're doing
-```
-
-First call downloads the model (~440 MB) into `~/.cache/huggingface/hub`
-and takes 30-60s. Subsequent calls are ~50-200ms per batch on a modern CPU.
-
-### `sagemaker` — AWS SageMaker Serverless Inference
-
-Default for the Navistone production deploy. Requires AWS credentials in
-the standard boto3 chain (env vars / instance profile / SSO profile) with
-`sagemaker:InvokeEndpoint` on the target endpoint.
-
-```dotenv
-EMBEDDER_BACKEND=sagemaker
-SAGEMAKER_ENDPOINT_NAME=forge-e5-embed-v2
-SAGEMAKER_EMBED_REGION=us-east-1
-SAGEMAKER_EMBED_BATCH_SIZE=32
-```
-
-For Navistone deploys already on the legacy `SAGEMAKER_EMBED_URL` config:
-that env var is still honoured — the endpoint name is extracted
-automatically. The migration plan for Navistone is **no-op**: set
-`EMBEDDER_BACKEND=sagemaker` in the production `.env` (or leave it unset
-on a Navistone machine where it is the documented default in
-`.env.example`) and the existing endpoint config is reused.
-
-### `tei` — Hugging Face Text-Embeddings-Inference sidecar
-
-For users who want GPU-batched embedding without AWS. Bring up the sidecar
-with Docker:
+Cypher passthrough:
 
 ```bash
-docker run -d --name tei \
-    -p 8080:80 \
-    --gpus all \
-    ghcr.io/huggingface/text-embeddings-inference:1.5 \
-    --model-id intfloat/e5-base-v2
+curl -s --data-urlencode 'q=MATCH (f:Function)-[:CALLS]->(g:Function) RETURN f.qualified_name, g.qualified_name LIMIT 10' \
+     http://localhost:8000/search/structural
 ```
 
-Then point the Code Indexer at it:
-
-```dotenv
-EMBEDDER_BACKEND=tei
-TEI_URL=http://localhost:8080
-TEI_TIMEOUT_MS=30000
-TEI_BATCH_SIZE=32
-```
-
-### Switching backends
-
-A typical flow when validating index quality on a non-Navistone machine:
-
-1. Set `EMBEDDER_BACKEND=local` in `.env`.
-2. Restart the service (`uvicorn app.main:app --port 8000`).
-3. Re-index the target repos (`POST /index`).
-4. Run your evaluation queries via `/search/semantic` or `/context-bundle`.
-
-Because all three backends produce the same 768-dim e5-base-v2 vectors,
-indexes built with one backend are compatible with searches issued via
-another — but you should still re-embed if switching across backends
-that drift in tokenisation behaviour.
-
----
-
-## Endpoint Reference
-
-### `GET /health`
-
-```json
-{
-  "status": "ok",
-  "db_path": ".cgr/graph.db",
-  "indexed_repos": ["myproject", "other-repo"]
-}
-```
-
-### `POST /index`
-
-```json
-// Request
-{ "repo_path": "/absolute/path/to/repo", "force_reindex": false }
-
-// Response 202
-{ "job_id": "3f2a…", "status": "running" }
-```
-
-Returns `409 Conflict` if an index job for the same repo is already running
-(LadybugDB is single-writer; concurrent jobs serialize via `asyncio.Lock`).
-
-### `GET /index/{job_id}/status`
-
-```json
-{
-  "job_id": "3f2a…",
-  "status": "done",
-  "progress_pct": 100,
-  "node_count": 1842,
-  "rel_count": 3107,
-  "embedding_count": 892
-}
-```
-
-`status` is one of `running | done | failed`.
-
-### `GET /search/structural?q={cypher}&limit=20`
-
-Runs arbitrary Cypher against LadybugDB. A `LIMIT` clause is appended
-automatically if the query does not already include one.
-
-```json
-{
-  "row_count": 2,
-  "nodes": [
-    { "name": "process_file", "qualified_name": "myproject.parser.process_file" }
-  ]
-}
-```
-
-### `GET /search/semantic?q={text}&k=10`
-
-Vector-similarity search using `nomic-ai/CodeRankEmbed` embeddings (FLOAT[768],
-L2-normalised) stored in the per-repo `<slug>.duck` file via `array_cosine_distance`.
-Optional listwise rerank via `nomic-ai/CodeRankLLM` (`?rerank=true`) — see
-*Two-stage retrieval* below.
-
-```json
-{
-  "results": [
-    { "symbol": "myproject.parser.process_file", "score": 0.94,
-      "node_id": "myproject.parser.process_file", "name": "process_file", "type": "Function" }
-  ]
-}
-```
-
-### `GET /search/symbol?fqn={qualified_name}`
-
-```json
-{
-  "qualified_name": "myproject.parser.process_file",
-  "source": "def process_file(path: Path) -> ...",
-  "file": "/abs/path/to/parser.py",
-  "start_line": 42,
-  "end_line": 71
-}
-```
-
-### `POST /context-bundle`
-
-```json
-// Request
-{
-  "repo_path": "/abs/path/to/repo",
-  "task_description": "add retry logic to the HTTP client",
-  "depth": 2
-}
-
-// Response
-{
-  "symbols": ["myproject.http.get", "myproject.http.post"],
-  "source_snippets": { "myproject.http.get": "def get(url): ..." },
-  "call_graph": { "myproject.http.get": ["myproject.http._send"] },
-  "total_tokens": 1840
-}
-```
-
----
-
-## Two-stage retrieval (optional)
-
-`/search/semantic?rerank=true` and `POST /context-bundle` (with
-`"rerank": true`) opt into a second-stage listwise rerank using
-`nomic-ai/CodeRankLLM` served by [LM Studio](https://lmstudio.ai/).
-
-* **Stage 1 — bi-encoder.** DuckDB `array_cosine_distance` over the
-  per-repo `.duck` file widens to ~50 candidates (after PageRank +
-  RRF/BM25 fusion).
-* **Stage 2 — listwise reranker.** Those candidates are sent to
-  CodeRankLLM as a single permutation prompt; the model emits an
-  ordering like `[3] > [1] > [4]`, which the service slices to your
-  requested `k`.
-
-The reranker is **strictly opt-in and non-fatal**: if `LM_STUDIO_URL`
-is unset, the model isn't loaded, the call times out, or the response
-doesn't parse, the bi-encoder ordering is returned unchanged. There is
-no behavioural difference for callers who don't pass `rerank=true`.
-
-### Enabling LM Studio
+Grounded context bundle:
 
 ```bash
-# .env
-LM_STUDIO_URL=http://localhost:1234
-
-# Embed model — must match the model the index was built with.  The
-# default ``CodeRankEmbed`` is intentionally strict: the parent base
-# ``nomic-embed-text-v1.5`` is the same architecture but lives in a
-# DIFFERENT vector space, and using it at query time silently
-# destroys recall (~50–70% precision drop).  Override only after
-# rebuilding the index with the same backend.
-LM_STUDIO_EMBED_MODEL=CodeRankEmbed
-
-# Rerank model — substring match (case-insensitive) against the
-# /v1/models response.  Any instruction-following chat model that can
-# emit a bracketed permutation works:
-#   LM_STUDIO_RERANK_MODEL=CodeRankLLM            # reference model
-#   LM_STUDIO_RERANK_MODEL=qwen/qwen3.6-35b-a3b   # MoE — fastest
-#   LM_STUDIO_RERANK_MODEL=qwen/qwen3.6-27b       # dense — slower
-LM_STUDIO_RERANK_MODEL=CodeRankLLM
-
-# Generous timeout so a thinking-mode model (Qwen3, DeepSeek-R1) has
-# room to finish reasoning AND emit the permutation.  Plain models
-# return well inside this.
-LM_STUDIO_TIMEOUT=180
+curl -sX POST http://localhost:8000/context-bundle \
+     -H 'content-type: application/json' \
+     -d '{"repo_path": "/abs/path/to/repo", "task_description": "add retry logic to the HTTP client", "depth": 2}'
 ```
-
-When `LM_STUDIO_URL` is set and the matching models are loaded, the
-service will additionally route **query-time embedding** through LM
-Studio (keeps `torch`/`transformers` out of the uvicorn process). The
-in-process embedder remains the index-time path.
-
-### Latency notes
-
-The reranker prompt format includes a `/no_think` directive that
-disables Qwen3's reasoning channel; other model families ignore it
-harmlessly. With reasoning suppressed the rerank step typically lands
-in **3–10 seconds** for an MoE-A3B model (e.g. `qwen3.6-35b-a3b`) and
-**60–120 seconds** for a dense 27B+ thinking model. The bi-encoder
-top-k path takes <500ms and is unaffected — `rerank=true` is the only
-flag that pulls in the LLM.
 
 ---
 
 ## Architecture
 
-```
-TheForge API (Express :3001)
-        │
-        │  HTTP :8000
-        ▼
-Code Indexer Service (FastAPI — this repo)
-        │
-        │  Python import
-        ▼
-code-graph-rag (LadybugIngestor + DuckDB vector store)
-        │
-        ├─► LadybugDB (.cgr/repos/{slug}.db — embedded kuzu graph)
-        └─► DuckDB    (.cgr/repos/{slug}.duck — embeddings + repo_metadata)
+```mermaid
+flowchart LR
+    User([CLI / curl / TheForge UI]) -->|HTTP| API[FastAPI service<br/>app/routers/*]
+    API -->|index, search| Engine[code-graph-rag engine<br/>LadybugIngestor + DuckDB store]
+    Engine -->|parse| TS[tree-sitter<br/>11 languages]
+    Engine -->|embed| EMB{Embedder<br/>backend}
+    EMB -->|local| Local[sentence-transformers<br/>in-process]
+    EMB -->|sagemaker| SM[AWS SageMaker<br/>Serverless Inference]
+    EMB -->|tei| TEI[Text-Embeddings-Inference<br/>HTTP sidecar]
+    Engine -->|graph writes| LB[(LadybugDB<br/>.cgr/repos/&lt;slug&gt;.db)]
+    Engine -->|vectors| DD[(DuckDB<br/>.cgr/repos/&lt;slug&gt;.duck)]
+    API -.->|read-only| LB
+    API -.->|read-only| DD
 ```
 
-The service imports `code-graph-rag` as a local `uv` workspace path dependency.
-Both share the same `LADYBUG_DB_DIR` so indexed data is immediately visible
-to search. Each repo gets its own pair of `.db` + `.duck` files keyed by slug.
+- **Parsing.** [tree-sitter](https://tree-sitter.github.io/) grammars for Python, JavaScript, TypeScript, Go, Java, C#, Rust, and more. Symbols (functions, classes, methods), files, modules, and references become typed graph nodes.
+- **Graph store.** [LadybugDB](https://docs.ladybugdb.com/) — an embedded, file-backed [kuzu](https://kuzudb.com/) fork. One `.db` file per repo at `.cgr/repos/<slug>.db`. Cypher-queryable. No Docker.
+- **Vector store.** DuckDB `FLOAT[768]` column plus `array_cosine_distance` for similarity search. One `.duck` file per repo at `.cgr/repos/<slug>.duck`.
+- **Embedders.** All three backends produce the same 768-dim `intfloat/e5-base-v2` vectors, so the on-disk index is portable across them. Switch with `EMBEDDER_BACKEND={local|sagemaker|tei}` and restart.
+- **Imports across repos.** Cross-repo `IMPORTS` edges link symbols indexed under different slugs (BUC-1598).
+- **Centrality.** PageRank scores over the call/import graph are precomputed and exposed at `/search/centrality` (BUC-1577, BUC-1599 persistence).
 
 ---
 
-## Visualising the graph (optional)
+## Configuration
 
-LadybugDB is kuzu-compatible on disk. The Kuzu Explorer Docker image
-opens the `.db` file read-only for interactive node/edge browsing, a Cypher
-console, and schema introspection.
+### Environment variables
 
-### Ask the running service for the command
+| Variable                  | Default                 | Description                                                      |
+| ------------------------- | ----------------------- | ---------------------------------------------------------------- |
+| `LADYBUG_DB_DIR`          | `.cgr/repos`            | Per-repo `.db` + `.duck` storage root.                           |
+| `LADYBUG_DB_PATH`         | _(legacy)_              | Single-DB fallback for direct `code-graph-rag` callers.          |
+| `LADYBUG_BATCH_SIZE`      | `1000`                  | Ingestor flush batch size.                                       |
+| `TARGET_REPO_PATH`        | `.`                     | Default repo when a request omits `repo_path`.                   |
+| `HOST`                    | `0.0.0.0`               | HTTP bind address.                                               |
+| `PORT`                    | `8000`                  | HTTP bind port.                                                  |
+| `EMBEDDER_BACKEND`        | `local`                 | One of `local`, `sagemaker`, `tei`.                              |
+| `LOCAL_EMBED_MODEL`       | `intfloat/e5-base-v2`   | Override only after re-indexing.                                 |
+| `SAGEMAKER_ENDPOINT_NAME` | —                       | Required when `EMBEDDER_BACKEND=sagemaker`.                      |
+| `SAGEMAKER_EMBED_REGION`  | `us-east-1`             | AWS region for the SageMaker endpoint.                           |
+| `TEI_URL`                 | `http://localhost:8080` | Endpoint for the TEI sidecar.                                    |
+| `TEI_TIMEOUT_MS`          | `30000`                 | Per-request TEI timeout.                                         |
+| `RERANK_ENABLED`          | `false`                 | Opt into the future rerank stage (see `docs/SEARCH_RANKING.md`). |
+| `GITHUB_TOKEN`            | —                       | Fine-scoped PAT for `/github/*` routes.                          |
+
+Copy [`.env.example`](.env.example) to `.env` and adjust paths for your machine. The example file documents every variable inline.
+
+### Embedder backends
+
+| Backend     | When to use                                | Tradeoffs                                                        |
+| ----------- | ------------------------------------------ | ---------------------------------------------------------------- |
+| `local`     | Standalone / laptop / no AWS. **Default.** | ~440 MB model download on first run; CPU-bound; zero infra cost. |
+| `sagemaker` | Navistone production.                      | GPU-backed batching; requires AWS creds; per-invocation cost.    |
+| `tei`       | Self-hosted GPU box.                       | Highest throughput; one extra container; no AWS coupling.        |
+
+Switching backends is a pure env-var flip — the DuckDB `FLOAT[768]` schema is the same for all three.
+
+---
+
+## Development
 
 ```bash
-curl -s http://localhost:8000/explorer/info | jq
+git clone https://github.com/navistone/code-indexer-service.git
+cd code-indexer-service
+uv sync                          # installs all deps incl. code-graph-rag path dep
+uv sync --group local-embed      # add sentence-transformers for the local backend
+uv run uvicorn app.main:app --reload --port 8000
+uv run pytest tests/ -v          # 51+ tests
+uv run ruff check .              # lint
 ```
 
-```json
-{
-  "available": true,
-  "db_path": "/abs/path/to/graph.db",
-  "indexed_repos": ["myproject"],
-  "launch_command": "docker run --rm -p 7001:8000 -v /abs/path:/database -e LADYBUG_PATH=/database/graph.db ghcr.io/ladybugdb/explorer:latest",
-  "viewer_url": "http://localhost:7001",
-  "docs_url": "https://docs.ladybugdb.com/visualization/explorer/"
-}
-```
+Tests live under `tests/` and cover routers (`tests/routers/`), services, embedders, and CLI command parsing.
 
-Paste `launch_command` into a terminal and open `viewer_url` once ready.
+---
 
-### Notes
+## License
 
-- **Docker is only required for the viewer.** All indexing and search work
-  without Docker — the viewer is purely opt-in.
-- **Single-writer safety.** The Explorer mounts the DB read-only so it's safe
-  to browse while TheForge queries, but do **not** browse during a live
-  `/index` job.
-- `available: false` means no repos are indexed yet — run `POST /index` first.
+MIT. See [LICENSE](LICENSE) if present, otherwise this project is released under the [MIT License](https://opensource.org/licenses/MIT).
+
+## Contributing
+
+Issues and PRs welcome on [GitHub](https://github.com/navistone/code-indexer-service/issues). See [`AGENTS.md`](AGENTS.md) for the conventions agents follow when working in this repo.
