@@ -473,3 +473,34 @@ def test_outcome_metric_records_skip_empty_input_on_no_candidates(
     out = reranker.rerank("q", [])
     assert out == []
     assert _outcome_count("skip-empty-input") == before + 1
+
+
+# ---------------------------------------------------------------------------
+# BUC-1651 — structured warning when LM Studio is unreachable
+# ---------------------------------------------------------------------------
+
+
+def test_should_log_warning_when_lm_studio_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When a caller opts into rerank but LM Studio is unreachable, the
+    fail-open path must emit a single WARNING-level log line — distinct
+    from the silent skip-empty-input path so operators can grep for
+    rerank degradation in production logs (BUC-1651)."""
+    import logging
+    from app.services import lm_studio, reranker
+
+    # Force the "unavailable" path: empty base_url short-circuits is_available()
+    # without any network calls.
+    monkeypatch.setattr(lm_studio, "can_rerank", lambda: False)
+    monkeypatch.setattr(lm_studio, "base_url", lambda: "")
+
+    cands = _cands(3)
+    with caplog.at_level(logging.WARNING, logger="app.services.reranker"):
+        out = reranker.rerank("find foo", cands)
+
+    assert out == cands  # identity preserved
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "LM Studio unreachable" in warnings[0].getMessage()

@@ -187,6 +187,19 @@ def rerank(query: str, candidates: list[Candidate]) -> list[Candidate]:
         _metrics.record_rerank_outcome("skip-empty-input")
         return candidates
     if not is_available():
+        # BUC-1651: rerank is opt-in local-only (LM Studio). When the
+        # caller requests rerank but LM Studio is unreachable (hosted
+        # deploys, ConnectError, model not loaded), we degrade gracefully
+        # to the un-reranked bi-encoder order and emit a structured
+        # warning so operators can see the fail-open path firing in logs
+        # — distinct from skip-empty-input (caller's fault) so the two
+        # cases are diagnosable separately.
+        logger.warning(
+            "rerank requested but LM Studio unreachable or model not loaded "
+            "(base_url=%r, model_hint=%r); returning un-reranked results",
+            lm_studio.base_url() or "(unset)",
+            lm_studio.rerank_model_hint(),
+        )
         _metrics.record_rerank_outcome("skip-unavailable")
         return candidates
 

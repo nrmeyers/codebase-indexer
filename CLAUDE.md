@@ -74,8 +74,8 @@ code-graph-rag (LadybugIngestor + DuckDB vector store)
 | `app/routers/stats.py` | `GET /stats/{repo}` |
 | `app/routers/explorer.py` | `GET /explorer/info` — LadybugDB Explorer launcher |
 | `app/embedders/` | Pluggable embedder backends (`local`, `sagemaker`, `tei`). Use `get_embedder()` factory (async) or `app.embedders.sync_bridge.embed_text_sync` / `get_embedder_or_none` for sync callers. The legacy `app/services/sagemaker_embedder.py` shim was removed in BUC-1608 (PR #58). |
-| `app/services/lm_studio.py` | OpenAI-compatible adapter for legacy LM Studio path (retired in TheForge PR #168) |
-| `app/services/reranker.py` | Listwise rerank via `nomic-ai/CodeRankLLM` (legacy; future rerank backends TBD) |
+| `app/services/lm_studio.py` | OpenAI-compatible adapter for the optional local LM Studio rerank/embed path. **Local-only opt-in** — enabled when `LM_STUDIO_URL` is set; hosted deploys (where LM Studio is unreachable) gracefully degrade to un-reranked results with a structured warning (BUC-1651). |
+| `app/services/reranker.py` | Listwise rerank via `nomic-ai/CodeRankLLM` (or any instruction-following LLM loaded in LM Studio). Opt-in per request via `?rerank=true` on `/search/semantic` and `POST /context-bundle`. Best-effort + fail-open — every failure mode (unreachable, model not loaded, timeout, parse error) returns the bi-encoder order unchanged and records the outcome in `forge_indexer_rerank_outcome_total`. |
 
 ---
 

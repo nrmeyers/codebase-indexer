@@ -259,6 +259,63 @@ def test_semantic_search_empty(tmp_path) -> None:
     assert resp.json()["results"] == []
 
 
+def test_semantic_search_serves_200_when_rerank_true_but_lm_studio_unreachable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUC-1651: ``?rerank=true`` must NOT 5xx when LM Studio is unreachable.
+
+    The route degrades gracefully to the un-reranked bi-encoder order — the
+    reranker.rerank() call returns identity on any failure (unavailable,
+    timeout, parse error, HTTP 5xx from LM Studio) and the response body is
+    indistinguishable from a successful no-op rerank. This is the contract
+    hosted deploys depend on: LM Studio runs on developer laptops only.
+    """
+    from app.config import settings
+
+    duck = tmp_path / "fake.duck"
+    duck.write_bytes(b"")
+
+    fake_results = [
+        _fake_search_result("mymod.foo", 0.95),
+        _fake_search_result("mymod.bar", 0.80),
+    ]
+
+    # Force the unavailable path — no LM_STUDIO_URL, can_rerank() False.
+    monkeypatch.delenv("LM_STUDIO_URL", raising=False)
+    # Some deploys ship with RERANK_ENABLED=true so the env-var gate is on
+    # but the backend isn't — this is the exact failure mode BUC-1651 fixes.
+    monkeypatch.setattr(settings, "RERANK_ENABLED", True)
+
+    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
+         patch("app.routers.search._embed_unavailable", False), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)), \
+         patch("codebase_rag.storage.vector_store.open_or_create",
+               return_value=MagicMock()), \
+         patch("codebase_rag.storage.vector_store.search_similar",
+               return_value=fake_results), \
+         patch("codebase_rag.storage.vector_store.read_centrality",
+               return_value={}):
+        resp = client.get(
+            "/search/semantic",
+            params={
+                "q": "find all functions",
+                "k": 5,
+                "repo": "fake",
+                "rerank": "true",
+            },
+        )
+
+    # The headline contract: rerank=true + unreachable LM Studio = 200, not 5xx.
+    assert resp.status_code == 200, (
+        f"expected 200 (graceful degrade) got {resp.status_code}: {resp.text}"
+    )
+    body = resp.json()
+    # Un-reranked bi-encoder order surfaces unchanged.
+    symbols = [r["symbol"] for r in body["results"]]
+    assert "mymod.foo" in symbols and "mymod.bar" in symbols
+
+
 # ---------------------------------------------------------------------------
 # /search/symbol
 # ---------------------------------------------------------------------------

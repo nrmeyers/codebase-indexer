@@ -665,8 +665,11 @@ def _semantic_search_impl(
     # reranker the top-50 candidates *enriched with their source snippets* (joined
     # from LadybugDB Module nodes), get back its permutation, and slice to k.
     # Best-effort: any failure (reranker offline, parse error, timeout, source-fetch
-    # error) leaves ``filtered`` untouched. LM Studio was retired (TheForge PR #168);
-    # future rerank implementations will wire via a different backend (see BUC-1545).
+    # error) leaves ``filtered`` untouched. LM Studio rerank is a local-only opt-in
+    # via ``?rerank=true``; hosted deploys (where LM Studio is unreachable) gracefully
+    # degrade to the un-reranked bi-encoder order with a structured warning logged
+    # by ``reranker.rerank()`` (BUC-1651). Future backends may slot in alongside;
+    # see BUC-1545 for the cross-encoder / TEI sidecar exploration.
     if settings.RERANK_ENABLED and rerank:
         try:
             from ..services import reranker, source_fetch  # noqa: WPS433 — runtime-optional
