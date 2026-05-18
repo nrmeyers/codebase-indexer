@@ -108,6 +108,33 @@ class S3SyncStatus(BaseModel):
     last_error: str | None = None
 
 
+class EmbedderStatus(BaseModel):
+    """Active embedder backend description.
+
+    Surfaced by /health so TheForge (and any external caller) can verify the
+    index/embedder pair before issuing a search. A dim mismatch between this
+    block and the DuckDB schema means the index needs to be rebuilt before
+    vectors line up.
+
+    Attributes:
+        backend: Selected backend name (``local`` | ``sagemaker`` | ``tei``
+            | ``openai``).
+        model: Underlying model identifier the backend talks to.
+        dim: Output vector dimensionality. MUST match the per-repo DuckDB
+            ``FLOAT[dim]`` schema. Default 768 (e5-base-v2).
+        configured: True when ``get_embedder()`` returned a backend; False
+            when construction failed (e.g. ``EMBEDDER_BACKEND=openai`` with
+            no API key set). ``error`` carries the message in that case.
+        error: Construction error message when ``configured`` is False.
+    """
+
+    backend: str = "unknown"
+    model: str = ""
+    dim: int = 0
+    configured: bool = False
+    error: str | None = None
+
+
 class HealthResponse(BaseModel):
     """Response for ``GET /health``.
 
@@ -134,6 +161,11 @@ class HealthResponse(BaseModel):
     # up to S3, and when the most recent push happened.  Lets the frontend
     # display a "synced" / "local-only" badge per indexer instance.
     s3_sync: "S3SyncStatus" = Field(default_factory=lambda: S3SyncStatus())
+    # BYO embedder visibility (BYO-embedder config pass): which backend is
+    # actively configured, which model it talks to, and what dim it
+    # produces. Lets TheForge verify the index/embedder pair match before
+    # searching.
+    embedder: "EmbedderStatus" = Field(default_factory=lambda: EmbedderStatus())
 
 
 # ---------------------------------------------------------------------------

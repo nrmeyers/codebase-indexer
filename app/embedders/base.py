@@ -23,9 +23,13 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-#: e5-base-v2 native output dimension. Every backend in this package MUST
-#: produce vectors of this length so the existing DuckDB ``FLOAT[768]``
-#: schema stays compatible — zero migration when switching backends.
+#: e5-base-v2 native output dimension and the dim of the on-disk DuckDB
+#: ``FLOAT[768]`` schema. Backends that produce this dim (``local`` with the
+#: default model, ``sagemaker``, ``tei``) are drop-in compatible with an
+#: existing index. Backends that produce a different dim (``openai``
+#: ``text-embedding-3-small`` = 1536, ``text-embedding-3-large`` = 3072,
+#: ``local`` with a non-default ``LOCAL_EMBED_MODEL``) require a fresh
+#: index — see ``docs/EMBEDDERS.md`` for the migration recipe.
 EMBEDDING_DIM = 768
 
 
@@ -53,13 +57,20 @@ class EmbedderBackend(Protocol):
 
     Attributes:
         name: Stable identifier of the backend (``"local"``, ``"sagemaker"``,
-            or ``"tei"``). Surfaced in /health responses and logs.
-        model: Name of the underlying model. All three default backends
-            serve ``intfloat/e5-base-v2`` so this is informational.
+            ``"tei"``, or ``"openai"``). Surfaced in /health responses and
+            logs.
+        model: Name of the underlying model. The three default backends
+            serve ``intfloat/e5-base-v2``; the ``openai`` backend serves
+            ``text-embedding-3-small`` or ``text-embedding-3-large``.
+        dim: Output vector dimensionality. Exposed so downstream vector-
+            index sizing matches across backends — callers MUST verify this
+            equals their DuckDB / pgvector schema's declared dim before
+            inserting any vectors. Mismatched dim = corrupted index.
     """
 
     name: str
     model: str
+    dim: int
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts; return one 768-dim vector per text.

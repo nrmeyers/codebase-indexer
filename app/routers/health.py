@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter
 
 from ..config import settings
-from ..models import HealthResponse, LmStudioStatus, RepoHealth
+from ..models import EmbedderStatus, HealthResponse, LmStudioStatus, RepoHealth
 from ..services import lm_studio
 
 router = APIRouter()
@@ -217,6 +217,43 @@ def _probe_lm_studio() -> LmStudioStatus:
     )
 
 
+def _probe_embedder() -> EmbedderStatus:
+    """Build the ``embedder`` block for the health response.
+
+    Reports the configured backend, its underlying model, and its output
+    dim. Lets a caller verify the index/embedder dim match before
+    searching — a mismatch means the index needs rebuilding.
+
+    Backend construction failures (e.g. ``EMBEDDER_BACKEND=openai`` with
+    no API key) are surfaced as ``configured=False`` with the error
+    message; /health stays 200 because the service can still serve
+    cached searches and structural queries that don't need the embedder.
+    """
+    from ..embedders import _resolve_backend_name, get_embedder
+    from ..embedders.base import EmbedderError
+
+    selected = _resolve_backend_name()
+    try:
+        backend = get_embedder()
+    except EmbedderError as exc:
+        return EmbedderStatus(
+            backend=selected, configured=False, error=str(exc)
+        )
+    except Exception as exc:  # noqa: BLE001 — defensive; never break /health
+        return EmbedderStatus(
+            backend=selected,
+            configured=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    return EmbedderStatus(
+        backend=getattr(backend, "name", selected),
+        model=getattr(backend, "model", ""),
+        dim=int(getattr(backend, "dim", 0) or 0),
+        configured=True,
+    )
+
+
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """Readiness probe — always returns 200, flips ``status`` to ``degraded``
@@ -254,4 +291,5 @@ def health() -> HealthResponse:
         running_jobs=running,
         lm_studio=_probe_lm_studio(),
         s3_sync=s3_sync,
+        embedder=_probe_embedder(),
     )

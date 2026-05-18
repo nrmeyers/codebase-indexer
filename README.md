@@ -235,7 +235,7 @@ flowchart LR
 - **Parsing.** [tree-sitter](https://tree-sitter.github.io/) grammars for Python, JavaScript, TypeScript, Go, Java, C#, Rust, and more. Symbols (functions, classes, methods), files, modules, and references become typed graph nodes.
 - **Graph store.** [LadybugDB](https://docs.ladybugdb.com/) — an embedded, file-backed [kuzu](https://kuzudb.com/) fork. One `.db` file per repo at `.cgr/repos/<slug>.db`. Cypher-queryable. No Docker.
 - **Vector store.** DuckDB `FLOAT[768]` column plus `array_cosine_distance` for similarity search. One `.duck` file per repo at `.cgr/repos/<slug>.duck`.
-- **Embedders.** All three backends produce the same 768-dim `intfloat/e5-base-v2` vectors, so the on-disk index is portable across them. Switch with `EMBEDDER_BACKEND={local|sagemaker|tei}` and restart.
+- **Embedders.** Four interchangeable backends behind a single `EmbedderBackend` protocol. The three "native" backends (`local`, `sagemaker`, `tei`) produce the same 768-dim `intfloat/e5-base-v2` vectors so the on-disk index is portable across them. A fourth, `openai`, is the bring-your-own path (1536 or 3072 dim — needs a re-index). Switch with `EMBEDDER_BACKEND={local|sagemaker|tei|openai}` and restart. See [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
 - **Imports across repos.** Cross-repo `IMPORTS` edges link symbols indexed under different slugs (BUC-1598).
 - **Centrality.** PageRank scores over the call/import graph are precomputed and exposed at `/search/centrality` (BUC-1577, BUC-1599 persistence).
 
@@ -253,12 +253,16 @@ flowchart LR
 | `TARGET_REPO_PATH`        | `.`                     | Default repo when a request omits `repo_path`.                   |
 | `HOST`                    | `0.0.0.0`               | HTTP bind address.                                               |
 | `PORT`                    | `8000`                  | HTTP bind port.                                                  |
-| `EMBEDDER_BACKEND`        | `local`                 | One of `local`, `sagemaker`, `tei`.                              |
+| `EMBEDDER_BACKEND`        | `local`                 | One of `local`, `sagemaker`, `tei`, `openai`.                    |
 | `LOCAL_EMBED_MODEL`       | `intfloat/e5-base-v2`   | Override only after re-indexing.                                 |
 | `SAGEMAKER_ENDPOINT_NAME` | —                       | Required when `EMBEDDER_BACKEND=sagemaker`.                      |
 | `SAGEMAKER_EMBED_REGION`  | `us-east-1`             | AWS region for the SageMaker endpoint.                           |
 | `TEI_URL`                 | `http://localhost:8080` | Endpoint for the TEI sidecar.                                    |
 | `TEI_TIMEOUT_MS`          | `30000`                 | Per-request TEI timeout.                                         |
+| `OPENAI_API_KEY`          | —                       | Required when `EMBEDDER_BACKEND=openai`.                         |
+| `OPENAI_EMBED_MODEL`      | `text-embedding-3-small`| `text-embedding-3-small` (1536) or `text-embedding-3-large` (3072). |
+| `OPENAI_EMBED_DIM`        | —                       | Matryoshka truncation (3-series only); blank → native dim.       |
+| `OPENAI_BASE_URL`         | —                       | Override for Azure / vLLM / LiteLLM gateways.                    |
 | `RERANK_ENABLED`          | `false`                 | Opt into the future rerank stage (see `docs/SEARCH_RANKING.md`). |
 | `GITHUB_TOKEN`            | —                       | Fine-scoped PAT for `/github/*` routes.                          |
 
@@ -266,13 +270,20 @@ Copy [`.env.example`](.env.example) to `.env` and adjust paths for your machine.
 
 ### Embedder backends
 
-| Backend     | When to use                                | Tradeoffs                                                        |
-| ----------- | ------------------------------------------ | ---------------------------------------------------------------- |
-| `local`     | Standalone / laptop / no AWS. **Default.** | ~440 MB model download on first run; CPU-bound; zero infra cost. |
-| `sagemaker` | Navistone production.                      | GPU-backed batching; requires AWS creds; per-invocation cost.    |
-| `tei`       | Self-hosted GPU box.                       | Highest throughput; one extra container; no AWS coupling.        |
+| Backend     | Default model              | Dim   | When to use                                | Tradeoffs                                                        |
+| ----------- | -------------------------- | ----- | ------------------------------------------ | ---------------------------------------------------------------- |
+| `local`     | `intfloat/e5-base-v2`      | 768   | Standalone / laptop / no AWS. **Default.** | ~440 MB model download on first run; CPU-bound; zero infra cost. |
+| `sagemaker` | `intfloat/e5-base-v2`      | 768   | Navistone production.                      | GPU-backed batching; requires AWS creds; per-invocation cost.    |
+| `tei`       | `intfloat/e5-base-v2`      | 768   | Self-hosted GPU box.                       | Highest throughput; one extra container; no AWS coupling.        |
+| `openai`    | `text-embedding-3-small`   | 1536  | Bring your own — no AWS, no GPU.           | $0.02 / 1M tokens; needs `OPENAI_API_KEY`; **re-index required** (1536 ≠ 768). |
 
-Switching backends is a pure env-var flip — the DuckDB `FLOAT[768]` schema is the same for all three.
+Switching among `local` / `sagemaker` / `tei` is a pure env-var flip — the DuckDB `FLOAT[768]` schema is shared. Switching to `openai` (or anywhere the dim changes) needs a fresh index because the column type doesn't match; see [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md) for the recipe, cost/quality comparison, and protocol contract for plugging in your own backend.
+
+Install the BYO extra alongside the default deps:
+
+```bash
+uv sync --extra byo              # installs openai>=1.0 for the openai backend
+```
 
 ---
 

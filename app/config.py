@@ -199,6 +199,20 @@ class Settings(BaseSettings):
     SAGEMAKER_EMBED_REGION: str = "us-east-1"
     SAGEMAKER_EMBED_BATCH_SIZE: int = 32          # 16–64 per Forge contract
 
+    # --- OpenAI backend config (used when EMBEDDER_BACKEND=openai) ---
+    # OpenAI's /v1/embeddings — the recommended "bring your own embedder"
+    # path. Read directly by app.embedders.openai.OpenAIEmbedder.from_env().
+    # The defaults below produce 1536-dim vectors; switch to
+    # text-embedding-3-large for 3072-dim. Either way you'll need to
+    # re-create the per-repo .duck files because the legacy schema is
+    # FLOAT[768] — see docs/EMBEDDERS.md.
+    OPENAI_API_KEY: str = ""
+    OPENAI_EMBED_MODEL: str = "text-embedding-3-small"
+    OPENAI_EMBED_DIM: str = ""                    # blank → use model's native dim
+    OPENAI_BASE_URL: str = ""                     # for Azure / vLLM / LiteLLM gateways
+    OPENAI_EMBED_BATCH_SIZE: int = 96
+    OPENAI_TIMEOUT_S: float = 30.0
+
     # --- TEI backend config (used when EMBEDDER_BACKEND=tei) ---
     # Hugging Face Text-Embeddings-Inference HTTP sidecar. Bring up via:
     #   docker run -d -p 8080:80 --gpus all \

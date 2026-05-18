@@ -45,12 +45,28 @@ class LocalEmbedder(EmbedderBackend):
 
     name = "local"
 
-    def __init__(self, model_name: str | None = None) -> None:
+    def __init__(
+        self,
+        model_name: str | None = None,
+        dim: int | None = None,
+    ) -> None:
         self.model: str = (
             model_name
             or os.environ.get("LOCAL_EMBED_MODEL")
             or DEFAULT_MODEL
         ).strip()
+        # Allow an operator to override dim when running a non-default
+        # sentence-transformers model. Defaults to e5-base-v2's 768.
+        env_dim = os.environ.get("LOCAL_EMBED_DIM")
+        if dim is not None:
+            self.dim = int(dim)
+        elif env_dim:
+            try:
+                self.dim = int(env_dim)
+            except ValueError:
+                self.dim = EMBEDDING_DIM
+        else:
+            self.dim = EMBEDDING_DIM
         self._model: Any | None = None
         self._lock = asyncio.Lock()
 
@@ -113,9 +129,9 @@ class LocalEmbedder(EmbedderBackend):
         # Defensive: enforce protocol contract loudly so a future model swap
         # cannot silently corrupt the 768-dim DuckDB schema.
         for i, vec in enumerate(vectors):
-            if len(vec) != EMBEDDING_DIM:
+            if len(vec) != self.dim:
                 raise EmbedderError(
                     f"LocalEmbedder produced {len(vec)}-dim vector for input {i}; "
-                    f"expected {EMBEDDING_DIM} (model={self.model!r})"
+                    f"expected {self.dim} (model={self.model!r})"
                 )
         return vectors

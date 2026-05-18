@@ -573,6 +573,11 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.optional-dependencies]
+byo = [
+    { name = "openai" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
@@ -595,6 +600,7 @@ requires-dist = [
     { name = "einops", specifier = ">=0.7.0" },
     { name = "fastapi", specifier = ">=0.136.0" },
     { name = "networkx", specifier = ">=3.2" },
+    { name = "openai", marker = "extra == 'byo'", specifier = ">=1.0" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "prometheus-fastapi-instrumentator", specifier = ">=7.0" },
     { name = "pydantic", specifier = ">=2.13.3" },
@@ -613,6 +619,7 @@ requires-dist = [
     { name = "tree-sitter-typescript", specifier = ">=0.23.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.45.0" },
 ]
+provides-extras = ["byo"]
 
 [package.metadata.requires-dev]
 dev = [

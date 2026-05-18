@@ -57,6 +57,7 @@ class TEIEmbedder(EmbedderBackend):
 
     name = "tei"
     model = "e5-base-v2"
+    dim = EMBEDDING_DIM
 
     def __init__(
         self,

@@ -1,16 +1,22 @@
-"""Pluggable embedder backends for the Code Indexer service (BUC-1605).
+"""Pluggable embedder backends for the Code Indexer service.
 
-Three interchangeable backends sit behind a single ``EmbedderBackend``
-protocol so the indexer can run anywhere from a laptop (no AWS) to a
-GPU box (TEI) to Navistone's production AWS account (SageMaker):
+Four interchangeable backends sit behind a single ``EmbedderBackend``
+protocol so the indexer can run anywhere from a laptop (no AWS, no
+model download) to a GPU box (TEI) to Navistone's production AWS
+account (SageMaker):
 
     local       sentence-transformers in-process. Zero external deps.
-                Default for standalone installs.
+                Default for standalone installs. 768-dim (e5-base-v2).
     sagemaker   Navistone's AWS SageMaker Serverless Inference endpoint
-                (forge-e5-embed-v2, us-east-1). Default for Navistone deploy.
+                (forge-e5-embed-v2, us-east-1). 768-dim. Default for
+                the Navistone production deploy.
     tei         Hugging Face Text-Embeddings-Inference HTTP sidecar
-                (http://localhost:8080). For GPU-batched embedding without
-                AWS or local CPU load.
+                (http://localhost:8080). 768-dim. For GPU-batched
+                embedding without AWS or local CPU load.
+    openai      OpenAI ``/v1/embeddings``. 1536-dim (3-small, default) or
+                3072-dim (3-large). Cheapest "bring your own" path — no
+                local model download, no AWS account. Requires
+                ``OPENAI_API_KEY``.
 
 Selection
 ---------
@@ -19,8 +25,12 @@ values ``local`` | ``sagemaker`` | ``tei``; default ``local``). Use
 ``get_embedder()`` for the module-level singleton; the factory is cached so
 the heavy import / network probe only happens once per process.
 
-All three backends MUST return 768-dim ``list[float]`` vectors so the
-existing LadybugDB / DuckDB ``FLOAT[768]`` schema needs zero migration.
+Backends expose their output dim via ``embedder.dim``. The three
+default backends (``local``, ``sagemaker``, ``tei``) all return 768-dim
+``list[float]`` vectors so the existing LadybugDB / DuckDB ``FLOAT[768]``
+schema needs zero migration. The ``openai`` backend produces 1536 or
+3072 dim vectors and requires a schema migration before use (see
+``docs/EMBEDDERS.md``).
 
 Examples
 --------
@@ -43,7 +53,7 @@ from .base import EMBEDDING_DIM, EmbedderBackend, EmbedderError
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "local"
-VALID_BACKENDS = ("local", "sagemaker", "tei")
+VALID_BACKENDS = ("local", "sagemaker", "tei", "openai")
 
 
 def _resolve_backend_name() -> str:
@@ -91,6 +101,10 @@ def get_embedder() -> EmbedderBackend:
         from .tei import TEIEmbedder
 
         return TEIEmbedder.from_env()
+    if name == "openai":
+        from .openai import OpenAIEmbedder
+
+        return OpenAIEmbedder.from_env()
     # Unreachable — _resolve_backend_name normalises to a valid value.
     raise EmbedderError(f"Unknown EMBEDDER_BACKEND: {name!r}")
 

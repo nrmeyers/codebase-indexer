@@ -68,6 +68,14 @@ dependencies = [
 [project.scripts]
 code-indexer = "app.cli.main:app"
 
+[project.optional-dependencies]
+# Bring-your-own-embedder extras. Keep the heavy / network-only SDK deps
+# out of the default install so a laptop ``uv sync`` stays slim. Install
+# with: ``uv sync --extra byo`` (or ``pip install '.[byo]'``).
+byo = [
+    "openai>=1.0",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
