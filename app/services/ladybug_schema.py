@@ -530,39 +530,54 @@ def migrate(db_path: str) -> None:
             it does not exist.
     """
     logger.info(f"Running LadybugDB schema migration on: {db_path}")
-    db = lb.Database(db_path)
-    conn = lb.Connection(db)
+    db: lb.Database | None = None
+    conn: lb.Connection | None = None
+    try:
+        db = lb.Database(db_path)
+        conn = lb.Connection(db)
+        # 1. Node DDL — rel tables below reference these types.
+        #    ``CREATE NODE TABLE IF NOT EXISTS`` is a no-op when the table
+        #    already exists; new columns on existing tables are handled by the
+        #    ALTER pass below (step 3).
+        for ddl in _NODE_TABLES:
+            # Extract the table name from the DDL for logging only — LadybugDB
+            # does not echo the created object name back to the caller.
+            table_name = ddl.split("TABLE IF NOT EXISTS")[1].split("(")[0].strip()
+            conn.execute(ddl)
+            logger.debug(f"  Node table: {table_name}")
 
-    # 1. Node DDL — rel tables below reference these types.
-    #    ``CREATE NODE TABLE IF NOT EXISTS`` is a no-op when the table
-    #    already exists; new columns on existing tables are handled by the
-    #    ALTER pass below (step 3).
-    for ddl in _NODE_TABLES:
-        # Extract the table name from the DDL for logging only — LadybugDB
-        # does not echo the created object name back to the caller.
-        table_name = ddl.split("TABLE IF NOT EXISTS")[1].split("(")[0].strip()
-        conn.execute(ddl)
-        logger.debug(f"  Node table: {table_name}")
+        # 2. Rel DDL — same semantics as node DDL.
+        for ddl in _REL_TABLES:
+            table_name = ddl.split("TABLE IF NOT EXISTS")[1].split("(")[0].strip()
+            conn.execute(ddl)
+            logger.debug(f"  Rel table: {table_name}")
 
-    # 2. Rel DDL — same semantics as node DDL.
-    for ddl in _REL_TABLES:
-        table_name = ddl.split("TABLE IF NOT EXISTS")[1].split("(")[0].strip()
-        conn.execute(ddl)
-        logger.debug(f"  Rel table: {table_name}")
+        # 3a. Node-table backfill ALTERs (BUC-1621).  Runs unconditionally; each
+        #     ALTER is independent — a failure on one column should not prevent
+        #     the next from being tried.  Idempotent "already exists" errors
+        #     are swallowed.
+        for alter_ddl in _NODE_ALTERS:
+            _run_alter(conn, alter_ddl, kind="NODE")
 
-    # 3a. Node-table backfill ALTERs (BUC-1621).  Runs unconditionally; each
-    #     ALTER is independent — a failure on one column should not prevent
-    #     the next from being tried.  Idempotent "already exists" errors
-    #     are swallowed.
-    for alter_ddl in _NODE_ALTERS:
-        _run_alter(conn, alter_ddl, kind="NODE")
+        # 3b. Rel-table backfill ALTERs (BUC-1603 + BUC-1609).  Same contract.
+        for alter_ddl in _REL_ALTERS:
+            _run_alter(conn, alter_ddl, kind="REL")
 
-    # 3b. Rel-table backfill ALTERs (BUC-1603 + BUC-1609).  Same contract.
-    for alter_ddl in _REL_ALTERS:
-        _run_alter(conn, alter_ddl, kind="REL")
+        # 4. Audit — log present/absent state of every expected table so drift
+        #    between the declared list and the on-disk DB is visible in logs.
+        _audit_schema(conn)
 
-    # 4. Audit — log present/absent state of every expected table so drift
-    #    between the declared list and the on-disk DB is visible in logs.
-    _audit_schema(conn)
-
-    logger.info("LadybugDB schema migration complete ✓")
+        logger.info("LadybugDB schema migration complete ✓")
+    finally:
+        # Release the RW file lock so the caller can immediately open its own
+        # connection (e.g. LadybugIngestor.__enter__).
+        try:
+            if conn is not None and hasattr(conn, "close"):
+                conn.close()
+        except Exception:
+            pass
+        try:
+            if db is not None and hasattr(db, "close"):
+                db.close()
+        except Exception:
+            pass

@@ -88,7 +88,19 @@ class LadybugIngestor:
         "_db",
         "conn",
         "node_buffer",
+        "_node_count_total",
+        "_rel_count_total",
     )
+
+    @property
+    def node_count(self) -> int:
+        """Total nodes successfully flushed since __enter__."""
+        return self._node_count_total
+
+    @property
+    def rel_count(self) -> int:
+        """Total relationships successfully flushed since __enter__."""
+        return self._rel_count_total
 
     def __init__(
         self,
@@ -109,6 +121,8 @@ class LadybugIngestor:
         self._rel_groups: defaultdict[
             tuple[str, str, str, str, str], list[RelBatchRow]
         ] = defaultdict(list)
+        self._node_count_total = 0
+        self._rel_count_total = 0
 
     # ------------------------------------------------------------------
     # Context manager
@@ -330,6 +344,7 @@ class LadybugIngestor:
             skipped_total += skipped
             flushed_total += flushed
 
+        self._node_count_total += flushed_total
         logger.info(
             ls.MG_NODES_FLUSHED.format(flushed=flushed_total, total=buffer_size)
         )
@@ -497,6 +512,7 @@ class LadybugIngestor:
             total_attempted += attempted
             total_successful += successful
 
+        self._rel_count_total += total_successful
         logger.info(
             ls.MG_RELS_FLUSHED.format(
                 total=self._rel_count,
