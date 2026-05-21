@@ -484,7 +484,7 @@ def _blocking_partial_index(
 
     try:
         from codebase_rag.config import settings as cgr_settings
-        from codebase_rag.services.ladybug_ingestor import LadybugIngestor
+        from app.services.ladybug_ingestor import LadybugIngestor
         from codebase_rag.graph_updater import GraphUpdater
         from codebase_rag.parser_loader import load_parsers
 

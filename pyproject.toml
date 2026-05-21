@@ -37,7 +37,8 @@ dependencies = [
     # pure-python core directly, so scipy must be a hard dep, not optional.
     "scipy>=1.11",
     "torch>=2.6.0",
-    "transformers>=4.0.0",
+    "transformers>=4.0.0,<6.0",
+    "huggingface-hub>=1.5.0,<2.0",
     # Plan F: CodeRankEmbed (nomic-ai/CodeRankEmbed) requires einops at model load time
     "einops>=0.7.0",
     "tree-sitter-javascript>=0.23.1",

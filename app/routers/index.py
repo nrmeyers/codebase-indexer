@@ -449,7 +449,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         force_reindex: When true, the graph is cleared before ingesting.
     """
     from codebase_rag.config import settings as cgr_settings
-    from codebase_rag.services.ladybug_ingestor import LadybugIngestor
+    from app.services.ladybug_ingestor import LadybugIngestor
     from codebase_rag.graph_updater import GraphUpdater
     from codebase_rag.parser_loader import load_parsers
 
@@ -1164,10 +1164,15 @@ def _blocking_embed(job: _EmbedJob) -> None:
     # embedding pass emits tens of thousands of loguru DEBUG lines for
     # large repos; capture_output=True would deadlock once the 64 KB pipe
     # buffer fills before the subprocess exits.  A file sink never blocks.
+    sub_env = _os.environ.copy()
+    if settings.EMBED_DEVICE == "cpu":
+        sub_env["CUDA_VISIBLE_DEVICES"] = ""
+
     log_path = Path(f"/tmp/cis_embed_{job.job_id}.log")
     with log_path.open("w") as log_fh:
         proc = subprocess.run(
             driver_argv,
+            env=sub_env,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             text=True,

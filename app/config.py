@@ -213,6 +213,11 @@ class Settings(BaseSettings):
     OPENAI_EMBED_BATCH_SIZE: int = 96
     OPENAI_TIMEOUT_S: float = 30.0
 
+    # --- Embed device (used by the codebase_rag local embedder subprocess) ---
+    # Set to "cuda" to allow GPU acceleration. Defaults to "cpu" so the embed
+    # subprocess does not compete for VRAM on shared AI servers.
+    EMBED_DEVICE: str = "cpu"
+
     # --- TEI backend config (used when EMBEDDER_BACKEND=tei) ---
     # Hugging Face Text-Embeddings-Inference HTTP sidecar. Bring up via:
     #   docker run -d -p 8080:80 --gpus all \
