@@ -365,6 +365,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _s3_snapshot_task = asyncio.create_task(_periodic_s3_snapshot())
         _log.info("s3: periodic snapshot task started (interval=%ds)", _S3_SNAPSHOT_INTERVAL_SEC)
 
+    # --- Phase 9: Tantivy segment warm-up ---
+    # On the first real search call, tantivy's MmapDirectory causes OS page
+    # faults to load segment files from disk.  For large repos that can add
+    # 200-800 ms to P99 latency.  Warming all existing .tantivy/ directories
+    # during startup amortises that cost to zero for the first user request.
+    # Non-fatal — missing tantivy, corrupt segment files, or an empty index
+    # directory are all handled gracefully.
+    def _warm_tantivy_indexes() -> None:
+        try:
+            from .services.tantivy_index import TantivyIndex
+
+            _tantivy_db_dir = _Path(settings.LADYBUG_DB_DIR)
+            if not _tantivy_db_dir.exists():
+                return
+            warmed = 0
+            for _tantivy_dir in sorted(_tantivy_db_dir.glob("*.tantivy")):
+                _slug = _tantivy_dir.stem
+                try:
+                    idx = TantivyIndex(str(_tantivy_db_dir), _slug)
+                    if not idx._unavailable and idx._index is not None:
+                        idx._index.reload()
+                        warmed += 1
+                except Exception as _exc:  # noqa: BLE001
+                    _log.debug(
+                        "tantivy warmup: skipped %s (%s)", _tantivy_dir.name, _exc
+                    )
+            if warmed:
+                _log.info("tantivy startup warm-up: paged in %d index/es", warmed)
+        except Exception as _exc:  # noqa: BLE001
+            _log.debug("tantivy startup warm-up failed (non-fatal): %s", _exc)
+
+    _threading.Thread(
+        target=_warm_tantivy_indexes,
+        name="tantivy-startup-warmup",
+        daemon=True,
+    ).start()
+
     yield
 
     # Shutdown: cancel the periodic S3 snapshot task.

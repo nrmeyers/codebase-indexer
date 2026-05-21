@@ -252,6 +252,18 @@ curl -sX POST http://localhost:8000/context-bundle \
 
 ---
 
+## Startup Performance Optimizations
+
+Three latency taxes are paid once at `uvicorn` startup so they are never charged to user-facing requests.
+
+**PageRank centrality precompute.** At the end of every index job the Plan J block runs a single PageRank pass over the LadybugDB CALLS graph and persists the normalized scores into the `centrality` table of the per-repo `.duck` DuckDB file. `GET /repos/{name}/centrality` is therefore a pure `SELECT … ORDER BY pagerank DESC LIMIT ?` — sub-millisecond regardless of repo size. The `last_computed_at` field in the response tells TheForge's orchestrator whether its 5-minute in-memory cache is still fresh relative to the last index run (BUC-1577).
+
+**Embedder model warmup (Phase 5).** On startup, a daemon thread issues a single `"warmup"` embed call through whichever backend is configured (`local` / `sagemaker` / `tei`). This absorbs the SageMaker Serverless cold-start (~4–5 s observed) and the `sentence-transformers` model-load time before any search request arrives. The warmup is non-fatal: a broken or unconfigured embedder is logged at DEBUG level and startup continues normally.
+
+**Tantivy segment warm-up (Phase 9).** A second daemon thread iterates all existing `<slug>.tantivy/` directories under `LADYBUG_DB_DIR` and calls `Index.reload()` on each, paging the segment mmaps into the OS buffer cache. Without this, the first BM25 lexical search on a large repo pays 200–800 ms of page faults. The warmup is non-fatal: missing tantivy bindings or corrupt segment directories are silently skipped.
+
+---
+
 ## Architecture
 
 ```mermaid

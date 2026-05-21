@@ -151,4 +151,7 @@ def test_should_return_empty_array_when_centrality_not_yet_computed(tmp_path: Pa
         resp = client.get(f"/repos/{slug}/centrality")
 
     assert resp.status_code == 200
-    assert resp.json() == {"symbols": []}
+    body = resp.json()
+    assert body["symbols"] == []
+    # last_computed_at must be null when no .duck file exists.
+    assert body.get("last_computed_at") is None

@@ -673,6 +673,16 @@ class CentralityListResponse(BaseModel):
     """Envelope for ``GET /repos/{name}/centrality``."""
 
     symbols: list[CentralitySymbol] = Field(default_factory=list)
+    last_computed_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 UTC timestamp of when PageRank was last computed for this "
+            "repo (derived from the ``updated_at`` epoch in the centrality table). "
+            "``null`` when the table has never been populated. TheForge uses this "
+            "to determine whether the cached centrality boost scores are still "
+            "fresh relative to the last index run."
+        ),
+    )
 
 
 @router.get(
@@ -693,12 +703,17 @@ def repo_centrality_top_n(
     ``mergeAndRank`` integration lands. The location-enriched
     ``/search/centrality`` route stays the FE-facing contract.
 
+    Reads are sub-millisecond: PageRank is computed once at index-finish
+    time (``_blocking_index`` Plan J block) and persisted in the ``.duck``
+    DuckDB file; this endpoint is a pure SELECT with no on-demand compute.
+
     Args:
         name: Repo slug — the same key used by ``/repos/{name}/stats``.
         limit: Max rows to return (1–200; default 20 per the brief).
 
     Returns:
-        CentralityListResponse: ``{ symbols: [{ qname, centrality }] }``.
+        CentralityListResponse: ``{ symbols: [{ qname, centrality }],
+        last_computed_at }``.
         Returns an empty array — never 404 — when the centrality table is
         empty (PageRank not yet computed for this repo). Graceful
         degradation lets TheForge poll without special-casing freshly-
@@ -715,15 +730,37 @@ def repo_centrality_top_n(
         return CentralityListResponse(symbols=[])
 
     rows: list[tuple[str, float]] = []
+    last_computed_at: str | None = None
     try:
         conn = open_or_create(str(duck_path))
         try:
             res = conn.execute(
-                "SELECT qualified_name, pagerank FROM centrality "
+                "SELECT qualified_name, pagerank, updated_at FROM centrality "
                 "ORDER BY pagerank DESC LIMIT ?",
                 (int(limit),),
             ).fetchall()
             rows = [(r[0], float(r[1])) for r in res]
+            # Derive last_computed_at from the max updated_at across all
+            # returned rows.  The ``updated_at`` column stores a Unix epoch
+            # (integer seconds) written by ``write_centrality`` at the end
+            # of every index run — a reliable proxy for "when was PageRank
+            # last computed".  We read it from the already-fetched result
+            # set to avoid a second query.
+            if res:
+                max_epoch: int | None = None
+                for row in res:
+                    try:
+                        epoch = int(row[2])
+                        if max_epoch is None or epoch > max_epoch:
+                            max_epoch = epoch
+                    except (TypeError, ValueError, IndexError):
+                        pass
+                if max_epoch is not None:
+                    last_computed_at = (
+                        datetime.fromtimestamp(max_epoch, tz=timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
         finally:
             conn.close()
     except Exception as exc:
@@ -734,7 +771,8 @@ def repo_centrality_top_n(
         return CentralityListResponse(symbols=[])
 
     return CentralityListResponse(
-        symbols=[CentralitySymbol(qname=qn, centrality=score) for qn, score in rows]
+        symbols=[CentralitySymbol(qname=qn, centrality=score) for qn, score in rows],
+        last_computed_at=last_computed_at,
     )
 
 
