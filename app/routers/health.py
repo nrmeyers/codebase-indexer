@@ -15,6 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter
 
 from ..config import settings
+from ..embedders import availability as embedder_availability
 from ..models import EmbedderStatus, HealthResponse, LmStudioStatus, RepoHealth
 from ..services import lm_studio
 
@@ -220,38 +221,29 @@ def _probe_lm_studio() -> LmStudioStatus:
 def _probe_embedder() -> EmbedderStatus:
     """Build the ``embedder`` block for the health response.
 
-    Reports the configured backend, its underlying model, and its output
-    dim. Lets a caller verify the index/embedder dim match before
-    searching — a mismatch means the index needs rebuilding.
+    Reads the cached startup probe result populated by
+    :func:`app.embedders.availability.probe_embedder` so /health calls are
+    O(1) and never trigger a backend construction (which can be expensive
+    for SageMaker cold starts or block a long time waiting for HTTP).
 
-    Backend construction failures (e.g. ``EMBEDDER_BACKEND=openai`` with
-    no API key) are surfaced as ``configured=False`` with the error
-    message; /health stays 200 because the service can still serve
-    cached searches and structural queries that don't need the embedder.
+    Backend construction or dep-validation failures (e.g.
+    ``EMBEDDER_BACKEND=local`` with the ``[local-embed]`` extras group
+    missing) are surfaced as ``available=false`` / ``configured=false``
+    with the captured ``last_error``. /health stays 200 because the
+    service can still serve cached searches and structural queries that
+    don't need the embedder.
     """
-    from ..embedders import _resolve_backend_name, get_embedder
-    from ..embedders.base import EmbedderError
-
-    selected = _resolve_backend_name()
     try:
-        backend = get_embedder()
-    except EmbedderError as exc:
+        return EmbedderStatus(**embedder_availability.current_status())
+    except Exception as exc:  # noqa: BLE001 — never let a payload-build error
+        # break /health. Surface a minimal placeholder so the UI can still
+        # render a "status unknown" badge.
+        logger.warning("embedder status payload build failed: %s", exc)
         return EmbedderStatus(
-            backend=selected, configured=False, error=str(exc)
+            backend="unknown",
+            available=False,
+            last_error=f"{type(exc).__name__}: {exc}",
         )
-    except Exception as exc:  # noqa: BLE001 — defensive; never break /health
-        return EmbedderStatus(
-            backend=selected,
-            configured=False,
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
-    return EmbedderStatus(
-        backend=getattr(backend, "name", selected),
-        model=getattr(backend, "model", ""),
-        dim=int(getattr(backend, "dim", 0) or 0),
-        configured=True,
-    )
 
 
 @router.get("/health", response_model=HealthResponse)

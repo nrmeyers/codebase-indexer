@@ -224,3 +224,148 @@ curl -s http://localhost:8000/health | jq '.embedder'
 `EMBEDDER_BACKEND=openai` with no `OPENAI_API_KEY`. The `error` field
 carries the message verbatim. The service stays up either way; structural
 search and cached results keep working.
+
+The block also surfaces the **availability** fields populated by the
+startup probe in `app.main.lifespan` (`app/embedders/availability.py`):
+
+```json
+{
+  "backend": "local",
+  "model": "intfloat/e5-base-v2",
+  "dim": 768,
+  "configured": true,
+  "error": null,
+  "available": true,
+  "last_error": null,
+  "fallback_lm_studio": false,
+  "last_check_at": "2026-05-21T15:42:09.123456+00:00",
+  "check_latency_ms": 12.4
+}
+```
+
+| Field                 | Meaning                                                                                |
+|-----------------------|----------------------------------------------------------------------------------------|
+| `available`           | `true` when the startup probe constructed the backend AND verified its heavy dependency. Independent of `configured` — see below. |
+| `last_error`          | Captured probe error (root cause via `__cause__`); `null` on success.                  |
+| `fallback_lm_studio`  | `true` when LM Studio is configured and has an embed model loaded. Informational only — does NOT flip `available`. |
+| `last_check_at`       | ISO 8601 UTC timestamp of the most recent probe.                                       |
+| `check_latency_ms`    | Wall-clock ms the probe took. Useful for SageMaker cold-start alerting.                |
+
+`configured` vs `available`:
+
+* `configured` (legacy field) = the `get_embedder()` factory returned a backend object.
+* `available` = the factory returned a backend AND the heavy dep is importable.
+
+For `local`, `LocalEmbedder.__init__` only sets attributes — the
+`sentence_transformers` import is deferred to first `embed()` call. So a
+fresh box with `EMBEDDER_BACKEND=local` and no `[local-embed]` extras
+group reports `configured: true` (factory succeeded) but `available:
+false` (dep validation failed). That split is the silent-503 mode this
+probe exists to surface.
+
+---
+
+## Troubleshooting: "in-process embedder not initialised"
+
+This is the single most common failure mode on a fresh dev box.
+
+**Symptom:**
+```
+$ curl -s 'http://localhost:8003/search/semantic?q=hello&k=5'
+{"detail":"in-process embedder not initialised"}
+```
+and `/health` shows:
+```json
+{
+  "embedder": {
+    "backend": "local",
+    "available": false,
+    "last_error": "ModuleNotFoundError: No module named 'sentence_transformers'",
+    ...
+  }
+}
+```
+
+**Cause:** `EMBEDDER_BACKEND` defaults to `local`, which requires the
+optional `[local-embed]` extras group containing
+`sentence-transformers>=3.2`. `uv sync` alone does NOT install the extra.
+
+**Fix:**
+```bash
+cd ~/code-indexer-service
+uv sync --group local-embed
+# restart the service
+```
+
+After restart, `curl http://localhost:8003/health | jq .embedder.available`
+should return `true`.
+
+---
+
+## Troubleshooting: SageMaker probe timeout
+
+**Symptom:** `embedder.available: false`, `embedder.last_error` contains
+`EndpointConnectionError` or `botocore.exceptions.NoCredentialsError`.
+
+**Causes:**
+* Missing AWS credentials in the boto3 default chain (`AWS_PROFILE` /
+  instance profile / env vars).
+* `SAGEMAKER_ENDPOINT_NAME` not set or pointing at a stopped endpoint.
+* Network egress to `*.sagemaker.us-east-1.amazonaws.com` blocked.
+
+**Fix:**
+```bash
+aws sts get-caller-identity   # confirm creds resolve
+aws sagemaker describe-endpoint --endpoint-name forge-e5-embed-v2 \
+    --query 'EndpointStatus'  # should be "InService"
+```
+Restart the indexer after fixing.
+
+---
+
+## Troubleshooting: TEI sidecar unreachable
+
+**Symptom:** `embedder.available: false`, `embedder.last_error` mentions
+`ConnectionError` or `httpx.ConnectError`.
+
+**Fix:**
+```bash
+# bring the TEI sidecar up
+docker run -d --name tei -p 8080:80 --gpus all \
+  ghcr.io/huggingface/text-embeddings-inference:1.5 \
+  --model-id intfloat/e5-base-v2
+curl -s http://localhost:8080/health | jq .   # sidecar self-check
+```
+
+---
+
+## Startup banner
+
+When no backend is reachable AND no LM Studio fallback is configured,
+startup prints a hard-to-miss banner to stderr:
+
+```
+⚠ EMBEDDER UNAVAILABLE
+====================================================================
+WARN  Code Indexer started but NO EMBEDDER IS AVAILABLE.
+Semantic search will return 503 for every query.
+
+EMBEDDER_BACKEND=local
+last_error: ModuleNotFoundError: No module named 'sentence_transformers'
+
+Fix:
+  - For local dev:  uv sync --group local-embed
+  - For SageMaker:  set AWS creds + EMBEDDER_BACKEND=sagemaker
+                    + SAGEMAKER_ENDPOINT_NAME=forge-e5-embed-v2
+  - For TEI:        start TEI sidecar + EMBEDDER_BACKEND=tei
+                    + TEI_URL=http://localhost:8080
+====================================================================
+```
+
+The same payload is also emitted as a structured log line at level
+`ERROR` with `extra={"action_required": "..."}` so it lights up in
+CloudWatch / journald dashboards even when stderr is being aggregated.
+
+The service still boots — `/health`, structural search, and re-index all
+keep working. Only semantic search is impaired until the operator fixes
+the install.

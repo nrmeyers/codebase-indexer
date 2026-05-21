@@ -264,6 +264,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         _log.info("metrics: background collectors started")
 
+    # --- Embedder availability probe ---
+    # Synchronous, fail-soft. Populates the cached status read by /health
+    # and prints the operator-visible banner when no backend is reachable.
+    # The probe itself does NOT block startup — a missing
+    # sentence-transformers install logs a warning and continues so that
+    # structural search / re-index / /health all still work.
+    try:
+        from .embedders.availability import emit_startup_warning, probe_embedder
+
+        _embedder_status = probe_embedder()
+        emit_startup_warning(_embedder_status)
+        _log.info(
+            "embedder probe: backend=%s available=%s dim=%s fallback_lm_studio=%s",
+            _embedder_status.get("backend"),
+            _embedder_status.get("available"),
+            _embedder_status.get("dim"),
+            _embedder_status.get("fallback_lm_studio"),
+        )
+    except Exception as _exc:  # noqa: BLE001 — never crash startup on the probe
+        _log.warning("embedder availability probe failed (non-fatal): %s", _exc)
+
     # --- Phase 5: Embedder pre-warm (BUC-1518 D1, generalised in BUC-1605) ---
     # Fire a fire-and-forget warmup invocation to absorb the SageMaker
     # Serverless Inference cold start (~4-5s observed) in the background.

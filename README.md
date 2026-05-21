@@ -46,6 +46,43 @@ code-indexer search "where is the auth code"
 code-indexer callers myproject.parser.process_file
 ```
 
+> **STOP — semantic search needs an embedder backend.**
+>
+> The default `EMBEDDER_BACKEND=local` requires the optional
+> `[local-embed]` extras group. If you skip the install, the indexer will
+> boot but every `/search/semantic` call returns 503 with
+> `in-process embedder not initialised`, and `GET /health` will show
+> `embedder.available: false` (look for the loud startup banner).
+>
+> Pick **one** of the four paths before you start indexing:
+>
+> ```bash
+> # 1. Local dev (recommended for new contributors)
+> uv sync --group local-embed
+>
+> # 2. Navistone production (AWS SageMaker Serverless Inference)
+> uv sync && export AWS_PROFILE=... EMBEDDER_BACKEND=sagemaker \
+>            SAGEMAKER_ENDPOINT_NAME=forge-e5-embed-v2
+>
+> # 3. GPU box without AWS (Hugging Face TEI sidecar)
+> uv sync && export EMBEDDER_BACKEND=tei TEI_URL=http://localhost:8080
+>
+> # 4. BYO OpenAI key
+> uv sync --extra byo && export EMBEDDER_BACKEND=openai OPENAI_API_KEY=sk-...
+> ```
+>
+> Verify after `uvicorn app.main:app` starts:
+>
+> ```bash
+> curl -s http://localhost:8003/health | jq .embedder
+> # Expected: { "backend": "local", "available": true, "configured": true, "dim": 768, ... }
+> ```
+>
+> If `available` is `false`, look for the startup banner — it prints the
+> exact `last_error` (e.g. `ModuleNotFoundError: No module named
+> 'sentence_transformers'`) and the fix. See
+> [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md) for full troubleshooting.
+
 The CLI auto-starts the FastAPI service in the background on first use. To run the HTTP gateway directly, see [Standalone CLI § serve](#cli-reference).
 
 ---

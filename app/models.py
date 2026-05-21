@@ -126,6 +126,29 @@ class EmbedderStatus(BaseModel):
             when construction failed (e.g. ``EMBEDDER_BACKEND=openai`` with
             no API key set). ``error`` carries the message in that case.
         error: Construction error message when ``configured`` is False.
+        available: True iff the startup probe both constructed the backend
+            AND verified its heavy dependency (e.g. ``sentence_transformers``
+            for ``local``, ``boto3`` + endpoint env for ``sagemaker``). A
+            ``configured=True`` / ``available=False`` split means the
+            factory returned a backend object but ``embed()`` would still
+            fail at the first call — exactly the silent-503 mode this
+            field exists to surface.
+        last_error: Most recent probe error message, walked through
+            ``__cause__`` so a missing optional dep surfaces as the
+            original ``ModuleNotFoundError`` rather than the wrapper.
+            ``None`` on a healthy probe. Distinct from ``error``: ``error``
+            is the legacy construction-only failure string (kept for
+            backward compat with PR #69 callers); ``last_error`` is the
+            full probe outcome including dep-validation failures.
+        fallback_lm_studio: True when LM Studio is configured AND has the
+            named embed model loaded. Informational — does NOT flip
+            ``available`` to True, because the primary backend is still
+            the authoritative path for the index pipeline.
+        last_check_at: ISO 8601 UTC timestamp of the most recent probe.
+            ``None`` until the lifespan startup probe completes.
+        check_latency_ms: Wall-clock milliseconds the probe took. Useful
+            for alerting if construction starts dragging (e.g. SageMaker
+            cold start exceeds an SLO).
     """
 
     backend: str = "unknown"
@@ -133,6 +156,13 @@ class EmbedderStatus(BaseModel):
     dim: int = 0
     configured: bool = False
     error: str | None = None
+    # Loud-availability extensions (this PR). All additive — existing
+    # callers reading ``configured`` / ``error`` keep working.
+    available: bool = False
+    last_error: str | None = None
+    fallback_lm_studio: bool = False
+    last_check_at: str | None = None
+    check_latency_ms: float | None = None
 
 
 class HealthResponse(BaseModel):
