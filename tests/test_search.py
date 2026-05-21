@@ -543,3 +543,82 @@ def test_semantic_search_does_not_500_on_embedder_path(tmp_path) -> None:
     body = resp.json()
     detail = str(body.get("detail", ""))
     assert "not iterable" not in detail
+
+
+# ---------------------------------------------------------------------------
+# LE-33 regression: configured-but-broken backend must yield 503, not 500
+# ---------------------------------------------------------------------------
+
+
+def test_should_return_503_not_500_when_configured_backend_returns_none() -> None:
+    """LE-33 regression guard.
+
+    When EMBEDDER_BACKEND=local is configured but sentence-transformers is
+    not installed, get_embedder_or_none() returns a LocalEmbedder instance
+    (construction is lazy), but embed_text_sync() returns None (model-load
+    fails at runtime).  Before the fix this cascaded into a bare
+    ``RuntimeError("in-process embedder not initialised")`` which FastAPI
+    wrapped as a 500.
+
+    After the fix the route raises HTTPException(503) with a clear
+    remediation message — never a bare RuntimeError / 500.
+    """
+    import app.routers.search as _search_mod
+
+    original_fn = _search_mod._embed_fn
+    original_unavail = _search_mod._embed_unavailable
+    # Ensure the torch-fallback lazy-load path won't bypass the error.
+    _search_mod._embed_fn = None
+    _search_mod._embed_unavailable = False
+
+    import sys
+    real_cgr_mod = sys.modules.get("codebase_rag.embedder")
+
+    try:
+        # Simulate: get_embedder_or_none returns a non-None backend
+        # (EMBEDDER_BACKEND=local, lazy construction), but embed_text_sync
+        # returns None (sentence-transformers missing, silently swallowed).
+        fake_backend = MagicMock()
+        fake_backend.name = "local"
+        sys.modules["codebase_rag.embedder"] = None  # type: ignore[assignment]
+
+        # Also patch the duck-path check so we reach the embed call rather
+        # than short-circuiting on "no embedding store found".
+        import tempfile
+        import os as _os
+        with tempfile.NamedTemporaryFile(suffix=".duck", delete=False) as tmp:
+            duck_path = tmp.name
+        try:
+            with patch("app.embedders.sync_bridge.get_embedder_or_none",
+                       return_value=fake_backend), \
+                 patch("app.embedders.sync_bridge.embed_text_sync",
+                       return_value=None), \
+                 patch("app.services.lm_studio.can_embed",
+                       return_value=False), \
+                 patch("app.services.lm_studio.embed",
+                       return_value=None), \
+                 patch("app.config.Settings.vec_db_path_for_repo",
+                       lambda self, repo: duck_path):
+                resp = client.get("/search/semantic", params={"q": "anything", "repo": "fake"})
+        finally:
+            try:
+                _os.unlink(duck_path)
+            except OSError:
+                pass
+    finally:
+        _search_mod._embed_fn = original_fn
+        _search_mod._embed_unavailable = original_unavail
+        if real_cgr_mod is not None:
+            sys.modules["codebase_rag.embedder"] = real_cgr_mod
+        else:
+            sys.modules.pop("codebase_rag.embedder", None)
+
+    # Must be 503 (service unavailable) — never 500 (unhandled exception).
+    assert resp.status_code == 503, (
+        f"Expected 503 but got {resp.status_code}: {resp.text}"
+    )
+    body = resp.json()
+    assert "detail" in body
+    detail = body["detail"].lower()
+    # Must mention the remediation action so operators know what to do.
+    assert "uv sync" in detail or "local-embed" in detail or "unavailable" in detail

@@ -777,6 +777,120 @@ def repo_centrality_top_n(
 
 
 # ---------------------------------------------------------------------------
+# POST /repos/{name}/recompute-centrality — LE-32 manual trigger
+# ---------------------------------------------------------------------------
+
+
+class RecomputeCentralityResponse(BaseModel):
+    """Result of ``POST /repos/{name}/recompute-centrality``."""
+
+    repo: str = Field(description="Repo slug the computation ran against.")
+    scores_written: int = Field(
+        description="Number of PageRank rows written to the centrality table. "
+        "0 when the graph has no CALLS edges (single-file repos are valid).",
+    )
+    message: str = Field(description="Human-readable status summary.")
+
+
+@router.post(
+    "/{name}/recompute-centrality",
+    response_model=RecomputeCentralityResponse,
+    summary="Recompute PageRank centrality for an existing index (LE-32)",
+)
+def recompute_centrality(name: str) -> RecomputeCentralityResponse:
+    """Recompute and persist PageRank centrality for repo ``name``.
+
+    Runs the same Plan J pipeline that ``POST /index`` executes at the end
+    of a full ingest — useful when an index was created before the centrality
+    bug fix (LE-32) landed, so callers can back-fill without a full reindex.
+
+    Args:
+        name: Repo slug (must already have a ``.db`` + ``.duck`` file on
+            disk — i.e. the repo must have been indexed at least once).
+
+    Returns:
+        RecomputeCentralityResponse: Number of rows written and a status message.
+
+    Raises:
+        HTTPException: 404 when no ``.db`` file exists for ``name``.
+        HTTPException: 503 when ``codebase_rag`` is not installed.
+        HTTPException: 500 when the PageRank computation itself fails.
+    """
+    from pathlib import Path as _Path
+
+    db_path = settings.db_path_for_repo(name)
+    if not _Path(db_path).exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No LadybugDB index found for repo '{name}'. Run POST /index first.",
+        )
+
+    duck_path = settings.vec_db_path_for_repo(name)
+
+    try:
+        from codebase_rag.storage.centrality import compute_pagerank  # type: ignore[import-untyped]
+        from codebase_rag.storage.vector_store import (  # type: ignore[import-untyped]
+            clear_centrality,
+            open_or_create,
+            write_centrality,
+        )
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"codebase_rag package not available: {exc}",
+        ) from exc
+
+    try:
+        pr_scores = compute_pagerank(db_path)
+    except Exception as exc:
+        logger.error(
+            "recompute_centrality: compute_pagerank failed repo=%s err=%s",
+            name, exc, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"PageRank computation failed: {exc}",
+        ) from exc
+
+    if not pr_scores:
+        return RecomputeCentralityResponse(
+            repo=name,
+            scores_written=0,
+            message=(
+                "PageRank returned 0 scores — the graph has no CALLS edges "
+                "(single-file repos and pure-data repos are expected here)."
+            ),
+        )
+
+    try:
+        conn = open_or_create(duck_path)
+        try:
+            clear_centrality(conn)
+            written = write_centrality(conn, pr_scores)
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error(
+            "recompute_centrality: write failed repo=%s err=%s",
+            name, exc, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to persist centrality scores: {exc}",
+        ) from exc
+
+    logger.info(
+        "recompute_centrality: repo=%s scores_written=%d",
+        name, written,
+    )
+    return RecomputeCentralityResponse(
+        repo=name,
+        scores_written=written,
+        message=f"Wrote {written} PageRank rows to centrality table.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /repos/{name}/centroid — Phase 2.5 v1 topic centroid (BUC-1581)
 # ---------------------------------------------------------------------------
 

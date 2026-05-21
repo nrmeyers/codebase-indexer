@@ -299,16 +299,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
             backend = get_embedder_or_none()
             if backend is None:
+                _log.info("Embedder startup prewarm: no backend configured (EMBEDDER_BACKEND unset or unconfigured)")
                 return  # not configured
             import time as _t
             t0 = _t.time()
-            embed_text_sync("warmup")
-            _log.info(
-                "Embedder startup prewarm: backend=%s latency=%.2fs",
-                backend.name, _t.time() - t0,
-            )
+            vec = embed_text_sync("warmup")
+            if vec is None:
+                # embed_text_sync swallows errors and returns None — the model
+                # likely failed to load (e.g. EMBEDDER_BACKEND=local without
+                # the [local-embed] extra).  Log at WARNING so operators see
+                # this immediately rather than discovering it on the first
+                # semantic search request.  Remediation:
+                #   uv sync --group local-embed   (sentence-transformers)
+                _log.warning(
+                    "Embedder startup prewarm: backend=%s returned None — "
+                    "embedder may be misconfigured or missing required packages. "
+                    "Semantic search will fail until this is resolved. "
+                    "For EMBEDDER_BACKEND=local: run 'uv sync --group local-embed'.",
+                    backend.name,
+                )
+            else:
+                _log.info(
+                    "Embedder startup prewarm: backend=%s latency=%.2fs OK",
+                    backend.name, _t.time() - t0,
+                )
         except Exception as _exc:  # noqa: BLE001
-            _log.debug("Embedder startup prewarm failed (best-effort): %s", _exc)
+            _log.warning(
+                "Embedder startup prewarm failed (best-effort): %s — "
+                "semantic search may be unavailable.",
+                _exc,
+            )
 
     import threading as _threading
     _threading.Thread(target=_startup_prewarm, name="sm-startup-prewarm", daemon=True).start()

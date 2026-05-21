@@ -13,7 +13,7 @@ Surgical coverage (4 tests, per the brief):
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -155,3 +155,158 @@ def test_should_return_empty_array_when_centrality_not_yet_computed(tmp_path: Pa
     assert body["symbols"] == []
     # last_computed_at must be null when no .duck file exists.
     assert body.get("last_computed_at") is None
+
+
+# ---------------------------------------------------------------------------
+# LE-32 regression: codebase_rag.storage.centrality.compute_pagerank
+# must use per-label queries (not the invalid OR-label syntax)
+# ---------------------------------------------------------------------------
+
+
+def test_should_compute_pagerank_via_per_label_queries(tmp_path: Path) -> None:
+    """LE-32 regression guard.
+
+    The original ``compute_pagerank`` used ``MATCH (n) WHERE (n:Function OR
+    n:Method)`` which the LadybugDB Cypher parser rejects with a parse
+    exception.  After the fix the implementation uses separate MATCH queries
+    per label and merges the results in Python.
+
+    Strategy: mock ``lb.Connection.execute`` to return label-appropriate
+    mock results for Function and Method node queries and the four CALLS edge
+    queries.  Assert that ``compute_pagerank`` returns a non-empty dict and
+    that the highest-ranked symbol is the one targeted by the most CALLS.
+    """
+    import types
+    from unittest.mock import MagicMock, call
+
+    # Import after fix — if the old OR-syntax is still present the import
+    # itself won't fail, but the mocked execute would need to handle the
+    # combined query which we explicitly do not provide.
+    from codebase_rag.storage.centrality import compute_pagerank as cgr_compute_pagerank
+
+    # Build a tiny call graph:
+    #   fn_a, fn_b → fn_hub (fn_hub is the most-called function)
+    #   meth_x → meth_hub
+    fn_nodes = ["fn_a", "fn_b", "fn_hub"]
+    meth_nodes = ["meth_x", "meth_hub"]
+
+    # The fix issues 2 node queries (Function, Method) + 4 edge queries
+    # (Function→Function, Function→Method, Method→Function, Method→Method).
+    # We must return the right data for each call.
+    _call_count = [0]
+
+    def _fake_execute(query: str):
+        """Return mock results keyed on which label the query targets."""
+        mock_result = MagicMock()
+        q = query.strip()
+
+        if "MATCH (n:Function)" in q:
+            rows = [[qn] for qn in fn_nodes]
+        elif "MATCH (n:Method)" in q:
+            rows = [[qn] for qn in meth_nodes]
+        elif "Function)-[:CALLS]->(t:Function)" in q:
+            # fn_a→fn_hub, fn_b→fn_hub
+            rows = [["fn_a", "fn_hub"], ["fn_b", "fn_hub"]]
+        elif "Function)-[:CALLS]->(t:Method)" in q:
+            rows = []
+        elif "Method)-[:CALLS]->(t:Function)" in q:
+            rows = []
+        elif "Method)-[:CALLS]->(t:Method)" in q:
+            # meth_x → meth_hub
+            rows = [["meth_x", "meth_hub"]]
+        else:
+            rows = []
+
+        remaining = list(rows)
+
+        mock_result.has_next.side_effect = lambda: bool(remaining)
+        mock_result.get_next.side_effect = lambda: remaining.pop(0)
+        return mock_result
+
+    fake_conn = MagicMock()
+    fake_conn.execute.side_effect = _fake_execute
+    fake_conn.close.return_value = None
+
+    fake_db = MagicMock()
+
+    with patch("real_ladybug.Database", return_value=fake_db), \
+         patch("real_ladybug.Connection", return_value=fake_conn):
+        scores = cgr_compute_pagerank("/fake/path.db")
+
+    assert scores, "expected non-empty PageRank scores"
+    # fn_hub has 2 incoming CALLS edges → highest score
+    assert "fn_hub" in scores
+    assert scores["fn_hub"] == pytest.approx(1.0)  # normalised to max
+    # meth_hub has 1 incoming edge — lower than fn_hub but > meth_x
+    assert scores.get("meth_hub", 0) > scores.get("meth_x", 0)
+
+
+# ---------------------------------------------------------------------------
+# POST /repos/{name}/recompute-centrality — LE-32 manual trigger endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_should_return_200_and_score_count_when_recompute_succeeds(tmp_path: Path) -> None:
+    """LE-32: POST /repos/{name}/recompute-centrality should write rows and
+    return a JSON body with ``scores_written > 0``.
+    """
+    slug = "fixture__recompute"
+    db_file = tmp_path / f"{slug}.db"
+    duck_file = tmp_path / f"{slug}.duck"
+    db_file.write_bytes(b"")  # must exist for 404 guard
+
+    fixture_scores = {"fn.alpha": 1.0, "fn.beta": 0.5}
+
+    with patch("app.routers.repos.settings") as mock_settings, \
+         patch("codebase_rag.storage.centrality.compute_pagerank",
+               return_value=fixture_scores) as mock_pr, \
+         patch("codebase_rag.storage.vector_store.open_or_create",
+               return_value=MagicMock()) as mock_open, \
+         patch("codebase_rag.storage.vector_store.clear_centrality") as mock_clear, \
+         patch("codebase_rag.storage.vector_store.write_centrality",
+               return_value=len(fixture_scores)) as mock_write:
+        mock_settings.db_path_for_repo.return_value = str(db_file)
+        mock_settings.vec_db_path_for_repo.return_value = str(duck_file)
+
+        resp = client.post(f"/repos/{slug}/recompute-centrality")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["repo"] == slug
+    assert body["scores_written"] == 2
+    mock_pr.assert_called_once()
+    mock_clear.assert_called_once()
+    mock_write.assert_called_once()
+
+
+def test_should_return_404_when_db_not_indexed(tmp_path: Path) -> None:
+    """LE-32 endpoint: missing ``.db`` file → 404 (not 500)."""
+    slug = "not_indexed__recompute"
+    missing_db = tmp_path / f"{slug}.db"
+    assert not missing_db.exists()
+
+    with patch("app.routers.repos.settings") as mock_settings:
+        mock_settings.db_path_for_repo.return_value = str(missing_db)
+        resp = client.post(f"/repos/{slug}/recompute-centrality")
+
+    assert resp.status_code == 404
+
+
+def test_should_return_200_with_zero_scores_when_graph_has_no_calls(tmp_path: Path) -> None:
+    """LE-32 endpoint: zero CALLS edges → 200 with scores_written=0, not 500."""
+    slug = "no_calls__recompute"
+    db_file = tmp_path / f"{slug}.db"
+    db_file.write_bytes(b"")
+
+    with patch("app.routers.repos.settings") as mock_settings, \
+         patch("codebase_rag.storage.centrality.compute_pagerank",
+               return_value={}):
+        mock_settings.db_path_for_repo.return_value = str(db_file)
+        mock_settings.vec_db_path_for_repo.return_value = str(tmp_path / f"{slug}.duck")
+
+        resp = client.post(f"/repos/{slug}/recompute-centrality")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scores_written"] == 0
+    assert "no CALLS" in body["message"] or "0" in body["message"]
