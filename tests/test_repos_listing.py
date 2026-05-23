@@ -92,6 +92,9 @@ def test_should_list_one_repo_after_successful_index(tmp_path: Path) -> None:
     assert item["last_indexed_at"] is not None
     assert item["last_indexed_at"].endswith("Z")
     assert item["default_branch"] == "main"
+    # LE-111: repo_path surfaces root_path so TheForge drift detection has
+    # a source-tree path to work with.
+    assert item["repo_path"] == str(repo_root)
 
 
 def test_should_mark_repo_stale_when_head_sha_differs(tmp_path: Path) -> None:
@@ -123,6 +126,9 @@ def test_should_mark_repo_stale_when_head_sha_differs(tmp_path: Path) -> None:
     assert resp.status_code == 200
     item = resp.json()["repos"][0]
     assert item["status"] == "stale"
+    # LE-111: repo_path still surfaces even when stale, so TheForge can
+    # probe the current local HEAD itself.
+    assert item["repo_path"] == str(repo_root)
 
 
 # ---------------------------------------------------------------------------
@@ -232,3 +238,116 @@ def test_local_path_mode_still_works_without_token(tmp_path: Path) -> None:
         resp = client.post("/index", json={"repo_path": str(tmp_path)})
     assert resp.status_code == 202
     assert "job_id" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# LE-111 — last_indexed_sha + repo_path persistence
+# ---------------------------------------------------------------------------
+
+
+def test_repo_path_is_null_when_root_path_meta_is_missing(tmp_path: Path) -> None:
+    """A repo listed only via on-disk .db (no .duck meta yet) reports
+    repo_path=None — never crashes, never invents a path."""
+    slug = "navistone__example"
+    # Create a .db file but no .duck so meta is empty.
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    (db_dir / f"{slug}.db").write_bytes(b"")
+
+    with (
+        patch("app.routers.index._read_meta", return_value={}),
+        patch("app.routers.repos._git_sha", return_value=None),
+        patch("app.routers.repos.subprocess.run") as mock_run,
+        patch("app.routers.repos.settings") as mock_settings,
+    ):
+        mock_settings.LADYBUG_DB_DIR = str(db_dir)
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        resp = client.get("/repos")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["repos"]) == 1
+    item = body["repos"][0]
+    assert item["slug"] == slug
+    assert item["repo_path"] is None
+    # No meta + no SHA → indexed:false → status:unindexed
+    assert item["indexed"] is False
+    assert item["status"] == "unindexed"
+
+
+def test_capture_head_sha_returns_none_for_non_git_path(tmp_path: Path) -> None:
+    """_capture_head_sha never raises; returns None for non-git directories."""
+    from app.routers.index import _capture_head_sha
+
+    # tmp_path is not a git checkout.
+    assert _capture_head_sha(tmp_path) is None
+
+
+def test_capture_head_sha_returns_sha_for_git_checkout(tmp_path: Path) -> None:
+    """A real git init+commit produces a real SHA that we can read back."""
+    import subprocess as _sub
+
+    from app.routers.index import _capture_head_sha
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sub.run(["git", "init", "-q"], cwd=repo, check=True)
+    _sub.run(["git", "config", "user.email", "test@local"], cwd=repo, check=True)
+    _sub.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "README").write_text("hi\n")
+    _sub.run(["git", "add", "."], cwd=repo, check=True)
+    _sub.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"],
+        cwd=repo,
+        check=True,
+    )
+
+    sha = _capture_head_sha(repo)
+    assert isinstance(sha, str)
+    assert len(sha) == 40
+    # All hex chars.
+    int(sha, 16)
+
+
+def test_capture_head_sha_returns_none_for_empty_string() -> None:
+    """Guard against ``str(repo)`` evaluating to an empty string."""
+    from app.routers.index import _capture_head_sha
+
+    assert _capture_head_sha("") is None
+
+
+def test_repos_response_includes_sha_and_path_after_index(tmp_path: Path) -> None:
+    """End-to-end: simulate the index path's _write_meta call writing both
+    root_path and last_indexed_sha, then GET /repos reports both."""
+    slug = "navistone__example"
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    indexed_repos.add(slug)
+    indexed_repo_paths[slug] = str(repo_root)
+
+    fake_meta = {
+        "last_indexed_at": "1700000000.0",
+        "last_indexed_sha": "deadbeef" * 5,
+        "root_path": str(repo_root),
+        "node_count": "100",
+        "rel_count": "200",
+    }
+
+    with (
+        patch("app.routers.index._read_meta", return_value=fake_meta),
+        patch("app.routers.repos._git_sha", return_value=fake_meta["last_indexed_sha"]),
+        patch("app.routers.repos.subprocess.run") as mock_run,
+        patch("app.routers.repos.settings") as mock_settings,
+    ):
+        mock_settings.LADYBUG_DB_DIR = str(tmp_path / "no-such-dir")
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "main\n"
+        resp = client.get("/repos")
+
+    assert resp.status_code == 200
+    item = resp.json()["repos"][0]
+    assert item["last_indexed_sha"] == fake_meta["last_indexed_sha"]
+    assert item["repo_path"] == str(repo_root)
+    assert item["status"] == "fresh"

@@ -291,6 +291,41 @@ indexed_repo_paths: dict[str, str] = {}
 _last_indexed_cache: dict[str, float] = {}
 
 
+def _capture_head_sha(repo_path: str | Path) -> str | None:
+    """Return ``git rev-parse HEAD`` for ``repo_path`` or None on any failure.
+
+    Best-effort SHA capture used at index-job completion to persist a
+    durable ``last_indexed_sha`` into the per-repo ``repo_metadata``
+    table (LE-111). Failure modes (non-git checkout, missing ``git``
+    binary, timeout) all return None so the indexer keeps working on
+    non-git source trees and the caller can record a null SHA.
+
+    A subprocess shell-out is used rather than importing
+    ``codebase_rag.services.git_diff`` because that sibling-package
+    surface has shifted historically — the import-time failure was
+    silently swallowed by the post-job try/except and the SHA was
+    never persisted. Inlining the two-line shell-out makes the SHA
+    capture path stable independent of the sibling package.
+    """
+    if not repo_path:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if result.returncode == 0:
+            sha = result.stdout.strip()
+            return sha or None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
 def _write_meta(repo_name: str, **fields: Any) -> None:
     """Upsert ``fields`` into the per-repo DuckDB ``repo_metadata`` table.
 
@@ -708,16 +743,22 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
 
     # Persist metadata sidecar AFTER counts are populated so the UI sees
     # authoritative node/rel totals in /stats without a separate query.
+    # LE-111: capture HEAD SHA here so the parse-pass meta write also
+    # persists last_indexed_sha — keeps SHA + root_path on the same
+    # write so /repos can always report drift status.
     _now = time.time()
-    _write_meta(
-        repo_name,
-        last_indexed_at=_now,
-        root_path=str(repo),
-        node_count=str(job.node_count),
-        rel_count=str(job.rel_count),
-        last_job_id=job.job_id,
-        schema_version="1.5",
-    )
+    _head_sha = _capture_head_sha(repo)
+    _meta_fields: dict[str, Any] = {
+        "last_indexed_at": _now,
+        "root_path": str(repo),
+        "node_count": str(job.node_count),
+        "rel_count": str(job.rel_count),
+        "last_job_id": job.job_id,
+        "schema_version": "1.5",
+    }
+    if _head_sha:
+        _meta_fields["last_indexed_sha"] = _head_sha
+    _write_meta(repo_name, **_meta_fields)
     _last_indexed_cache[repo_name] = _now
 
     # -------------------------------------------------------------------
@@ -912,14 +953,20 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         logger.debug("jobs_store.mark_done non-fatal: %s", _exc)
     _metrics.record_index_terminal("done", kind="index")
 
-    # BUC-1518 C3 — stamp RepoMeta with the current HEAD SHA only AFTER both
-    # graph build and embed pass have completed successfully.  A mid-flight
-    # crash above this point leaves the OLD SHA in place, so the next /index
-    # call re-runs the same diff and recovers without losing prior progress.
+    # BUC-1518 C3 / LE-111 — stamp RepoMeta with the current HEAD SHA only
+    # AFTER both graph build and embed pass have completed successfully.
+    # A mid-flight crash above this point leaves the OLD SHA in place, so
+    # the next /index call re-runs the same diff and recovers without
+    # losing prior progress.
+    #
+    # LE-111: SHA capture used to go via
+    # ``codebase_rag.services.git_diff.get_head_sha``, but that import
+    # failed at runtime (sibling package surface shifted) and the whole
+    # try/except below silently swallowed it — so /repos always returned
+    # last_indexed_sha=null. We now use the local ``_capture_head_sha``
+    # helper which is independent of the sibling package.
     try:
-        from codebase_rag.services.git_diff import get_head_sha
-        from codebase_rag.services import repo_meta as _rm
-        head_sha = get_head_sha(repo)
+        head_sha = _capture_head_sha(repo)
         if head_sha:
             # Mirror the SHA into the DuckDB ``repo_metadata`` sidecar so the
             # GET /repos listing endpoint (BUC-1561b) can compute fresh/stale
@@ -936,26 +983,21 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
                 logger.debug(
                     "jobs_store.mark_indexed non-fatal: %s", _mi_exc
                 )
-            _stamp_db = lb.Database(repo_db_path)
-            _stamp_conn = lb.Connection(_stamp_db)
-            try:
-                _rm.stamp(
-                    _stamp_conn,
-                    repo_name,
-                    last_indexed_sha=head_sha,
-                    last_indexed_at=int(job.finished_at),
-                )
-                logger.info(
-                    "RepoMeta stamped: repo=%s sha=%s model=%s",
-                    repo_name, head_sha[:8], _rm.MODEL_VERSION,
-                )
-            finally:
-                try:
-                    _stamp_conn.close()
-                except Exception:
-                    pass
-                del _stamp_conn, _stamp_db
-                _gc.collect()
+            # LE-111: previously this block wrote the SHA into the
+            # LadybugDB ``RepoMeta`` table via
+            # ``codebase_rag.services.repo_meta.stamp``. That sibling
+            # symbol no longer exists, so the call was a silent no-op
+            # (the outer except swallowed the ImportError). The
+            # ``repo_metadata`` DuckDB write above is the authoritative
+            # surface for /repos drift detection; the LadybugDB
+            # RepoMeta table is only consulted by the incremental-embed
+            # path, which has been disabled separately. Logging the
+            # successful SHA stamp here is enough for operator
+            # visibility.
+            logger.info(
+                "repo_metadata stamped: repo=%s sha=%s",
+                repo_name, head_sha[:8],
+            )
         else:
             logger.info(
                 "RepoMeta stamp skipped: %s is not a git repo (incremental disabled)",

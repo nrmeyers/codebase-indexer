@@ -77,6 +77,16 @@ class RepoListItem(BaseModel):
         default=None,
         description="Git SHA recorded at index time; None when never indexed or unknown.",
     )
+    repo_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path on the indexer host to the source tree captured at "
+            "index time (the ``root_path`` row in the per-repo ``repo_metadata`` "
+            "table). TheForge's ``defaultProbeLocalDrift`` uses this to compute "
+            "drift between the indexed SHA and the current local HEAD. None when "
+            "the repo has not been indexed yet or the path was not recorded."
+        ),
+    )
     indexed: bool = Field(description="True when at least one successful index has run.")
     status: str = Field(
         description=(
@@ -205,6 +215,17 @@ def list_repos() -> RepoListResponse:
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
                 default_branch = None
 
+        # LE-111: surface root_path as ``repo_path`` so TheForge's
+        # ``defaultProbeLocalDrift`` has the source-tree path needed for
+        # SHA-drift visualization. Falls back to the indexed_repo_paths
+        # in-memory cache when the meta row was written before the
+        # root_path column was populated.
+        repo_path_meta = meta.get("root_path") or indexed_repo_paths.get(slug) or None
+        if isinstance(repo_path_meta, str):
+            repo_path_meta = repo_path_meta.strip() or None
+        else:
+            repo_path_meta = None
+
         items.append(
             RepoListItem(
                 slug=slug,
@@ -212,6 +233,7 @@ def list_repos() -> RepoListResponse:
                 default_branch=default_branch,
                 last_indexed_at=last_indexed_at_iso,
                 last_indexed_sha=last_indexed_sha,
+                repo_path=repo_path_meta,
                 indexed=indexed,
                 status=status_verdict,
             )
