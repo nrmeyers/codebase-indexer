@@ -470,6 +470,176 @@ async def _run_ingestion(job: _Job, force_reindex: bool) -> None:
             _metrics.record_index_terminal("failed", kind="index")
 
 
+def _index_markdown_corpus(
+    *,
+    repo_root: Path,
+    repo_name: str,
+    vec_db_path: str,
+    discover: Any,
+    chunker: Any,
+    composer: Any,
+) -> int:
+    """Embed + persist markdown chunks into the per-repo ``.duck`` file.
+
+    Walks ``repo_root`` for eligible ``.md`` files (see
+    :func:`app.services.markdown_indexer.discover_markdown_files`), chunks
+    each by H1/H2/H3 sections, composes the embed text, calls the
+    SageMaker code-embedding bridge in batches, and bulk-inserts the
+    results into the same ``embeddings`` table the structural pass uses.
+    Each row carries ``symbol_type = "MarkdownDoc"`` so callers can filter
+    or weight markdown hits differently from code hits.
+
+    Best-effort + idempotent:
+
+    * Already-embedded chunks with an unchanged content hash are skipped
+      via the same BUC-1518 mechanism the code embed driver uses.
+    * Tantivy is also updated so the lexical arm can hit ``LE-123`` /
+      ``REG-D`` style queries without paying the semantic-search cost.
+
+    Args:
+        repo_root: Absolute path to the repo checkout.
+        repo_name: Canonical repo slug (used for ``qualified_name``
+            namespacing and tantivy index keys).
+        vec_db_path: Filesystem path to the per-repo ``.duck`` vector
+            store.
+        discover: Injected file-discovery callable; defaults to
+            :func:`markdown_indexer.discover_markdown_files` (parameterised
+            for testability).
+        chunker: Injected chunker — see
+            :func:`markdown_indexer.chunk_markdown_file`.
+        composer: Injected embed-text composer — see
+            :func:`markdown_indexer.compose_markdown_embed_text`.
+
+    Returns:
+        Number of chunks newly embedded + inserted.  Returns 0 when no
+        eligible markdown files are present (a perfectly valid state for
+        e.g. service repos with no ``.planning/`` or ``docs/``).
+    """
+    md_files = discover(repo_root)
+    if not md_files:
+        return 0
+
+    # Build all chunks up-front so we can size the SageMaker batch loop.
+    chunks: list[Any] = []
+    for path in md_files:
+        try:
+            rel = path.relative_to(repo_root).as_posix()
+        except ValueError:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.warning(
+                "markdown_indexer.read_failed path=%s err=%s", rel, exc
+            )
+            continue
+        chunks.extend(chunker(repo_name=repo_name, rel_path=rel, content=content))
+
+    if not chunks:
+        return 0
+
+    # SageMaker bridge + vector store.  Imports are lazy so this module
+    # stays importable in test environments that mock the embed stack.
+    from codebase_rag.embedder import embed_code_batch  # noqa: PLC0415
+    from codebase_rag.storage.vector_store import (  # noqa: PLC0415
+        EmbeddingRow,
+        bulk_insert,
+        open_or_create,
+        read_content_hashes,
+    )
+    from app.scripts.embed_driver import compute_content_hash  # noqa: PLC0415
+
+    vec_conn = open_or_create(vec_db_path)
+    try:
+        existing_hashes = read_content_hashes(vec_conn)
+        batch_texts: list[str] = []
+        batch_meta: list[tuple[Any, str, int, int, str]] = []
+        rows: list[EmbeddingRow] = []
+        BATCH = 32  # markdown chunks are larger than fn bodies; smaller batch
+        inserted = 0
+
+        def _flush() -> None:
+            nonlocal inserted
+            if not batch_texts:
+                return
+            embs = embed_code_batch(batch_texts)
+            for meta_tuple, emb, text in zip(batch_meta, embs, batch_texts):
+                _qn, _fp, _sl, _el, _content_hash = meta_tuple
+                rows.append(
+                    EmbeddingRow(
+                        qualified_name=_qn,
+                        embedding=emb,
+                        file_path=_fp,
+                        start_line=_sl,
+                        end_line=_el,
+                        symbol_type="MarkdownDoc",
+                        content_hash=_content_hash,
+                    )
+                )
+            bulk_insert(vec_conn, rows)
+            inserted += len(rows)
+            rows.clear()
+            batch_texts.clear()
+            batch_meta.clear()
+
+        for chunk in chunks:
+            embed_text = composer(chunk)
+            content_hash = compute_content_hash(embed_text)
+            if existing_hashes.get(chunk.qualified_name) == content_hash:
+                continue  # unchanged — skip the SageMaker call
+            batch_texts.append(embed_text)
+            batch_meta.append(
+                (
+                    chunk.qualified_name,
+                    chunk.file_path,
+                    int(chunk.start_line),
+                    int(chunk.end_line),
+                    content_hash,
+                )
+            )
+            if len(batch_texts) >= BATCH:
+                _flush()
+        _flush()
+    finally:
+        try:
+            vec_conn.close()
+        except Exception:
+            pass
+
+    # Mirror into tantivy for the lexical arm.  Failures are non-fatal
+    # for the same reason the code-symbol tantivy pass is non-fatal:
+    # semantic search still works.
+    try:
+        from ..services.tantivy_index import TantivyIndex  # noqa: PLC0415
+        from ..config import slugify_repo  # noqa: PLC0415
+
+        slug = slugify_repo(repo_name)
+        t_idx = TantivyIndex(settings.LADYBUG_DB_DIR, slug)
+        try:
+            for chunk in chunks:
+                # Content = heading + body so lexical queries on "LE-123"
+                # can hit either the section title or the body prose.
+                content = f"{chunk.heading}\n{chunk.body}"
+                t_idx.add(
+                    symbol_qname=chunk.qualified_name,
+                    file_path=chunk.file_path,
+                    symbol_kind="MarkdownDoc",
+                    content=content,
+                    start_line=int(chunk.start_line),
+                    end_line=int(chunk.end_line),
+                    repo=slug,
+                )
+            t_idx.commit()
+        finally:
+            t_idx.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "markdown_indexer.tantivy_pass_failed (non-fatal): %s", exc
+        )
+
+    return inserted
+
+
 def _blocking_index(job: _Job, force_reindex: bool) -> None:
     """Synchronous ingestion — called from the thread pool.
 
@@ -934,6 +1104,43 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     except Exception as exc:
         logger.warning("pagerank.failed err=%s", exc)
     _metrics.record_index_phase("pagerank", time.monotonic() - _phase_pagerank_start)
+
+    # --- LE-136: Markdown corpus pass (best-effort, never fail the job) ---
+    # Index ``.planning/*.md`` + ``docs/*.md`` + root-level docs (README,
+    # CLAUDE.md, …) so /search/semantic and /context-bundle can surface
+    # planning content (LE briefs, ADRs, dogfood reports).  See REG-D in
+    # TheForge .planning/le-dogfood-2026-05-26T16-postwave3-baseline.md.
+    #
+    # Runs in-process (not a subprocess) because the volume is small
+    # (typically <500 chunks/repo) and the SageMaker endpoint is already
+    # warm from the function/method embed pass above.  Any failure is
+    # logged and swallowed — markdown indexing is purely additive.
+    _phase_md_start = time.monotonic()
+    try:
+        from ..services.markdown_indexer import (  # noqa: PLC0415
+            chunk_markdown_file,
+            compose_markdown_embed_text,
+            discover_markdown_files,
+        )
+
+        md_added = _index_markdown_corpus(
+            repo_root=repo,
+            repo_name=repo_name,
+            vec_db_path=settings.vec_db_path_for_repo(repo_name),
+            discover=discover_markdown_files,
+            chunker=chunk_markdown_file,
+            composer=compose_markdown_embed_text,
+        )
+        if md_added:
+            logger.info(
+                "markdown_indexer.indexed repo=%s chunks=%d",
+                repo_name, md_added,
+            )
+    except Exception as _exc:  # noqa: BLE001
+        logger.warning("markdown_indexer.failed (non-fatal): %s", _exc)
+    _metrics.record_index_phase(
+        "markdown", time.monotonic() - _phase_md_start
+    )
 
     job.progress_pct = 100.0
     job.status = "done"
