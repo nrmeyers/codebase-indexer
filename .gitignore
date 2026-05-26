@@ -19,6 +19,7 @@ wheels/
 service.log
 .cgr/
 .cgr-hash-cache.json
+.cgr-stat-cache.json
 # .planning/ holds team deliverables (DEVOPS_REQUEST, FRONTEND_AGENT_BRIEF,
 # TEAM_DEPLOYMENT_PLAN, phase-plans/) — track those; only the archive is local.
 .planning/_archive/

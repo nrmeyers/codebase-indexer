@@ -13,8 +13,15 @@ Endpoint contract
     Content-Type: application/json
     Body:        {"inputs": ["chunk1", "chunk2", ...]}
     Response:    [[0.01, -0.98, ...], [...]]
-                 — one 768-float L2-normalised vector per input
-                   (mean-pooled server-side by the custom inference handler).
+                 — nominally one 768-float vector per input.
+
+LE-129d: the HF ``feature-extraction`` task returns TOKEN-LEVEL embeddings,
+shaped ``[batch][tokens][dim]`` (e.g. ``[1][11][768]``), NOT a pre-pooled
+``[dim]`` sentence vector. ``embed()`` below recursively mean-pools any
+nesting above ``[dim]`` down to one vector per input and L2-normalises the
+result client-side so the cosine band matches the LE-123/124 refusal
+thresholds. (No-op when the handler already returns flat, normalised
+vectors.)
 
 Configuration
 -------------
@@ -42,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 from typing import Any
@@ -58,6 +66,23 @@ _MAX_CHARS = 1000
 _DEFAULT_BATCH_SIZE = 16
 _CONNECT_TIMEOUT = 10
 _READ_TIMEOUT = 90
+
+
+def _mean_pool(x: Any) -> Any:
+    """Recursively mean-pool any nesting above ``[dim]`` to one vector.
+
+    The HF ``feature-extraction`` task returns token-level embeddings
+    (``[tokens][dim]`` or ``[batch][tokens][dim]``) rather than a single
+    pooled sentence vector. This collapses every dimension above the
+    innermost float list by averaging element-wise.
+
+    A flat ``[dim]`` float list is returned unchanged, so the helper is a
+    no-op when the endpoint already pools server-side.
+    """
+    if isinstance(x, list) and x and isinstance(x[0], list):
+        sub = [_mean_pool(e) for e in x]  # each -> [dim]
+        return [sum(c) / len(c) for c in zip(*sub)]
+    return x
 
 
 class SageMakerEmbedder(EmbedderBackend):
@@ -181,18 +206,54 @@ class SageMakerEmbedder(EmbedderBackend):
                     f"({type(exc).__name__}: {exc})"
                 ) from exc
 
-            if not isinstance(raw, list) or len(raw) != len(chunk):
+            if not isinstance(raw, list):
                 raise EmbedderError(
-                    f"SageMaker returned {len(raw) if isinstance(raw, list) else type(raw).__name__} "
-                    f"embeddings for {len(chunk)} inputs"
+                    f"SageMaker returned {type(raw).__name__}, expected list"
+                )
+
+            # LE-129d: some custom inference handlers (dual-head models, or a
+            # batched feature-extraction pass) return K rows per input. Detect
+            # the N*K case and keep the first row per input. Server-side fix is
+            # to pin a single-vector pooling task in predict_fn.
+            if len(raw) > len(chunk) and len(raw) % len(chunk) == 0:
+                stride = len(raw) // len(chunk)
+                raw = [raw[i * stride] for i in range(len(chunk))]
+
+            if len(raw) != len(chunk):
+                raise EmbedderError(
+                    f"SageMaker returned {len(raw)} embeddings for {len(chunk)} inputs"
                 )
 
             for i, vec in enumerate(raw):
+                # LE-129d: some handlers return inner vectors as JSON-encoded
+                # strings instead of float lists. Decode before pooling.
+                if isinstance(vec, str):
+                    try:
+                        vec = json.loads(vec)
+                    except (json.JSONDecodeError, ValueError) as exc:
+                        raise EmbedderError(
+                            f"SageMaker returned non-decodable string for input "
+                            f"{start + i}: {type(exc).__name__}"
+                        ) from exc
+                # LE-129d: E5 via the HF feature-extraction task returns
+                # TOKEN-LEVEL embeddings, e.g. [tokens][dim] or
+                # [batch][tokens][dim] ([1][11][768]). Recursively mean-pool any
+                # nesting above [dim] until one pooled sentence vector remains.
+                # (No-op when already a flat [dim] float list.)
+                vec = _mean_pool(vec)
                 if not isinstance(vec, list) or len(vec) != EMBEDDING_DIM:
                     raise EmbedderError(
                         f"SageMaker returned {len(vec) if isinstance(vec, list) else type(vec).__name__}-"
                         f"dim vector for input {start + i}; expected {EMBEDDING_DIM}"
                     )
-                results.append([float(v) for v in vec])
+                floats = [float(v) for v in vec]
+                # LE-129d: L2-normalise client-side so ingest AND query vectors
+                # share one cosine range, keeping the calibrated LE-123/124
+                # refusal-score thresholds portable. No-op for already-unit
+                # vectors (E5 is normalised server-side at magnitude ~1.0).
+                norm = math.sqrt(sum(v * v for v in floats))
+                if norm > 0.0:
+                    floats = [v / norm for v in floats]
+                results.append(floats)
 
         return results
