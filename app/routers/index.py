@@ -1712,7 +1712,12 @@ async def start_index(
     # BUC-1599: ``triggered_by`` defaults to 'manual'; callers (webhook
     # receiver, cron scheduler, admin reindex flow) set the header to
     # mark a different provenance.
-    _triggered_by = (x_forge_triggered_by or "manual").strip().lower() or "manual"
+    # Coerce: when start_index is called directly (e.g. reindex_repo in
+    # repos.py) rather than via FastAPI injection, the Header() default is NOT
+    # resolved and x_forge_triggered_by is a Header object, not a str. Guard so
+    # the direct-call path doesn't AttributeError on .strip().
+    _raw_triggered_by = x_forge_triggered_by if isinstance(x_forge_triggered_by, str) else None
+    _triggered_by = (_raw_triggered_by or "manual").strip().lower() or "manual"
     try:
         _jobs_store.create_job(
             kind="index",

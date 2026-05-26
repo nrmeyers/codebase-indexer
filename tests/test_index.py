@@ -120,6 +120,69 @@ def test_post_index_accepts_force_reindex_flag(tmp_path: Path) -> None:
     assert body["message"] == "Indexing job accepted"
 
 
+def test_start_index_direct_call_coerces_header_default_triggered_by(
+    tmp_path: Path,
+) -> None:
+    """LE-146 regression — calling ``start_index`` directly (as ``reindex_repo``
+    does) must not AttributeError on the unresolved ``Header()`` default.
+
+    ``reindex_repo`` invokes ``start_index(req, background_tasks)`` positionally
+    without supplying ``x_forge_triggered_by``. FastAPI only resolves the
+    ``Header(default=...)`` sentinel during request injection — on a direct
+    Python call the parameter retains the ``Header`` object (a
+    ``fastapi.params.Header`` instance), which has no ``.strip()``. Before the
+    fix this raised ``AttributeError`` and surfaced as a 500 from the reindex
+    endpoint. The coercion guards the direct-call path.
+    """
+    import asyncio
+    import inspect
+
+    from fastapi import BackgroundTasks
+
+    from app.routers.index import IndexRequest, start_index
+
+    # Reproduce the reindex_repo call shape: two positional args, header omitted
+    # so the Header() sentinel default is in force (NOT a str).
+    sig = inspect.signature(start_index)
+    header_default = sig.parameters["x_forge_triggered_by"].default
+    # Guard the test's own premise: the default is a non-str Header sentinel,
+    # which is exactly the object that used to blow up on .strip().
+    assert not isinstance(header_default, str)
+
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        accepted = asyncio.run(
+            start_index(
+                IndexRequest(repo_path=str(tmp_path), force_reindex=True),
+                BackgroundTasks(),
+            )
+        )
+
+    assert accepted.job_id  # IndexAccepted returned, no AttributeError raised
+
+
+def test_reindex_endpoint_returns_202_not_500(tmp_path: Path) -> None:
+    """LE-146 regression — ``POST /repos/{name}/reindex`` must return 202.
+
+    The endpoint delegates to ``start_index`` via a direct Python call, so it
+    is the integration-level reproduction of the unresolved-Header-default bug:
+    pre-fix it returned 500 (AttributeError on ``.strip()``); post-fix it
+    returns 202 Accepted with a job_id.
+    """
+    from app.routers.index import indexed_repo_paths
+
+    repo_name = "le146-regression-repo"
+    indexed_repo_paths[repo_name] = str(tmp_path)
+    try:
+        with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+            resp = client.post(
+                f"/repos/{repo_name}/reindex", json={"force": True}
+            )
+        assert resp.status_code == 202, resp.text
+        assert "job_id" in resp.json()
+    finally:
+        indexed_repo_paths.pop(repo_name, None)
+
+
 def test_post_index_duplicate_same_repo_returns_409(tmp_path: Path) -> None:
     """Two POSTs with the same repo_path: the second returns 409 Conflict.
 
