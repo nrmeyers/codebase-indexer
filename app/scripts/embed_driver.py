@@ -163,6 +163,169 @@ def compose_function_method_embed_text(
 
 
 # ---------------------------------------------------------------------------
+# Embedder resolution — LE-151.
+#
+# CRITICAL recall fix: the ingest embedding pass MUST produce vectors from
+# the SAME model (with the same post-processing) as the query path in
+# ``app/routers/search.py::_embed_query``.  Historically this driver called
+# ``codebase_rag.embedder.embed_code_batch`` (CodeRankEmbed) while the query
+# side resolved the configured ``EMBEDDER_BACKEND`` (prod = SageMaker E5).
+# Stored passage vectors and query vectors therefore lived in incompatible
+# spaces → cosine ≈ 0.09 for correct matches → recall@5 ≈ 19%.
+#
+# ``resolve_batch_embedder`` returns a callable with the SAME signature as
+# ``embed_code_batch`` (``list[str] -> list[list[float]]``) but routes
+# through the configured backend, mirroring the query side's fallback
+# chain exactly: configured backend (raw text, no prefix) → LM Studio dev
+# (asymmetric document prefix) → in-process torch (``embed_code_batch``).
+# Symmetry is what matters: the configured backend (the PRIMARY) is used by
+# both ingest and query, so with EMBEDDER_BACKEND=sagemaker both become E5.
+# ---------------------------------------------------------------------------
+
+# LM Studio dev-fallback prefix for the *passage* (document) side. The query
+# side passes ``"search_query: "``; this is the asymmetric counterpart for
+# indexed code so the dev-only LM Studio path stays symmetric. Only used when
+# the configured backend is unavailable AND LM Studio is reachable.
+_LM_STUDIO_DOC_PREFIX = "search_document: "
+
+
+def partition_batch_result(
+    meta: list[tuple[str, str, int, int, str, str]],
+    embeddings: list[list[float]] | None,
+    error: BaseException | None,
+) -> tuple[list[tuple[tuple[str, str, int, int, str, str], list[float]]], int]:
+    """Classify one batch's embed outcome into (insertable_rows, failed_count).
+
+    LE-151b fail-loud contract — the single source of truth for deciding
+    whether a batch's results are safe to persist:
+
+    * ``error is not None`` → the embed call raised even after the
+      embedder's internal retry/backoff.  The ENTIRE batch is counted as
+      failed and NOTHING is persisted for it (no fabricated / empty
+      vectors).
+    * ``len(embeddings) != len(meta)`` → a corrupt/truncated result.
+      Treated as a whole-batch failure rather than zipping a partial set
+      into the store (which would silently drop symbols).
+    * Otherwise → every (meta, vector) pair is returned for insertion and
+      the failed count is 0.
+
+    Args:
+        meta: Per-symbol metadata tuples for the batch.
+        embeddings: The embedder's output (one vector per ``meta`` entry),
+            or None when ``error`` is set.
+        error: The exception raised by the batch embed call, or None on
+            success.
+
+    Returns:
+        ``(pairs, failed)`` where ``pairs`` is the list of
+        ``(meta_tuple, vector)`` safe to insert and ``failed`` is the
+        number of symbols that could NOT be embedded.
+    """
+    if error is not None:
+        return ([], len(meta))
+    if embeddings is None or len(embeddings) != len(meta):
+        return ([], len(meta))
+    return ([(_m, _e) for _m, _e in zip(meta, embeddings)], 0)
+
+
+def resolve_ingest_concurrency() -> int:
+    """Resolve the number of concurrent SageMaker batch invocations.
+
+    LE-151b: the default is **1** (sequential batches).  A bulk re-embed at
+    the previous default of 2 fanned ~8 simultaneous invocations into a
+    small Serverless Inference endpoint and OOM'd the model worker
+    (``InternalServerException: Worker died.`` → whole job crashed).
+    Serverless endpoints scale workers slowly with a tiny per-worker memory
+    ceiling, so the reliable default for a hosted bulk embed is to
+    serialise.  Throughput is recovered by the per-batch backoff+retry in
+    :meth:`app.embedders.sagemaker.SageMakerEmbedder._invoke_with_retry`.
+
+    Operators with a provisioned (non-serverless) endpoint that can absorb
+    parallelism can raise this via ``SAGEMAKER_EMBED_CONCURRENCY``.  Invalid,
+    missing, or non-positive values fall back to 1.
+
+    Returns:
+        Concurrency >= 1.
+    """
+    try:
+        value = int(os.environ.get("SAGEMAKER_EMBED_CONCURRENCY") or "1")
+    except (TypeError, ValueError):
+        return 1
+    return value if value >= 1 else 1
+
+
+def resolve_batch_embedder() -> Any:
+    """Return a ``list[str] -> list[list[float]]`` batch embedder callable.
+
+    Mirrors the query-side provider priority in
+    ``app/routers/search.py::_embed_query`` so ingest and query resolve to
+    the SAME model:
+
+    1. **Configured backend (PRIMARY).** ``EMBEDDER_BACKEND`` via
+       ``app.embedders`` (prod = SageMaker E5). The backend exposes an async
+       batch ``embed(texts)`` which we run on a fresh event loop. No
+       asymmetric prefix — matching ``_embed_query`` which sends raw text.
+    2. **LM Studio (dev fallback).** Per-text ``lm_studio.embed`` with the
+       passage prefix (counterpart to the query side's ``search_query: ``).
+    3. **In-process torch (last resort).** ``codebase_rag.embedder
+       .embed_code_batch`` — the legacy CodeRankEmbed path, retained ONLY as
+       the final fallback so a fully-offline install still embeds.
+
+    Returns:
+        A callable accepting ``list[str]`` and returning
+        ``list[list[float]]`` (one vector per input, order-preserving).
+
+    Raises:
+        RuntimeError: when no provider is available (no configured backend,
+            no LM Studio, and ``embed_code_batch`` import fails).
+    """
+    # 1. Configured backend (matches query PRIMARY).
+    try:
+        from app.embedders.sync_bridge import get_embedder_or_none
+        backend = get_embedder_or_none()
+    except Exception:  # noqa: BLE001 — import/config failure is non-fatal here
+        backend = None
+
+    if backend is not None:
+        import asyncio
+
+        def _embed_via_backend(texts: list[str]) -> list[list[float]]:
+            # Async batch ``embed`` run on a fresh loop — this driver is a
+            # subprocess with no live asyncio context, so ``asyncio.run`` is
+            # safe (same pattern as ``embed_text_sync``). Raw text, no
+            # prefix — symmetric with ``_embed_query``.
+            return asyncio.run(backend.embed(list(texts)))
+
+        print(f"embedder: configured backend '{backend.name}'", flush=True)
+        return _embed_via_backend
+
+    # 2. LM Studio dev fallback (matches query secondary).
+    try:
+        from app.services import lm_studio
+        if lm_studio.can_embed():
+            def _embed_via_lm_studio(texts: list[str]) -> list[list[float]]:
+                out: list[list[float]] = []
+                for _t in texts:
+                    _v = lm_studio.embed(_t, prefix=_LM_STUDIO_DOC_PREFIX)
+                    if _v is None:
+                        raise RuntimeError(
+                            "lm_studio.embed returned None during ingest"
+                        )
+                    out.append(_v)
+                return out
+
+            print("embedder: LM Studio dev fallback", flush=True)
+            return _embed_via_lm_studio
+    except Exception:  # noqa: BLE001 — LM Studio probing is best-effort
+        pass
+
+    # 3. In-process torch last resort (legacy CodeRankEmbed).
+    from codebase_rag.embedder import embed_code_batch
+    print("embedder: in-process torch (embed_code_batch) last resort", flush=True)
+    return embed_code_batch
+
+
+# ---------------------------------------------------------------------------
 # Driver entry-point.  Everything below this point talks to LadybugDB,
 # DuckDB and SageMaker and is exercised only by the live indexer (not by
 # unit tests).
@@ -170,7 +333,7 @@ def compose_function_method_embed_text(
 
 
 def _alarm_handler(signum: int, frame: Any) -> None:
-    """SIGALRM handler used as a hard watchdog on each ``embed_code_batch``.
+    """SIGALRM handler used as a hard watchdog on each batch embed call.
 
     150s is generous: batch=16 with cold start is ~30s, sustained is
     ~16s; 150s catches genuinely stuck calls fast.
@@ -309,7 +472,6 @@ def main(argv: list[str] | None = None) -> int:
     # top) so that ``import app.scripts.embed_driver`` from a unit test
     # does not require the full embedding stack to be installed.
     import real_ladybug as lb
-    from codebase_rag.embedder import embed_code_batch
     from codebase_rag.storage.vector_store import (
         EmbeddingRow,
         bulk_insert,
@@ -320,15 +482,21 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGALRM, _alarm_handler)
 
-    # BUC-1517: number of concurrent SageMaker invocations.  Capped at 2
-    # because Serverless Inference has a hard 60s per-call timeout.  Each
-    # outer batch of 50 items splits into ~4 inner SageMaker calls; with
-    # concurrency=2 we submit 8 simultaneous calls into a 5-worker endpoint,
-    # which fits in 2 worker rounds × ~30s = under the 60s ceiling.
-    # Concurrency >= 3 risks one of the queued calls timing out and tripping
-    # the local-torch fallback, which is dramatically slower than just being
-    # patient with serverless.  Override via SAGEMAKER_EMBED_CONCURRENCY.
-    _CONCURRENCY = int(os.environ.get("SAGEMAKER_EMBED_CONCURRENCY") or "2")
+    # LE-151 — resolve the batch embedder ONCE up front so every flush uses
+    # the same model the query side uses. Same callable contract as the old
+    # ``embed_code_batch`` (list[str] -> list[list[float]]); the SIGALRM
+    # watchdog + batch sizing + bookkeeping below are unchanged.
+    _embed_batch = resolve_batch_embedder()
+
+    # BUC-1517 / LE-151b: number of concurrent SageMaker invocations.
+    # Default is now 1 (sequential batches) — see
+    # ``resolve_ingest_concurrency`` for the full rationale.  A bulk
+    # re-embed at the previous default of 2 fanned ~8 simultaneous
+    # invocations into a small Serverless Inference endpoint and OOM'd the
+    # model worker ("InternalServerException: Worker died." → whole job
+    # crashed).  Throughput is recovered by the per-batch backoff+retry in
+    # ``SageMakerEmbedder._invoke_with_retry``.
+    _CONCURRENCY = resolve_ingest_concurrency()
 
     repo_db_path = args.repo_db_path
     vec_db_path = args.vec_db_path
@@ -418,6 +586,12 @@ RETURN n.qualified_name AS qualified_name,
     _embedded_count = 0
     _skipped_unchanged = 0
     _skipped_filtered = 0
+    # LE-151b: symbols whose batch embedding failed after all SageMaker
+    # retries were exhausted (or which raised a hard error). These are NOT
+    # written to the vector store — failing loud is the whole point, so we
+    # count them and surface the total in RECONCILE + a non-zero exit so a
+    # partial embed can never masquerade as success.
+    _failed_count = 0
     _batch_texts: list[str] = []
     _batch_meta: list[tuple[str, str, int, int, str, str]] = []
     _pending_batches: list[
@@ -431,34 +605,68 @@ RETURN n.qualified_name AS qualified_name,
         results in submission order, then bulk-inserts the resulting
         EmbeddingRow list.  Bumps the live ``_embedded_count`` and
         prints a PROGRESS line the parent log-tailer parses.
+
+        LE-151b: if a batch's embed call raises (transient SageMaker
+        failure that survived all retries, or a hard error), we do NOT
+        abort the entire job and we do NOT write empty/zero vectors for
+        that batch.  Instead the batch's symbol count is added to
+        ``_failed_count`` and a loud ``WARN embed_batch.failed`` line is
+        emitted.  ``main`` returns a non-zero exit code when
+        ``_failed_count > 0`` so the parent never records the job as a
+        clean success.  Successfully-embedded batches in the same flush
+        are still persisted.
         """
-        nonlocal _embedded_count
+        nonlocal _embedded_count, _failed_count
         if not _pending_batches:
             return
         # +30s margin per concurrent batch
         signal.alarm(150 + 30 * len(_pending_batches))
         try:
             futures = [
-                pool.submit(embed_code_batch, texts)
+                pool.submit(_embed_batch, texts)
                 for texts, _meta in _pending_batches
             ]
             all_inserts = []
             for fut, (_texts, meta) in zip(futures, _pending_batches):
-                embs = fut.result()
-                for _m, _e in zip(meta, embs):
+                _err: BaseException | None = None
+                _embs: list[list[float]] | None = None
+                try:
+                    _embs = fut.result()
+                except Exception as exc:  # noqa: BLE001 — surfaced, not swallowed
+                    _err = exc
+                _pairs, _failed = partition_batch_result(meta, _embs, _err)
+                if _failed:
+                    _failed_count += _failed
+                    if _err is not None:
+                        # Embedding this batch failed even after the
+                        # embedder's internal retry/backoff.  Record the
+                        # loss; do NOT fabricate vectors.
+                        _warn(
+                            f"embed_batch.failed symbols={_failed} "
+                            f"reason={type(_err).__name__}:{_err}"
+                        )
+                    else:
+                        _warn(
+                            f"embed_batch.length_mismatch symbols={_failed} "
+                            f"got={len(_embs) if _embs is not None else 'none'}"
+                        )
+                    continue
+                for _m, _e in _pairs:
                     all_inserts.append(EmbeddingRow(
                         qualified_name=_m[0], embedding=_e,
                         file_path=_m[1], start_line=_m[2], end_line=_m[3],
                         symbol_type=_m[4], content_hash=_m[5],
                     ))
-            bulk_insert(_vec_conn, all_inserts)
-            _embedded_count += len(all_inserts)
+            if all_inserts:
+                bulk_insert(_vec_conn, all_inserts)
+                _embedded_count += len(all_inserts)
         finally:
             signal.alarm(0)
         _pending_batches.clear()
         print(
             f"PROGRESS embedded={_embedded_count} "
-            f"skipped={_skipped_unchanged} filtered={_skipped_filtered}",
+            f"skipped={_skipped_unchanged} filtered={_skipped_filtered} "
+            f"failed={_failed_count}",
             flush=True,
         )
 
@@ -956,6 +1164,7 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
         f"skipped_unchanged={_skipped_unchanged} "
         f"skipped_filtered={_skipped_filtered} "
         f"dropped_unreadable={_drops['dropped_unreadable']} "
+        f"failed={_failed_count} "
         f"unaccounted={_unaccounted}",
         flush=True,
     )
@@ -963,8 +1172,22 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
     print(
         f"Embedded {_embedded_count} "
         f"(skipped {_skipped_unchanged} unchanged, "
-        f"filtered {_skipped_filtered})"
+        f"filtered {_skipped_filtered}, "
+        f"failed {_failed_count})"
     )
+
+    # LE-151b: fail loud. If ANY batch failed to embed (transient SageMaker
+    # failure that survived retries, or a hard error), exit non-zero so the
+    # parent worker records the embed job as failed and the operator can
+    # re-run.  We do NOT print ``EMBED_DONE`` (the success sentinel) in that
+    # case — a partial embed must never look like a clean success.
+    if _failed_count > 0:
+        print(
+            f"EMBED_FAILED failed={_failed_count} embedded={_embedded_count}",
+            flush=True,
+        )
+        return 1
+
     print("EMBED_DONE")
     return 0
 

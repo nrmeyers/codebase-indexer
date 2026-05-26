@@ -33,9 +33,20 @@ Configuration
     SAGEMAKER_EMBED_URL        Full invocation URL; endpoint name extracted.
     SAGEMAKER_EMBED_REGION     AWS region (default us-east-1).
     SAGEMAKER_EMBED_BATCH_SIZE Inputs per request (1-64, default 16).
+    SAGEMAKER_EMBED_MAX_ATTEMPTS
+                               Per-batch invoke attempts incl. the first
+                               (1-5, default 5). LE-151b adds explicit
+                               exponential-backoff retry for transient
+                               model-container failures ("Worker died."
+                               500s, 503s, throttling) that botocore's
+                               standard retry mode does NOT cover.
 
 Timeouts (boto3 ``Config``) are tuned for batch=32 on ml.m5.large:
     connect_timeout=10s, read_timeout=90s, retries=3 (standard mode).
+The botocore ``retries`` config covers connection-level transients and
+some throttling; the explicit per-batch retry above (LE-151b) additionally
+covers the model-container "Worker died." 500 that a serverless endpoint
+emits under bulk-ingest concurrency.
 
 Truncation
 ----------
@@ -51,7 +62,9 @@ import json
 import logging
 import math
 import os
+import random
 import re
+import time
 from typing import Any
 
 from .base import EMBEDDING_DIM, EmbedderBackend, EmbedderError
@@ -66,6 +79,103 @@ _MAX_CHARS = 1000
 _DEFAULT_BATCH_SIZE = 16
 _CONNECT_TIMEOUT = 10
 _READ_TIMEOUT = 90
+
+# ---------------------------------------------------------------------------
+# Transient-failure retry (LE-151b).
+#
+# A serverless SageMaker endpoint under bulk-ingest load returns model-
+# container failures that botocore's standard retry mode does NOT cover:
+#
+#   * ModelError / InternalServerException — HTTP 500, body
+#     ``{"message": "Worker died."}``. The model worker OOM'd or crashed.
+#     botocore treats a 500 from a *successful* HTTP exchange with the
+#     endpoint as a non-retryable ClientError, so the bulk re-embed of
+#     PR #82 crashed the endpoint and surfaced the failure to the operator.
+#   * ServiceUnavailableException — HTTP 503, the endpoint is scaling /
+#     all workers busy. Transient by definition.
+#   * ThrottlingException / 429 — too many concurrent invocations.
+#
+# We retry these explicitly with capped exponential backoff + jitter.
+# Everything else (400 ValidationError, dim-mismatch, auth failure) is a
+# hard error and propagates immediately — retrying it would just waste
+# time and money.
+# ---------------------------------------------------------------------------
+
+#: Max attempts (1 initial + up to 4 retries) per batch invocation.
+_DEFAULT_MAX_ATTEMPTS = 5
+#: Base backoff seconds; sleep = base * 2**(attempt-1) capped at _BACKOFF_CAP,
+#: i.e. ~1s, 2s, 4s, 8s, 16s (+ jitter).
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_CAP_SECONDS = 16.0
+
+#: SageMaker-runtime error codes / substrings that are safe to retry.
+_RETRYABLE_ERROR_CODES = frozenset(
+    {
+        "ModelError",
+        "InternalServerException",
+        "InternalFailure",
+        "ServiceUnavailableException",
+        "ServiceUnavailable",
+        "ThrottlingException",
+        "TooManyRequestsException",
+        "ModelNotReadyException",
+    }
+)
+#: HTTP status codes that indicate a transient endpoint-side failure.
+_RETRYABLE_STATUS = frozenset({429, 500, 503})
+
+
+def _is_transient_sagemaker_error(exc: BaseException) -> bool:
+    """True when ``exc`` is a transient SageMaker failure worth retrying.
+
+    Inspects ``botocore.exceptions.ClientError.response`` for either a
+    retryable error ``Code`` (e.g. ``ModelError``) or a retryable HTTP
+    status (429/500/503), and matches the model-container "Worker died."
+    500 that botocore does NOT auto-retry. Connection/read timeouts
+    (``EndpointConnectionError``, ``ReadTimeoutError``, etc.) are also
+    treated as transient.
+
+    Args:
+        exc: The exception raised by a single ``invoke_endpoint`` call.
+
+    Returns:
+        True if the call should be retried; False for hard errors
+        (validation, auth, dim mismatch) that must propagate.
+    """
+    # botocore ClientError carries a structured ``response`` dict.
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        err = response.get("Error") or {}
+        code = str(err.get("Code") or "")
+        if code in _RETRYABLE_ERROR_CODES:
+            return True
+        status = (
+            response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        )
+        if isinstance(status, int) and status in _RETRYABLE_STATUS:
+            return True
+        message = str(err.get("Message") or "")
+        if "Worker died" in message:
+            return True
+
+    # Connection-level transients (timeouts, dropped sockets). Match by
+    # class name so we don't have to import every botocore exception.
+    transient_names = {
+        "EndpointConnectionError",
+        "ConnectionClosedError",
+        "ReadTimeoutError",
+        "ConnectTimeoutError",
+        "ResponseStreamingError",
+    }
+    if type(exc).__name__ in transient_names:
+        return True
+
+    # The model-container "Worker died." text can also reach us via a bare
+    # exception message (depending on botocore version / streaming body).
+    if "Worker died" in str(exc):
+        return True
+
+    return False
 
 
 def _mean_pool(x: Any) -> Any:
@@ -97,6 +207,7 @@ class SageMakerEmbedder(EmbedderBackend):
         endpoint_name: str,
         region: str = "us-east-1",
         batch_size: int = _DEFAULT_BATCH_SIZE,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     ) -> None:
         if not endpoint_name:
             raise EmbedderError("SageMakerEmbedder: endpoint_name must be non-empty")
@@ -105,6 +216,9 @@ class SageMakerEmbedder(EmbedderBackend):
         # Clamp to the SageMaker contract (1-64). Larger batches trip the
         # 60s serverless timeout; smaller ones throttle ingest throughput.
         self.batch_size = min(max(1, batch_size), 64)
+        # LE-151b: at least one attempt; capped at 5 to bound worst-case
+        # latency for a genuinely-dead endpoint (~31s of backoff total).
+        self.max_attempts = min(max(1, max_attempts), 5)
         self._client: Any | None = None
 
     @classmethod
@@ -139,7 +253,20 @@ class SageMakerEmbedder(EmbedderBackend):
         except (TypeError, ValueError):
             batch_size = _DEFAULT_BATCH_SIZE
 
-        return cls(endpoint_name=endpoint, region=region, batch_size=batch_size)
+        try:
+            max_attempts = int(
+                os.environ.get("SAGEMAKER_EMBED_MAX_ATTEMPTS")
+                or _DEFAULT_MAX_ATTEMPTS
+            )
+        except (TypeError, ValueError):
+            max_attempts = _DEFAULT_MAX_ATTEMPTS
+
+        return cls(
+            endpoint_name=endpoint,
+            region=region,
+            batch_size=batch_size,
+            max_attempts=max_attempts,
+        )
 
     @staticmethod
     def _extract_endpoint_name(url_or_name: str) -> str:
@@ -186,6 +313,71 @@ class SageMakerEmbedder(EmbedderBackend):
         )
         return resp["Body"].read()
 
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        """Blocking sleep seam — overridable in tests to avoid real waits."""
+        time.sleep(seconds)
+
+    def _backoff_seconds(self, attempt: int) -> float:
+        """Capped exponential backoff with full jitter for retry ``attempt``.
+
+        ``attempt`` is 1-indexed (1 = first retry). Yields ~1s, 2s, 4s, 8s,
+        16s ceilings, each randomised across ``[0, ceiling]`` (full jitter)
+        so concurrent ingest workers don't synchronise their retries and
+        re-stampede a recovering serverless worker.
+        """
+        ceiling = min(
+            _BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), _BACKOFF_CAP_SECONDS
+        )
+        return random.uniform(0.0, ceiling)
+
+    def _invoke_with_retry(self, body: bytes) -> bytes:
+        """Invoke the endpoint, retrying transient failures with backoff.
+
+        Retries only failures classified transient by
+        :func:`_is_transient_sagemaker_error` (model "Worker died." 500s,
+        503s, throttling, connection timeouts) up to ``self.max_attempts``.
+        Hard errors propagate on the first failure. After the final attempt
+        the last transient exception is re-raised so the caller surfaces a
+        loud failure — it is NEVER swallowed into an empty result.
+
+        Args:
+            body: JSON-encoded ``{"inputs": [...]}`` request payload.
+
+        Returns:
+            The raw response body bytes from a successful invocation.
+
+        Raises:
+            The originating exception (transient after exhausting retries,
+            or non-transient on first occurrence).
+        """
+        last_exc: BaseException | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                return self._invoke_sync(body)
+            except Exception as exc:  # noqa: BLE001 — classified below
+                last_exc = exc
+                transient = _is_transient_sagemaker_error(exc)
+                if not transient or attempt >= self.max_attempts:
+                    # Hard error, or out of retries — let it propagate so the
+                    # batch is recorded as a failure (never stored empty).
+                    raise
+                delay = self._backoff_seconds(attempt)
+                logger.warning(
+                    "sagemaker.invoke transient failure (attempt %d/%d): "
+                    "%s: %s — retrying in %.2fs",
+                    attempt,
+                    self.max_attempts,
+                    type(exc).__name__,
+                    exc,
+                    delay,
+                )
+                self._sleep(delay)
+        # Defensive: the loop either returns or raises. If we somehow fall
+        # through, re-raise the last seen exception rather than returning.
+        assert last_exc is not None  # pragma: no cover
+        raise last_exc
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -198,11 +390,15 @@ class SageMakerEmbedder(EmbedderBackend):
             ]
             body = json.dumps({"inputs": safe_chunk}).encode("utf-8")
             try:
-                raw_bytes = await asyncio.to_thread(self._invoke_sync, body)
+                # Retry transient endpoint failures ("Worker died." 500s,
+                # 503s, throttling) inside the worker thread before
+                # converting any surviving failure to a loud EmbedderError.
+                raw_bytes = await asyncio.to_thread(self._invoke_with_retry, body)
                 raw = json.loads(raw_bytes)
             except Exception as exc:  # noqa: BLE001
                 raise EmbedderError(
-                    f"SageMakerEmbedder.invoke_endpoint failed "
+                    f"SageMakerEmbedder.invoke_endpoint failed after "
+                    f"{self.max_attempts} attempt(s) "
                     f"({type(exc).__name__}: {exc})"
                 ) from exc
 

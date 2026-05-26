@@ -129,6 +129,164 @@ async def test_sagemaker_embedder_empty_input_short_circuits() -> None:
     fake_client.invoke_endpoint.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# LE-151b — transient-failure retry with exponential backoff.
+#
+# A serverless endpoint under bulk-ingest load returns a model-container
+# "Worker died." 500 (ModelError / InternalServerException) that botocore's
+# standard retry mode does NOT auto-retry. These tests prove the explicit
+# per-batch retry recovers on a transient error, exhausts after max_attempts,
+# and never retries a hard (non-transient) error.
+# ---------------------------------------------------------------------------
+
+
+def _client_error(code: str, status: int, message: str = "") -> Exception:
+    """Build a botocore-shaped ClientError for the given code/status."""
+    from botocore.exceptions import ClientError
+
+    return ClientError(
+        error_response={
+            "Error": {"Code": code, "Message": message},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        operation_name="InvokeEndpoint",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sagemaker_retries_worker_died_500_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient 'Worker died.' 500 is retried with backoff, then succeeds.
+
+    Pins the LE-151b contract: the model-container failure that crashed the
+    PR #82 bulk re-embed is now recovered instead of aborting the job.
+    """
+    fake_vec = [0.001 * i for i in range(EMBEDDING_DIM)]
+    ok_body = MagicMock()
+    ok_body.read.return_value = json.dumps([fake_vec]).encode("utf-8")
+
+    calls = {"n": 0}
+
+    def _flaky(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            # Fails twice with the exact serverless model-worker OOM error.
+            raise _client_error(
+                "ModelError", 500, "Received server error: Worker died."
+            )
+        return {"Body": ok_body}
+
+    fake_client = MagicMock()
+    fake_client.invoke_endpoint.side_effect = _flaky
+
+    sm = SageMakerEmbedder(endpoint_name="forge-e5-embed-v2", max_attempts=5)
+    sm._client = fake_client
+
+    slept: list[float] = []
+    monkeypatch.setattr(
+        SageMakerEmbedder, "_sleep", staticmethod(lambda s: slept.append(s))
+    )
+
+    result = await sm.embed(["def foo(): return 1"])
+
+    assert calls["n"] == 3, "should retry twice before the third call succeeds"
+    assert len(result) == 1 and len(result[0]) == EMBEDDING_DIM
+    # Backoff was applied between the two failures (2 sleeps).
+    assert len(slept) == 2
+    assert all(s >= 0 for s in slept)
+
+
+@pytest.mark.asyncio
+async def test_sagemaker_raises_after_exhausting_retries_never_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent transient failure exhausts retries and raises loudly.
+
+    The call must NEVER fall through to an empty / partial result — a failed
+    embed has to be detectable, not silently stored.
+    """
+    fake_client = MagicMock()
+    fake_client.invoke_endpoint.side_effect = _client_error(
+        "InternalServerException", 500, "Worker died."
+    )
+
+    sm = SageMakerEmbedder(endpoint_name="forge-e5-embed-v2", max_attempts=3)
+    sm._client = fake_client
+    monkeypatch.setattr(
+        SageMakerEmbedder, "_sleep", staticmethod(lambda _s: None)
+    )
+
+    with pytest.raises(EmbedderError, match="after 3 attempt"):
+        await sm.embed(["text"])
+
+    # Exactly max_attempts invocations — no more, no fewer.
+    assert fake_client.invoke_endpoint.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_sagemaker_does_not_retry_hard_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-transient 400 ValidationError fails immediately (no retry).
+
+    Retrying a malformed-request error just wastes time and money.
+    """
+    fake_client = MagicMock()
+    fake_client.invoke_endpoint.side_effect = _client_error(
+        "ValidationError", 400, "bad input"
+    )
+
+    sm = SageMakerEmbedder(endpoint_name="forge-e5-embed-v2", max_attempts=5)
+    sm._client = fake_client
+    slept: list[float] = []
+    monkeypatch.setattr(
+        SageMakerEmbedder, "_sleep", staticmethod(lambda s: slept.append(s))
+    )
+
+    with pytest.raises(EmbedderError):
+        await sm.embed(["text"])
+
+    # One attempt only; no backoff sleeps.
+    assert fake_client.invoke_endpoint.call_count == 1
+    assert slept == []
+
+
+def test_sagemaker_classifies_transient_errors() -> None:
+    """_is_transient_sagemaker_error: retryable codes/status vs hard errors."""
+    from app.embedders.sagemaker import _is_transient_sagemaker_error
+
+    assert _is_transient_sagemaker_error(
+        _client_error("ModelError", 500, "Worker died.")
+    )
+    assert _is_transient_sagemaker_error(
+        _client_error("ServiceUnavailableException", 503)
+    )
+    assert _is_transient_sagemaker_error(
+        _client_error("ThrottlingException", 429)
+    )
+    # 500 status with an unknown code is still transient.
+    assert _is_transient_sagemaker_error(_client_error("SomethingElse", 500))
+    # Hard errors are NOT transient.
+    assert not _is_transient_sagemaker_error(
+        _client_error("ValidationError", 400)
+    )
+    assert not _is_transient_sagemaker_error(ValueError("nope"))
+
+
+def test_sagemaker_from_env_reads_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SAGEMAKER_EMBED_MAX_ATTEMPTS is honoured and clamped to [1, 5]."""
+    monkeypatch.setenv("SAGEMAKER_ENDPOINT_NAME", "forge-e5-embed-v2")
+    monkeypatch.setenv("SAGEMAKER_EMBED_MAX_ATTEMPTS", "3")
+    assert SageMakerEmbedder.from_env().max_attempts == 3
+
+    monkeypatch.setenv("SAGEMAKER_EMBED_MAX_ATTEMPTS", "99")
+    assert SageMakerEmbedder.from_env().max_attempts == 5
+
+    monkeypatch.setenv("SAGEMAKER_EMBED_MAX_ATTEMPTS", "garbage")
+    assert SageMakerEmbedder.from_env().max_attempts == 5
 def _is_unit_vector(vec: list[float], tol: float = 1e-6) -> bool:
     """True when ``vec`` is L2-normalised (magnitude 1.0 within ``tol``)."""
     norm = math.sqrt(sum(v * v for v in vec))
