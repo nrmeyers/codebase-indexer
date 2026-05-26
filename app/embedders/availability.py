@@ -239,7 +239,7 @@ def emit_startup_warning(status: dict[str, Any] | None = None) -> None:
         "Fix:\n"
         "  - For local dev:  uv sync --group local-embed\n"
         "  - For SageMaker:  set AWS creds + EMBEDDER_BACKEND=sagemaker\n"
-        "                    + SAGEMAKER_ENDPOINT_NAME=forge-e5-embed-v2\n"
+        "                    + SAGEMAKER_ENDPOINT_NAME=jina-code-v2-serverless\n"
         "  - For TEI:        start TEI sidecar + EMBEDDER_BACKEND=tei\n"
         "                    + TEI_URL=http://localhost:8080\n"
         "====================================================================\n"

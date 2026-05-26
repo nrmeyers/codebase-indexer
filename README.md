@@ -62,7 +62,7 @@ code-indexer callers myproject.parser.process_file
 >
 > # 2. Navistone production (AWS SageMaker Serverless Inference)
 > uv sync && export AWS_PROFILE=... EMBEDDER_BACKEND=sagemaker \
->            SAGEMAKER_ENDPOINT_NAME=forge-e5-embed-v2
+>            SAGEMAKER_ENDPOINT_NAME=jina-code-v2-serverless
 >
 > # 3. GPU box without AWS (Hugging Face TEI sidecar)
 > uv sync && export EMBEDDER_BACKEND=tei TEI_URL=http://localhost:8080
@@ -97,7 +97,7 @@ The CLI auto-starts the FastAPI service in the background on first use. To run t
 
 `grep` and your IDE's "Find Usages" both top out where this tool starts:
 
-- **Semantic, not lexical.** Query "the auth handler" without knowing the function is called `verify_session_token`. Backed by 768-dim [`intfloat/e5-base-v2`](https://huggingface.co/intfloat/e5-base-v2) embeddings stored in DuckDB.
+- **Semantic, not lexical.** Query "the auth handler" without knowing the function is called `verify_session_token`. Backed by 768-dim embeddings (SageMaker: [`jinaai/jina-code-embeddings-v2`](https://huggingface.co/jinaai/jina-code-embeddings-v2); local/TEI: [`intfloat/e5-base-v2`](https://huggingface.co/intfloat/e5-base-v2)) stored in DuckDB.
 - **Cross-file and cross-repo by default.** Imports, calls, inheritance, and references are first-class graph edges. Ask "who calls X" across the entire indexed corpus, not just the current file.
 - **Structural Cypher queries.** The symbol graph is queryable directly — return every `Function` that imports from a given module, list all `Class` nodes with more than 20 methods, etc.
 - **Grounded context bundles for LLMs.** `/context-bundle` returns the symbols, snippets, and call graph relevant to a task — primary use case is feeding a coding agent without dumping whole files.
@@ -284,7 +284,7 @@ flowchart LR
 - **Parsing.** [tree-sitter](https://tree-sitter.github.io/) grammars for Python, JavaScript, TypeScript, Go, Java, C#, Rust, and more. Symbols (functions, classes, methods), files, modules, and references become typed graph nodes.
 - **Graph store.** [LadybugDB](https://docs.ladybugdb.com/) — an embedded, file-backed [kuzu](https://kuzudb.com/) fork. One `.db` file per repo at `.cgr/repos/<slug>.db`. Cypher-queryable. No Docker.
 - **Vector store.** DuckDB `FLOAT[768]` column plus `array_cosine_distance` for similarity search. One `.duck` file per repo at `.cgr/repos/<slug>.duck`.
-- **Embedders.** Four interchangeable backends behind a single `EmbedderBackend` protocol. The three "native" backends (`local`, `sagemaker`, `tei`) produce the same 768-dim `intfloat/e5-base-v2` vectors so the on-disk index is portable across them. A fourth, `openai`, is the bring-your-own path (1536 or 3072 dim — needs a re-index). Switch with `EMBEDDER_BACKEND={local|sagemaker|tei|openai}` and restart. See [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
+- **Embedders.** Four interchangeable backends behind a single `EmbedderBackend` protocol. The three "native" backends produce 768-dim vectors (`sagemaker`: `jinaai/jina-code-embeddings-v2` post-LE-129; `local` + `tei`: `intfloat/e5-base-v2`) so the on-disk index shape is portable across them — but indexes built under one model are NOT interchangeable with another. A fourth, `openai`, is the bring-your-own path (1536 or 3072 dim — needs a re-index). Switch with `EMBEDDER_BACKEND={local|sagemaker|tei|openai}` and restart. See [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
 - **Imports across repos.** Cross-repo `IMPORTS` edges link symbols indexed under different slugs (BUC-1598).
 - **Centrality.** PageRank scores over the call/import graph are precomputed and exposed at `/search/centrality` (BUC-1577, BUC-1599 persistence).
 
@@ -322,7 +322,7 @@ Copy [`.env.example`](.env.example) to `.env` and adjust paths for your machine.
 | Backend     | Default model              | Dim   | When to use                                | Tradeoffs                                                        |
 | ----------- | -------------------------- | ----- | ------------------------------------------ | ---------------------------------------------------------------- |
 | `local`     | `intfloat/e5-base-v2`      | 768   | Standalone / laptop / no AWS. **Default.** | ~440 MB model download on first run; CPU-bound; zero infra cost. |
-| `sagemaker` | `intfloat/e5-base-v2`      | 768   | Navistone production.                      | GPU-backed batching; requires AWS creds; per-invocation cost.    |
+| `sagemaker` | `jinaai/jina-code-embeddings-v2` | 768 | Navistone production. Was E5, swapped 2026-05-26 LE-129. | GPU-backed batching; requires AWS creds; per-invocation cost.    |
 | `tei`       | `intfloat/e5-base-v2`      | 768   | Self-hosted GPU box.                       | Highest throughput; one extra container; no AWS coupling.        |
 | `openai`    | `text-embedding-3-small`   | 1536  | Bring your own — no AWS, no GPU.           | $0.02 / 1M tokens; needs `OPENAI_API_KEY`; **re-index required** (1536 ≠ 768). |
 

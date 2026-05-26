@@ -34,8 +34,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Pinned model identifier. The SageMaker endpoint is configured to serve
-# e5-base-v2; if the team swaps endpoints, this constant should follow.
+# Pinned model identifier reported by this router. The SageMaker endpoint
+# was swapped to jina-code-v2-serverless on 2026-05-26 (LE-129); SageMakerEmbedder
+# reports the new model name itself when used. This constant remains "e5-base-v2"
+# for the local/TEI backends until they are migrated too — keep in sync with
+# whichever backend the deployment actually uses.
 _MODEL_NAME = "e5-base-v2"
 
 

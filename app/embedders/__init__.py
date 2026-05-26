@@ -6,10 +6,12 @@ model download) to a GPU box (TEI) to Navistone's production AWS
 account (SageMaker):
 
     local       sentence-transformers in-process. Zero external deps.
-                Default for standalone installs. 768-dim (e5-base-v2).
+                Default for standalone installs. 768-dim (e5-base-v2;
+                local backend retains E5 until a Jina HF artifact ships).
     sagemaker   Navistone's AWS SageMaker Serverless Inference endpoint
-                (forge-e5-embed-v2, us-east-1). 768-dim. Default for
-                the Navistone production deploy.
+                (jina-code-v2-serverless, us-east-1; was forge-e5-embed-v2,
+                swapped 2026-05-26 LE-129). 768-dim. Default for the
+                Navistone production deploy.
     tei         Hugging Face Text-Embeddings-Inference HTTP sidecar
                 (http://localhost:8080). 768-dim. For GPU-batched
                 embedding without AWS or local CPU load.

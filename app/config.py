@@ -183,7 +183,7 @@ class Settings(BaseSettings):
     #
     #   local      sentence-transformers in-process (no AWS, no sidecar).
     #              Default for standalone installs.
-    #   sagemaker  Navistone's AWS SageMaker e5-base-v2 endpoint.
+    #   sagemaker  Navistone's AWS SageMaker jina-code-v2-serverless endpoint (was E5, swapped 2026-05-26 LE-129).
     #              Default for the Navistone production deploy.
     #   tei        Hugging Face Text-Embeddings-Inference HTTP sidecar
     #              (http://localhost:8080 by default).
@@ -193,7 +193,7 @@ class Settings(BaseSettings):
     # Priority: SAGEMAKER_ENDPOINT_NAME > SAGEMAKER_EMBED_ENDPOINT > derived from URL.
     # Requires AWS credentials with sagemaker:InvokeEndpoint on the endpoint.
     # Read directly by app.embedders.sagemaker.SageMakerEmbedder.from_env().
-    SAGEMAKER_ENDPOINT_NAME: str = ""             # BUC-1605 preferred name (e.g. forge-e5-embed-v2)
+    SAGEMAKER_ENDPOINT_NAME: str = ""             # BUC-1605 preferred name (e.g. jina-code-v2-serverless; was forge-e5-embed-v2, swapped 2026-05-26 LE-129)
     SAGEMAKER_EMBED_URL: str = ""                 # legacy alias: https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/forge-e5-embed-v1/invocations
     SAGEMAKER_EMBED_ENDPOINT: str = ""            # legacy alias: forge-e5-embed-v1
     SAGEMAKER_EMBED_REGION: str = "us-east-1"

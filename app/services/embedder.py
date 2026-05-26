@@ -3,7 +3,11 @@
 This module introduces an abstraction layer over the embedding provider so
 the indexer can run two models in parallel during evaluation:
 
-    e5-base-v2        Generic-text bi-encoder.  Today's production primary.
+    e5-base-v2        Generic-text bi-encoder.  Legacy persisted model id
+                      retained for back-compat with rows written before
+                      the LE-129 Jina swap (2026-05-26). SageMaker is now
+                      jina-code-v2-serverless; this module's MODEL_E5_BASE_V2
+                      constant continues to name the legacy column.
                       Wraps the upstream codebase_rag SageMakerEmbedder
                       verbatim (no behaviour change).
     bge-code-v1       Code-specific bi-encoder (768-dim drop-in).  Active
