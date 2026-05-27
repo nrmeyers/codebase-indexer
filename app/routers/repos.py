@@ -1022,3 +1022,161 @@ def repo_topic_centroid(
         cache_age_seconds=result.cache_age_seconds,
         k=result.k,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /repos/{name}/neighbors — embedding nearest-neighbors (LE-158 Stream C)
+# ---------------------------------------------------------------------------
+
+
+class NeighborItem(BaseModel):
+    """One nearest-neighbor of the seed symbol."""
+
+    fqn: str = Field(description="Qualified name of the neighbor symbol.")
+    score: float = Field(
+        description="Cosine similarity to the seed symbol in [-1, 1]; "
+        "higher is more similar. Results are sorted descending by score."
+    )
+
+
+@router.get(
+    "/{name}/neighbors",
+    response_model=list[NeighborItem],
+    summary="Top-K cosine-nearest symbols to a seed symbol (LE-158 Stream C)",
+)
+def repo_neighbors(
+    name: str,
+    fqn: str = Query(description="Exact qualified name of the seed symbol."),
+    k: int = Query(
+        default=10,
+        ge=1,
+        le=100,
+        description="Number of neighbors to return.",
+    ),
+) -> list[NeighborItem]:
+    """Return the ``k`` most cosine-similar symbols to ``fqn`` in ``name``.
+
+    Powers ``similar_to`` edges in TheForge's knowledge-graph viewer. Reads
+    the per-repo ``.duck`` embedding store directly; no re-embedding.
+
+    Args:
+        name: Repo slug.
+        fqn: Exact qualified name of the seed symbol.
+        k: Neighbor count (1–100; default 10).
+
+    Returns:
+        ``[{fqn, score}]`` sorted by descending cosine similarity, excluding
+        the seed itself. Empty list when ``fqn`` is unknown / unembedded
+        (the repo is indexed but the symbol has no vector).
+
+    Raises:
+        HTTPException 404: Repo not indexed (no ``.duck`` file).
+        HTTPException 503: Repo indexed but embeddings unavailable.
+    """
+    from ..services.neighbors import (
+        NeighborsNotFoundError,
+        NeighborsUnavailableError,
+        compute_neighbors,
+    )
+
+    duck_path = Path(settings.vec_db_path_for_repo(name))
+
+    try:
+        results = compute_neighbors(
+            repo=name, duck_path=duck_path, fqn=fqn, k=k
+        )
+    except NeighborsNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "repo_not_indexed", "message": str(exc)},
+        )
+    except NeighborsUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "neighbors_unavailable", "message": str(exc)},
+        )
+
+    return [NeighborItem(fqn=r.fqn, score=r.score) for r in results]
+
+
+# ---------------------------------------------------------------------------
+# GET /repos/{name}/clusters — semantic clustering / layers (LE-158 Stream C)
+# ---------------------------------------------------------------------------
+
+
+class ClusterItem(BaseModel):
+    """One semantic cluster — a "layer" in the graph viewer."""
+
+    cluster_id: int = Field(
+        description="Contiguous cluster index (0-based), sorted by size desc."
+    )
+    label: str = Field(
+        description="Representative qualified name — the member closest to "
+        "the cluster centroid."
+    )
+    fqns: list[str] = Field(
+        description="All qualified names assigned to this cluster."
+    )
+
+
+@router.get(
+    "/{name}/clusters",
+    response_model=list[ClusterItem],
+    summary="Cluster repo symbol embeddings into N semantic groups (LE-158 Stream C)",
+)
+def repo_clusters(
+    name: str,
+    n: int = Query(
+        default=8,
+        ge=1,
+        le=64,
+        description="Requested number of clusters. Reduced automatically when "
+        "the repo has fewer embedded symbols than clusters.",
+    ),
+) -> list[ClusterItem]:
+    """Partition the repo's symbol embeddings into ``n`` semantic clusters.
+
+    Powers semantic *layers* in TheForge's knowledge-graph viewer. K-means
+    (k-means++ seeded, NumPy-only) over the L2-normalised per-repo vectors.
+    A hard cap of 50k symbols keeps the precompute bounded; symbols beyond
+    the cap are deterministically truncated.
+
+    Args:
+        name: Repo slug.
+        n: Requested cluster count (1–64; default 8).
+
+    Returns:
+        ``[{cluster_id, label, fqns[]}]`` sorted by descending member count.
+        The union of all ``fqns`` equals the embedded symbols processed.
+
+    Raises:
+        HTTPException 404: Repo not indexed (no ``.duck`` file).
+        HTTPException 503: Repo indexed but embeddings unavailable.
+    """
+    from ..services.neighbors import (
+        NeighborsNotFoundError,
+        NeighborsUnavailableError,
+        compute_clusters,
+    )
+
+    duck_path = Path(settings.vec_db_path_for_repo(name))
+
+    try:
+        results = compute_clusters(
+            repo=name, duck_path=duck_path, n_clusters=n
+        )
+    except NeighborsNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "repo_not_indexed", "message": str(exc)},
+        )
+    except NeighborsUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "clusters_unavailable", "message": str(exc)},
+        )
+
+    return [
+        ClusterItem(cluster_id=c.cluster_id, label=c.label, fqns=c.fqns)
+        for c in results
+    ]
