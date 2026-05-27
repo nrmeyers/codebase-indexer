@@ -219,7 +219,10 @@ def test_structural_search_offset_injects_skip() -> None:
 
     executed: str = conn.execute.call_args[0][0]
     assert "SKIP 50" in executed.upper()
-    assert "LIMIT 100" in executed.upper()
+    # The engine fetches one probe row beyond the page (limit + 1 = 101) so the
+    # impl can derive ``has_more`` without a second COUNT query; the extra row
+    # is trimmed before the response so the caller still sees exactly 100.
+    assert "LIMIT 101" in executed.upper()
 
 
 def test_structural_search_offset_pages_without_overlap() -> None:
@@ -269,6 +272,71 @@ def test_structural_search_preserves_user_supplied_limit() -> None:
     executed: str = conn.execute.call_args[0][0]
     assert "SKIP" not in executed.upper()
     assert "LIMIT 5" in executed.upper()
+
+
+def test_structural_search_has_more_true_when_next_page_exists() -> None:
+    """LE-169a: has_more is True when matching rows exist beyond the page.
+
+    With 1000 rows and a page of 300 at offset 0, another page exists. The
+    response must echo offset/limit and set has_more without over-returning
+    (exactly 300 rows reach the caller — the probe row is trimmed).
+    """
+    dataset = [{"name": f"fn_{i}"} for i in range(1000)]
+    q = "MATCH (n:Function) RETURN n.name AS name"
+    with patch("app.routers.search._get_conn", return_value=_paging_mock_conn(dataset)):
+        resp = client.get(
+            "/search/structural", params={"q": q, "limit": 300, "offset": 0}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["row_count"] == 300
+    assert len(body["nodes"]) == 300
+    assert body["offset"] == 0
+    assert body["limit"] == 300
+    assert body["has_more"] is True
+
+
+def test_structural_search_has_more_false_on_final_page() -> None:
+    """has_more is False when the page reaches the end of the dataset."""
+    dataset = [{"name": f"fn_{i}"} for i in range(250)]
+    q = "MATCH (n:Function) RETURN n.name AS name"
+    with patch("app.routers.search._get_conn", return_value=_paging_mock_conn(dataset)):
+        resp = client.get(
+            "/search/structural", params={"q": q, "limit": 300, "offset": 0}
+        )
+    body = resp.json()
+    assert body["row_count"] == 250
+    assert body["has_more"] is False
+
+
+def test_structural_search_has_more_false_for_caller_supplied_limit() -> None:
+    """When the caller hand-writes LIMIT, the service doesn't claim has_more."""
+    dataset = [{"name": f"fn_{i}"} for i in range(50)]
+    with patch("app.routers.search._get_conn", return_value=_paging_mock_conn(dataset)):
+        resp = client.get(
+            "/search/structural",
+            params={"q": "MATCH (n) RETURN n.name AS name LIMIT 5"},
+        )
+    body = resp.json()
+    assert body["has_more"] is False
+    assert body["offset"] == 0
+
+
+def test_structural_search_default_response_is_backward_compatible() -> None:
+    """A default call still returns the original fields; new fields are additive."""
+    rows = [{"name": "foo"}]
+    with patch("app.routers.search._get_conn", return_value=_mock_conn(rows)):
+        resp = client.get(
+            "/search/structural", params={"q": "MATCH (n:Function) RETURN n.name AS name"}
+        )
+    body = resp.json()
+    # Original contract preserved.
+    assert body["row_count"] == 1
+    assert "nodes" in body and "relationships" in body
+    # Additive paging fields present with sane defaults.
+    assert body["offset"] == 0
+    assert body["limit"] == 500
+    assert body["has_more"] is False
 
 
 # ---------------------------------------------------------------------------

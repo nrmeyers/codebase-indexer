@@ -400,6 +400,17 @@ class StructuralSearchResponse(BaseModel):
     nodes: list[dict[str, Any]]
     relationships: list[dict[str, Any]]
     row_count: int
+    # Paging metadata (LE-169a). Additive — pre-paging clients that read only
+    # ``nodes``/``relationships``/``row_count`` are unaffected. ``offset`` and
+    # ``limit`` echo the effective page window; ``has_more`` is True when at
+    # least one matching row exists beyond this page, so consumers can drive a
+    # "load next page" loop without a separate count query. ``has_more`` is
+    # only meaningful when the service applied its own SKIP/LIMIT (i.e. the
+    # caller did not hand-write a LIMIT clause — see the router docstring); for
+    # caller-supplied LIMIT queries it is always False.
+    offset: int = 0
+    limit: int = 500
+    has_more: bool = False
 
 
 # ---------------------------------------------------------------------------

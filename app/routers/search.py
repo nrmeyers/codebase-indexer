@@ -301,7 +301,13 @@ def structural_search(
             The engine-side fetch stays bounded at ``offset + limit`` (≤ 5000).
 
     Returns:
-        StructuralSearchResponse: Nodes, relationships, and row count.
+        StructuralSearchResponse: Nodes, relationships, row count, plus
+            additive paging metadata — ``offset`` and ``limit`` echo the
+            effective page window, and ``has_more`` is True when at least one
+            matching row exists beyond this page (so consumers can page the
+            full graph without a separate count query). ``has_more`` is only
+            meaningful for service-applied paging; when the caller hand-writes
+            their own LIMIT it is always False.
 
     Raises:
         HTTPException: 422 when the Cypher query is malformed.
@@ -355,16 +361,26 @@ def _structural_search_impl(
     # Query-capped) then skips ``offset``, so at most ``limit`` rows reach the
     # caller. Clients that hand-write their own LIMIT keep full pagination
     # control (the historical contract — see the docstring) and bypass this.
-    if not _re.search(r"\bLIMIT\b", cypher, _re.IGNORECASE):
+    # ``has_more`` is only meaningful for service-applied paging (the caller
+    # didn't hand-write a LIMIT). Default values cover the caller-supplied case.
+    service_paged = not _re.search(r"\bLIMIT\b", cypher, _re.IGNORECASE)
+    safe_limit = max(1, min(int(limit), 5000))
+    safe_offset = max(0, min(int(offset), 5000))
+    # Number of rows actually requested from the engine. When the service owns
+    # paging we fetch ONE extra row (``limit + 1``, still hard-capped at 5000):
+    # if the engine returns more than ``safe_limit`` rows we know another page
+    # exists. This avoids a second COUNT query over an arbitrary Cypher graph
+    # while keeping the engine-side fetch bounded.
+    fetch_limit = safe_limit
+    if service_paged:
         # Defensive clamp: the Query() validators already bound these, but the
         # impl is also called directly (tests / internal callers) where the
         # bounds aren't enforced. Never let an unbounded fetch through.
-        safe_limit = max(1, min(int(limit), 5000))
-        safe_offset = max(0, min(int(offset), 5000))
+        fetch_limit = min(safe_limit + 1, 5000)
         if safe_offset:
-            cypher = f"{cypher}\nSKIP {safe_offset} LIMIT {safe_limit}"
+            cypher = f"{cypher}\nSKIP {safe_offset} LIMIT {fetch_limit}"
         else:
-            cypher = f"{cypher}\nLIMIT {safe_limit}"
+            cypher = f"{cypher}\nLIMIT {fetch_limit}"
 
     try:
         conn = _get_conn(repo)
@@ -373,6 +389,14 @@ def _structural_search_impl(
         raise  # e.g. 404 from _resolve_db_path — preserve status code
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Cypher error: {exc}") from exc
+
+    # Derive paging metadata, then trim the probe row so the caller still sees
+    # exactly ``safe_limit`` rows (the +1 was only a "is there more?" sentinel).
+    has_more = False
+    if service_paged:
+        has_more = len(rows) > safe_limit
+        if has_more:
+            rows = rows[:safe_limit]
 
     nodes: list[dict[str, Any]] = []
     rels: list[dict[str, Any]] = []
@@ -398,6 +422,9 @@ def _structural_search_impl(
         nodes=nodes,
         relationships=rels,
         row_count=len(rows),
+        offset=safe_offset if service_paged else 0,
+        limit=safe_limit,
+        has_more=has_more,
     )
 
 
