@@ -304,6 +304,85 @@ def test_context_bundle_seeds_implementation_over_scripts(tmp_path: Path) -> Non
     )
 
 
+def test_context_bundle_symbols_are_relevance_ordered(tmp_path: Path) -> None:
+    """LE-182: ``symbols`` must come back in relevance order — the top semantic
+    hit at the FRONT, ahead of alphabetically-earlier call-graph neighbours.
+
+    Reproduces the live bug: the bundle returned ``sorted(all_symbols)``
+    (alphabetical), so a high-signal seed like ``…zero_retrieval_refusal.*``
+    sat far below alphabetically-earlier neighbours (``api_server``,
+    ``audit_trail`` …). A consumer truncating by array order dropped the real
+    hit before it reached the model.
+    """
+    src_file = tmp_path / "impl.py"
+    src_file.write_text("def evaluate():\n    return 0.30\n")
+
+    # The true top hit. Its FQN sorts LATE alphabetically (z…), so under the
+    # old alphabetical ordering it landed at the bottom of ``symbols``.
+    top_hit = "myrepo.src.services.orchestration.zero_retrieval_refusal.evaluateRetrievalSignal"
+    # Lower-ranked seeds whose FQNs sort EARLIER alphabetically (a…).
+    seed_b = "myrepo.src.services.audit_trail.auditChatTurnRefused"
+    seed_c = "myrepo.src.services.api_server.broadcast"
+    # A call-graph neighbour of the top hit, alphabetically earliest of all.
+    neighbour = "myrepo.src.services.aaa_helper.format"
+
+    seed = [
+        {"qualified_name": top_hit, "score": 0.83, "node_id": top_hit, "name": "evaluateRetrievalSignal", "type": "Function"},
+        {"qualified_name": seed_b, "score": 0.40, "node_id": seed_b, "name": "auditChatTurnRefused", "type": "Function"},
+        {"qualified_name": seed_c, "score": 0.35, "node_id": seed_c, "name": "broadcast", "type": "Function"},
+    ]
+    callee_map = {top_hit: [neighbour]}
+    source_rows = [
+        {"qualified_name": qn, "start_line": 1, "end_line": 2, "path": str(src_file)}
+        for qn in (top_hit, seed_b, seed_c, neighbour)
+    ]
+    conn = _mock_conn_with_calls(callee_map, source_rows)
+
+    with (
+        patch(
+            "app.routers.search._semantic_search_impl",
+            return_value=_semantic_response(seed),
+        ),
+        patch("app.routers.context_bundle._get_conn", return_value=conn),
+    ):
+        resp = client.post(
+            "/context-bundle",
+            json={
+                "repo_path": str(tmp_path),
+                "task_description": "Where is the zero retrieval refusal gate implemented?",
+                "k": 20,
+                "depth": 1,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    symbols = body["symbols"]
+
+    # The top semantic hit must be FIRST — not buried alphabetically.
+    assert symbols[0] == top_hit, f"top hit not at front: {symbols}"
+
+    # Every seed must rank ahead of the pure call-graph neighbour, even though
+    # the neighbour sorts alphabetically first (aaa_helper).
+    assert symbols.index(top_hit) < symbols.index(neighbour)
+    assert symbols.index(seed_b) < symbols.index(neighbour)
+    assert symbols.index(seed_c) < symbols.index(neighbour)
+
+    # Seed ordering follows merged score descending.
+    assert symbols.index(top_hit) < symbols.index(seed_b) < symbols.index(seed_c)
+
+    # Additive scores field (backward-compatible) is present and parallel to
+    # ``symbols``: ``symbols`` equals the score-descending order of ``scores``.
+    scores = body["scores"]
+    assert set(scores) == set(symbols)
+    assert scores[top_hit] >= scores[seed_b] >= scores[seed_c]
+    # Pure neighbour scores strictly below the lowest seed.
+    assert scores[neighbour] < scores[seed_c]
+    # symbols is exactly sorted(scores, by value desc, tie-break FQN).
+    expected = sorted(scores, key=lambda s: (-scores[s], s))
+    assert symbols == expected
+
+
 def test_context_bundle_503_when_semantic_search_unavailable(tmp_path: Path) -> None:
     """When the semantic seed search raises, the endpoint returns 503."""
     with patch(

@@ -166,19 +166,34 @@ class ContextBundleResponse(BaseModel):
     """Response body for ``POST /context-bundle``.
 
     Attributes:
-        symbols: Every qualified name in the bundle (seeds + expansion).
+        symbols: Every qualified name in the bundle, in RELEVANCE order
+            (LE-182). Semantic/boost seeds come first ranked by their merged
+            score (descending), then call-graph-expansion neighbours ranked by
+            hop distance and originating-seed score. A consumer that truncates
+            this list to a token budget by taking the front therefore keeps
+            the highest-signal symbols. (Was alphabetical pre-LE-182, which
+            caused the orchestrator to truncate the true top hits out of the
+            prompt.)
         source_snippets: Map of qualified name → source code. Empty string
             when the symbol's file could not be read.
         call_graph: Adjacency list ``caller → [callees]`` limited to edges
             discovered during BFS expansion.
         total_tokens: Rough estimate of token cost if every snippet were
             concatenated into a prompt.
+        scores: Map of qualified name → relevance score (LE-182, additive /
+            backward-compatible). Higher = more relevant. Seeds carry their
+            merged semantic+boost score (test/script-penalised); neighbours
+            carry a derived score < their lowest seed so a downstream consumer
+            can truncate or re-rank with full fidelity. Parallel to
+            ``symbols``: ``symbols`` is exactly ``sorted(scores, by value
+            desc)``.
     """
 
     symbols: list[str]
     source_snippets: dict[str, str]
     call_graph: dict[str, list[str]]
     total_tokens: int
+    scores: dict[str, float] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +379,109 @@ def _truncate_to_budget(
             pruned_graph[caller] = kept_callees
 
     return kept, snippets, pruned_graph, current
+
+
+# ---------------------------------------------------------------------------
+# Relevance ordering (LE-182)
+# ---------------------------------------------------------------------------
+#
+# The endpoint historically returned ``symbols=sorted(all_symbols)`` —
+# alphabetical by qualified name. The merged seed ranking computed in the
+# route (semantic cosine + lexical boosts, test/script-penalised) was used
+# only to pick WHICH seeds to expand, then discarded. A consumer that
+# truncates the bundle to a token budget by taking it in array order would
+# keep ``api-server`` / ``audit-trail`` / ``errors`` (alphabetically first)
+# and drop the true top hits (e.g. ``…zero-retrieval-refusal.*``) before they
+# reach the model. ``compute_symbol_scores`` rebuilds a per-symbol relevance
+# score so the response can be ordered correctly AND surface scores to
+# downstream consumers.
+
+# Per-hop decay applied to a neighbour's inherited seed score. A neighbour one
+# hop from a seed inherits seed_score * NEIGHBOR_HOP_DECAY; two hops, that
+# squared; and so on. Chosen so even a direct callee of the strongest seed
+# sorts strictly below the weakest *seed* (the seed floor is pinned below):
+# pure neighbours never outrank a real seed.
+_NEIGHBOR_HOP_DECAY = 0.5
+
+
+def compute_symbol_scores(
+    *,
+    all_symbols: set[str],
+    seed_scores: dict[str, float],
+    call_graph: dict[str, list[str]],
+    symbol_depth: dict[str, int],
+) -> dict[str, float]:
+    """Assign every symbol in the bundle a relevance score for ordering.
+
+    Seeds (``symbol_depth == 0``) keep their merged semantic+boost score from
+    the route (already test/script-penalised). Pure call-graph neighbours
+    inherit a decayed fraction of the best score among the seeds that reach
+    them, clamped strictly below the lowest seed score so seeds always precede
+    neighbours regardless of their absolute decayed value.
+
+    Args:
+        all_symbols: Full symbol set (seeds + BFS neighbours).
+        seed_scores: ``{seed_qn → merged_score}`` from the route's ranking.
+        call_graph: ``{caller → [callees]}`` from BFS expansion.
+        symbol_depth: ``{symbol → hop_distance}`` (0 = seed).
+
+    Returns:
+        ``{symbol → score}`` covering every member of ``all_symbols``. Higher
+        is more relevant; seeds rank above all pure neighbours.
+    """
+    scores: dict[str, float] = {}
+
+    # 1. Seeds keep their merged score. A seed missing from seed_scores
+    #    (defensive — shouldn't happen) falls back to a small positive value.
+    seeds = [s for s in all_symbols if symbol_depth.get(s, 0) == 0]
+    for s in seeds:
+        scores[s] = float(seed_scores.get(s, 0.01))
+
+    # Floor that all neighbours must sort below. When there are no seed
+    # scores (degenerate), use a small constant so neighbours still order
+    # deterministically among themselves.
+    seed_floor = min((scores[s] for s in seeds), default=0.01)
+    # Reserve a band strictly below the lowest seed for neighbours.
+    neighbor_ceiling = seed_floor * 0.99 if seed_floor > 0 else 0.0
+
+    # 2. Neighbours: propagate the best inbound score along call-graph edges,
+    #    BFS-ordered by hop depth so a parent's score is settled before its
+    #    children consume it. Reverse-map callee → [callers] for lookup.
+    callers_of: dict[str, list[str]] = {}
+    for caller, callees in call_graph.items():
+        for c in callees:
+            callers_of.setdefault(c, []).append(caller)
+
+    neighbours = sorted(
+        (s for s in all_symbols if symbol_depth.get(s, 0) > 0),
+        key=lambda s: symbol_depth.get(s, 0),
+    )
+    for sym in neighbours:
+        parents = callers_of.get(sym, [])
+        best_parent = max(
+            (scores.get(p, 0.0) for p in parents),
+            default=seed_floor,
+        )
+        decayed = best_parent * _NEIGHBOR_HOP_DECAY
+        # Clamp into the neighbour band so no neighbour can equal/exceed a seed.
+        scores[sym] = min(decayed, neighbor_ceiling) if neighbor_ceiling > 0 else decayed
+
+    # 3. Any symbol not covered above (defensive) gets the floor of the band.
+    for s in all_symbols:
+        scores.setdefault(s, 0.0)
+
+    return scores
+
+
+def order_symbols_by_score(
+    symbols: set[str], scores: dict[str, float]
+) -> list[str]:
+    """Return ``symbols`` ordered by score descending, ties broken by FQN.
+
+    Tie-break on qualified name keeps the output deterministic (important for
+    test stability and reproducible bundles).
+    """
+    return sorted(symbols, key=lambda s: (-scores.get(s, 0.0), s))
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +1011,11 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     Raises:
         HTTPException: 503 when semantic search is unavailable.
     """
+    # Merged seed scores survive out of the seeding ``try`` block so the
+    # final response can be ordered by relevance and surface per-symbol
+    # scores (LE-182). Keyed by the qualified names actually chosen as seeds.
+    seed_scores: dict[str, float] = {}
+
     # 0. Classify retrieval intent and apply per-intent k/depth overrides.
     # The caller can pin an intent explicitly (e.g. an agent that already
     # knows it's doing a conceptual summary); otherwise we classify from
@@ -1145,6 +1268,21 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             except Exception:
                 # Non-fatal — preserve merged order on any rerank failure.
                 pass
+
+        # Capture the merged relevance score for each chosen seed so the
+        # response can be ordered + scored (LE-182). When a listwise rerank
+        # reordered ``seed_symbols``, mirror that ordering in the scores by
+        # assigning a monotonically-decreasing score (the rerank intent is
+        # that earlier = more relevant); otherwise keep the merged scores so
+        # the absolute values stay meaningful to downstream consumers.
+        if settings.RERANK_ENABLED and req.rerank and seed_symbols:
+            n = len(seed_symbols)
+            for i, qn in enumerate(seed_symbols):
+                # Spread reranked seeds across (0, top_semantic] preserving order.
+                seed_scores[qn] = top_semantic * (1.0 - i / (n + 1))
+        else:
+            for qn in seed_symbols:
+                seed_scores[qn] = scored_seeds.get(qn, 0.01)
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -1191,9 +1329,25 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             budget=_TOKEN_BUDGET,
         )
 
+    # 5. Relevance ordering (LE-182). Score every surviving symbol — seeds
+    #    keep their merged semantic+boost score, neighbours inherit a decayed
+    #    fraction clamped below the lowest seed — then emit ``symbols`` in
+    #    score-descending order so a consumer that truncates by array order
+    #    keeps the highest-signal symbols. ``scores`` is surfaced additively
+    #    for downstream re-ranking. Truncation may have dropped symbols, so we
+    #    score the final survivor set.
+    scores = compute_symbol_scores(
+        all_symbols=all_symbols,
+        seed_scores=seed_scores,
+        call_graph=call_graph,
+        symbol_depth=symbol_depth,
+    )
+    ordered_symbols = order_symbols_by_score(all_symbols, scores)
+
     return ContextBundleResponse(
-        symbols=sorted(all_symbols),
+        symbols=ordered_symbols,
         source_snippets=source_snippets,
         call_graph=call_graph,
         total_tokens=total_tokens,
+        scores=scores,
     )
