@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     # SQLite file backing the persistent job store. Created on first startup.
     # Use ``:memory:`` in tests via environment override.
     JOBS_DB_PATH: str = ".cgr/jobs.sqlite"
+    # LE-143: heartbeat reconciliation of orphaned running jobs
+    JOB_HEARTBEAT_INTERVAL_SECONDS: int = 60
+    JOB_STALENESS_THRESHOLD_SECONDS: int = 300
 
     # --- Prometheus metrics (Phase 4) ---
     METRICS_ENABLED: bool = True

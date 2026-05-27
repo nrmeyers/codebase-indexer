@@ -579,6 +579,41 @@ def is_cancel_requested(job_id: str) -> bool:
     return bool(row[0]) if row is not None else False
 
 
+def list_stale_running_jobs(*, staleness_threshold_seconds: int = 300) -> list[dict]:
+    """Return all running jobs that haven't updated in N seconds.
+
+    LE-143: heartbeat reconciliation query. Identifies orphaned/stuck running
+    jobs whose elapsed time exceeds the staleness threshold.
+
+    Args:
+        staleness_threshold_seconds: Mark as stale if (now - updated_at) exceeds this.
+
+    Returns:
+        List of job dicts with job_id, started_at, updated_at, etc.
+    """
+    conn = _require_conn()
+    now = time.time()
+    threshold_timestamp = now - staleness_threshold_seconds
+
+    rows = conn.execute(
+        """
+        SELECT job_id, started_at, updated_at, status, error
+        FROM jobs
+        WHERE status = 'running' AND updated_at < ?
+        ORDER BY updated_at ASC
+        """,
+        (threshold_timestamp,),
+    ).fetchall()
+
+    # Convert rows to dicts for consistent access by callers
+    result = []
+    if rows:
+        cols = ("job_id", "started_at", "updated_at", "status", "error")
+        for row in rows:
+            result.append(dict(zip(cols, row)))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # queries
 # ---------------------------------------------------------------------------

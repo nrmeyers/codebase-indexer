@@ -422,7 +422,69 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         daemon=True,
     ).start()
 
+    # --- Phase 10: Job heartbeat reconciliation (LE-143) ---
+    # Periodic background task that marks any running job that hasn't updated
+    # in N seconds as stale/failed. Prevents phantom jobs from showing in the
+    # queue forever when a worker crashes mid-run.
+    _job_heartbeat_task: asyncio.Task | None = None
+
+    # Validate and use env-var settings for interval and staleness threshold
+    _heartbeat_interval = settings.JOB_HEARTBEAT_INTERVAL_SECONDS
+    _staleness_threshold = settings.JOB_STALENESS_THRESHOLD_SECONDS
+
+    # Sanity bounds: interval must be at least 10s; threshold at least interval
+    if _heartbeat_interval < 10:
+        _log.warning(
+            "JOB_HEARTBEAT_INTERVAL_SECONDS=%d is too small (min 10s), "
+            "using default 60s", _heartbeat_interval
+        )
+        _heartbeat_interval = 60
+    if _staleness_threshold < _heartbeat_interval:
+        _log.warning(
+            "JOB_STALENESS_THRESHOLD_SECONDS=%d is less than interval %ds, "
+            "using default 300s", _staleness_threshold, _heartbeat_interval
+        )
+        _staleness_threshold = 300
+
+    async def _periodic_job_heartbeat() -> None:
+        """Background task: periodically reconcile stale running jobs."""
+        from .routers.index import reconcile_stale_running_jobs
+
+        while True:
+            try:
+                await asyncio.sleep(_heartbeat_interval)
+                reconciled = reconcile_stale_running_jobs(
+                    staleness_threshold_seconds=_staleness_threshold
+                )
+                # Log only if reconciliation happened (avoid spam)
+                if reconciled > 0:
+                    _log.info(
+                        "job-heartbeat: reconciled %d stale job(s)", reconciled
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as _exc:  # noqa: BLE001
+                _log.warning(
+                    "job-heartbeat: reconciliation failed (will retry in %ds): %s",
+                    _heartbeat_interval, _exc
+                )
+
+    _job_heartbeat_task = asyncio.create_task(_periodic_job_heartbeat())
+    _log.info(
+        "job-heartbeat: periodic reconciliation task started "
+        "(interval=%ds, staleness_threshold=%ds)",
+        _heartbeat_interval, _staleness_threshold
+    )
+
     yield
+
+    # Shutdown: cancel the job heartbeat task.
+    if _job_heartbeat_task is not None:
+        _job_heartbeat_task.cancel()
+        try:
+            await _job_heartbeat_task
+        except asyncio.CancelledError:
+            pass
 
     # Shutdown: cancel the periodic S3 snapshot task.
     if _s3_snapshot_task is not None:

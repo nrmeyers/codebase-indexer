@@ -2091,6 +2091,75 @@ def cleanup_stale_locks() -> int:
     return removed
 
 
+def reconcile_stale_running_jobs(
+    staleness_threshold_seconds: int = 300,
+) -> int:
+    """Mark any running job that hasn't updated in N seconds as stale/failed.
+
+    LE-143: periodic heartbeat reconciliation of orphaned running jobs.
+    Transitioned jobs are also updated in the persistent jobs_store.
+    Returns the number of jobs reconciled.
+
+    Args:
+        staleness_threshold_seconds: Mark a job as stale if (now - updated_at)
+            exceeds this threshold. Default 300 (5 minutes).
+    """
+    now = time.time()
+    reconciled = 0
+
+    # Check both the in-memory _jobs dict and the persistent jobs_store
+    # for stale running jobs.
+
+    # 1. In-memory reconciliation (running jobs not yet written to disk)
+    for job_id, job in list(_jobs.items()):
+        if job.status == "running":
+            elapsed = now - job.started_at
+            if elapsed > staleness_threshold_seconds:
+                job.status = "failed"
+                job.error = (
+                    f"Job marked stale by heartbeat reconciliation "
+                    f"({int(elapsed)}s without progress)."
+                )
+                job.finished_at = now
+                reconciled += 1
+                logger.warning(
+                    "Reconciled stale running job %s (elapsed %.0fs)",
+                    job_id[:8], elapsed,
+                )
+
+    # 2. Persistent store reconciliation (long-running or surviving jobs)
+    try:
+        stale_rows = _jobs_store.list_stale_running_jobs(
+            staleness_threshold_seconds=staleness_threshold_seconds
+        )
+        for row in stale_rows:
+            job_id = row.get("job_id")
+            if job_id and job_id not in _jobs:
+                # Job not in memory — was already reaped or is a survivor from a prior restart.
+                _jobs_store.mark_failed(
+                    job_id,
+                    error=(
+                        f"Job marked stale by heartbeat reconciliation "
+                        f"({int(now - row.get('started_at', now))}s without progress)."
+                    ),
+                    terminal_status="failed",
+                )
+                reconciled += 1
+                logger.warning(
+                    "Reconciled stale persistent job %s (elapsed %.0fs)",
+                    job_id[:8], now - row.get("started_at", now),
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "reconcile_stale_running_jobs: persistent store reconciliation failed "
+            "(non-fatal): %s", exc
+        )
+
+    if reconciled:
+        logger.info("Reconciled %d stale job(s) by heartbeat.", reconciled)
+    return reconciled
+
+
 # ---------------------------------------------------------------------------
 # GET /stats/{repo} — per-repo graph breakdown
 # ---------------------------------------------------------------------------

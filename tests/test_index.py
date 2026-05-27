@@ -507,3 +507,119 @@ def test_get_status_with_live_embed_progress(tmp_path: Path) -> None:
     finally:
         if original_path:
             index_module.Path = original_path  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Job heartbeat reconciliation (LE-143)
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_stale_running_jobs_in_memory() -> None:
+    """Verify in-memory job reconciliation for stale running jobs.
+
+    A running job that exceeds the staleness threshold should be marked as
+    'failed' with an appropriate error message.
+    """
+    import time
+
+    from app.routers.index import reconcile_stale_running_jobs
+
+    # Create a running job and backdate its start time
+    job_id = "test-stale-job-1"
+    now = time.time()
+    stale_job = _jobs[job_id] = type("Job", (), {
+        "job_id": job_id,
+        "status": "running",
+        "started_at": now - 400,  # 400 seconds ago (> 300s threshold)
+        "finished_at": None,
+        "error": None,
+    })()
+
+    # Reconcile with a 300s threshold
+    reconciled = reconcile_stale_running_jobs(staleness_threshold_seconds=300)
+
+    # Should have reconciled 1 job
+    assert reconciled == 1
+
+    # Job should now be marked as failed
+    job = _jobs[job_id]
+    assert job.status == "failed"
+    assert "stale by heartbeat reconciliation" in (job.error or "")
+    assert job.finished_at is not None
+
+
+def test_reconcile_stale_running_jobs_ignores_recent() -> None:
+    """Jobs not past the staleness threshold should be left alone."""
+    import time
+
+    from app.routers.index import reconcile_stale_running_jobs
+
+    job_id = "test-recent-job"
+    now = time.time()
+    recent_job = _jobs[job_id] = type("Job", (), {
+        "job_id": job_id,
+        "status": "running",
+        "started_at": now - 100,  # Only 100 seconds ago (< 300s threshold)
+        "finished_at": None,
+        "error": None,
+    })()
+
+    reconciled = reconcile_stale_running_jobs(staleness_threshold_seconds=300)
+
+    # Should not have reconciled anything
+    assert reconciled == 0
+
+    # Job should still be running
+    job = _jobs[job_id]
+    assert job.status == "running"
+    assert job.error is None
+
+
+def test_reconcile_stale_running_jobs_persistent_store(tmp_path: Path) -> None:
+    """Verify reconciliation of stale jobs in the persistent store.
+
+    Creates a running job directly in jobs_store with an old updated_at
+    timestamp, then verifies that reconcile_stale_running_jobs() finds and
+    marks it as failed.
+    """
+    import time
+
+    from app.routers.index import reconcile_stale_running_jobs
+
+    # Create a stale job directly in the persistent store
+    old_timestamp = time.time() - 400  # 400 seconds ago
+    persisted = jobs_store.create_job(
+        kind="index",
+        actor_oid="",
+        actor_email="",
+        repo_path=str(tmp_path),
+        force_reindex=False,
+        exclude_paths=frozenset(),
+        worker_token="test-worker",
+        initial_status="running",
+        initial_phase="parsing",
+    )
+    job_id = persisted.job_id
+
+    # Backdate the job in the database by directly updating updated_at
+    import sqlite3
+
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+        (old_timestamp, job_id),
+    )
+    conn.commit()
+
+    # Reconcile with a 300s threshold
+    reconciled = reconcile_stale_running_jobs(staleness_threshold_seconds=300)
+
+    # Should have reconciled 1 job from the persistent store
+    assert reconciled == 1
+
+    # Verify the job was marked as failed in the store
+    resp = client.get(f"/index/{job_id}/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert "stale by heartbeat reconciliation" in (body.get("error") or "")
