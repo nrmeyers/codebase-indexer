@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import subprocess
 import sys
 import threading
@@ -39,7 +40,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel
 
-from ..config import settings
+from ..config import settings, slugify_repo
 from .. import metrics as _metrics
 from ..services import jobs_store as _jobs_store
 from ..models import (
@@ -2538,11 +2539,111 @@ def _delete_repo_meta(repo: str) -> str:
     return "not applicable (in duckdb)"
 
 
+def _delete_tantivy_index(repo: str) -> str:
+    """Delete Tantivy full-text index directory for the repo.
+
+    The Tantivy index lives at ``.cgr/repos/{slug}.tantivy/`` as a sibling
+    to the ``.db`` and ``.duck`` files.
+
+    Returns status string: "deleted", "not found", or "error: <msg>".
+    """
+    try:
+        # Build the per-repo tantivy directory path.
+        db_dir = Path(settings.LADYBUG_DB_DIR)
+        slugged_repo = f"{slugify_repo(repo)}.tantivy"
+        tantivy_dir = db_dir / slugged_repo
+
+        if not tantivy_dir.exists():
+            return "not found"
+
+        # Safety guard: ensure the directory is scoped to the per-repo artifact root.
+        # Resolve to absolute paths to prevent path traversal.
+        try:
+            resolved_tantivy = tantivy_dir.resolve()
+            resolved_db_dir = db_dir.resolve()
+            if not str(resolved_tantivy).startswith(str(resolved_db_dir)):
+                msg = f"Path traversal attempt blocked: {resolved_tantivy} not under {resolved_db_dir}"
+                logger.warning("_delete_tantivy_index(%s) failed: %s", repo, msg)
+                return f"error: {msg}"
+        except Exception as exc:
+            msg = f"Path resolution failed: {str(exc)}"
+            logger.warning("_delete_tantivy_index(%s) failed: %s", repo, msg)
+            return f"error: {msg}"
+
+        # Recursively delete the directory and all its contents.
+        shutil.rmtree(tantivy_dir, ignore_errors=False)
+        logger.info("Deleted tantivy index: %s", tantivy_dir)
+        return f"deleted directory"
+    except Exception as exc:
+        msg = str(exc)
+        logger.warning("_delete_tantivy_index(%s) failed: %s", repo, msg)
+        return f"error: {msg}"
+
+
+def _delete_clone_directory(repo: str) -> str:
+    """Delete cloned repository directory if it exists.
+
+    The clone directory lives at ``.cgr/clones/{owner}__{name}`` and is created
+    when indexing a GitHub repo via POST /github/index.
+
+    This is a best-effort delete: we search for any directory under ``.cgr/clones``
+    that appears to be associated with this repo slug. Since the clone directory
+    name is ``{owner}__{name}`` (derived from the full_name), we cannot reliably
+    map a repo slug back to the clone path without scanning the directory.
+
+    Returns status string: "deleted", "not found", or "error: <msg>".
+    """
+    try:
+        clones_dir = Path(".cgr/clones")
+        if not clones_dir.exists():
+            return "not found"
+
+        # Search for clone directories matching this repo slug in the directory name.
+        # The clone directory naming scheme is {owner}__{name}, where name is derived
+        # from the repo path. We match against the slug as a simple heuristic.
+        deleted_dirs = []
+        for clone_path in clones_dir.iterdir():
+            if not clone_path.is_dir():
+                continue
+
+            # Extract the repo name part from the clone directory name (after __).
+            # For example, {owner}__my-repo => my-repo.
+            if "__" in clone_path.name:
+                clone_repo_name = clone_path.name.split("__", 1)[1]
+                # Check if this clone's repo name matches our target repo slug.
+                if slugify_repo(clone_repo_name) == repo:
+                    # Safety guard: ensure the directory is under the clones root.
+                    try:
+                        resolved_clone = clone_path.resolve()
+                        resolved_clones = clones_dir.resolve()
+                        if not str(resolved_clone).startswith(str(resolved_clones)):
+                            msg = f"Path traversal attempt blocked: {resolved_clone} not under {resolved_clones}"
+                            logger.warning("_delete_clone_directory(%s) failed: %s", repo, msg)
+                            continue
+                    except Exception as exc:
+                        msg = f"Path resolution failed: {str(exc)}"
+                        logger.warning("_delete_clone_directory(%s) failed: %s", repo, msg)
+                        continue
+
+                    # Delete the clone directory.
+                    shutil.rmtree(clone_path, ignore_errors=False)
+                    deleted_dirs.append(str(clone_path))
+                    logger.info("Deleted clone directory: %s", clone_path)
+
+        if deleted_dirs:
+            return f"deleted {len(deleted_dirs)} directory(ies)"
+        return "not found"
+    except Exception as exc:
+        msg = str(exc)
+        logger.warning("_delete_clone_directory(%s) failed: %s", repo, msg)
+        return f"error: {msg}"
+
+
 @router.delete("/index/{repo}", response_model=DeleteIndexResponse)
 def delete_index(repo: str) -> DeleteIndexResponse:
     """Cascade delete: remove a repo's index and all related resources.
 
-    Cleans up 7 resource types in a best-effort manner:
+    Cleans up 9 resource types in a best-effort manner:
     1. LadybugDB graph file + WAL/shadow sidecars
     2. DuckDB vector store + WAL sidecar
     3. S3 backup copy
@@ -2550,6 +2651,8 @@ def delete_index(repo: str) -> DeleteIndexResponse:
     5. Embed log files
     6. Job history records
     7. Repo metadata (no-op — stored in DuckDB file)
+    8. Tantivy full-text index directory
+    9. Cloned repository directory (when indexed via POST /github/index)
 
     Every cleanup step continues on error and logs at WARN; the response
     includes a summary of what happened for each resource type.
@@ -2586,6 +2689,8 @@ def delete_index(repo: str) -> DeleteIndexResponse:
     cleanup["jobs_store"] = _delete_jobs_for_repo(repo)
     cleanup["indexed_repos"] = _delete_indexed_repo_row(repo)
     cleanup["repo_meta"] = _delete_repo_meta(repo)
+    cleanup["tantivy_index"] = _delete_tantivy_index(repo)
+    cleanup["clone_directory"] = _delete_clone_directory(repo)
 
     # Build list of removed files (for backward compatibility).
     removed: list[str] = []

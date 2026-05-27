@@ -91,7 +91,7 @@ class TestDeleteIndex:
         assert "deleted" in resp.json()["cleanup"]["duckdb"]
 
     def test_cleanup_dict_includes_all_resource_types(self, tmp_path: Path) -> None:
-        """Verify response includes cleanup status for all 7 resource types."""
+        """Verify response includes cleanup status for all 9 resource types."""
         with patch("app.config.settings.LADYBUG_DB_DIR", str(tmp_path)):
             db_file = tmp_path / "test-repo.db"
             db_file.touch()
@@ -102,7 +102,7 @@ class TestDeleteIndex:
         body = resp.json()
         cleanup = body["cleanup"]
 
-        # All 8 resource types should be present (added indexed_repos in BUC-1599).
+        # All 9 resource types should be present (added tantivy_index and clone_directory).
         assert set(cleanup.keys()) == {
             "ladybug_db",
             "duckdb",
@@ -112,6 +112,8 @@ class TestDeleteIndex:
             "jobs_store",
             "indexed_repos",
             "repo_meta",
+            "tantivy_index",
+            "clone_directory",
         }
 
         # Each should have a string status
@@ -166,6 +168,71 @@ class TestDeleteIndex:
         assert resp.status_code == 200
         # embed_logs should have a status (either "not found" or "error: ...")
         assert "embed_logs" in resp.json()["cleanup"]
+
+    def test_deletes_tantivy_index_directory(self, tmp_path: Path) -> None:
+        """Delete .tantivy directory for the repo."""
+        with patch("app.config.settings.LADYBUG_DB_DIR", str(tmp_path)):
+            db_file = tmp_path / "test-repo.db"
+            db_file.touch()
+
+            # Create a .tantivy directory with some dummy content
+            tantivy_dir = tmp_path / "test-repo.tantivy"
+            tantivy_dir.mkdir()
+            (tantivy_dir / "segment.meta").write_text("dummy")
+            (tantivy_dir / "index.json").write_text("{}")
+
+            assert tantivy_dir.exists()
+
+            resp = client.delete("/index/test-repo")
+
+        assert resp.status_code == 200
+        assert not tantivy_dir.exists()
+        assert "deleted" in resp.json()["cleanup"]["tantivy_index"]
+
+    def test_tantivy_not_found_returns_status(self, tmp_path: Path) -> None:
+        """When .tantivy directory doesn't exist, return 'not found' status."""
+        with patch("app.config.settings.LADYBUG_DB_DIR", str(tmp_path)):
+            db_file = tmp_path / "test-repo.db"
+            db_file.touch()
+
+            resp = client.delete("/index/test-repo")
+
+        assert resp.status_code == 200
+        assert resp.json()["cleanup"]["tantivy_index"] == "not found"
+
+    def test_clone_not_found_returns_status(self, tmp_path: Path) -> None:
+        """When no clone directory exists, return 'not found' status."""
+        with patch("app.config.settings.LADYBUG_DB_DIR", str(tmp_path)):
+            db_file = tmp_path / "test-repo.db"
+            db_file.touch()
+
+            resp = client.delete("/index/test-repo")
+
+        assert resp.status_code == 200
+        assert resp.json()["cleanup"]["clone_directory"] == "not found"
+
+    def test_idempotent_delete_already_deleted_artifacts(self, tmp_path: Path) -> None:
+        """Deleting twice should be idempotent — no error on missing artifacts."""
+        with patch("app.config.settings.LADYBUG_DB_DIR", str(tmp_path)):
+            db_file = tmp_path / "test-repo.db"
+            db_file.touch()
+
+            tantivy_dir = tmp_path / "test-repo.tantivy"
+            tantivy_dir.mkdir()
+            (tantivy_dir / "index.json").write_text("{}")
+
+            # First delete
+            resp1 = client.delete("/index/test-repo")
+            assert resp1.status_code == 200
+
+            # Create the DB file again (since we delete it)
+            db_file.touch()
+
+            # Second delete should succeed (idempotent)
+            resp2 = client.delete("/index/test-repo")
+            assert resp2.status_code == 200
+            assert resp2.json()["cleanup"]["tantivy_index"] == "not found"
+            assert resp2.json()["ok"] is True
 
 
 class TestJobsStoreDeleteByRepo:
