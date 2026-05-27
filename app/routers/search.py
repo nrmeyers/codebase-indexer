@@ -278,7 +278,8 @@ def _clean(v: Any) -> Any:
 @router.get("/structural", response_model=StructuralSearchResponse)
 def structural_search(
     q: str = Query(description="Cypher query to execute against the graph"),
-    limit: int = Query(default=20, ge=1, le=500),
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
     repo: str | None = Query(
         default=None,
         description="Repo slug to scope the query to. Omit for first indexed DB.",
@@ -288,9 +289,16 @@ def structural_search(
 
     Args:
         q: Arbitrary Cypher query. If the query does not already contain a
-            LIMIT clause, one is appended using the ``limit`` parameter.
-        limit: Maximum rows to return (1–500). Only applied if ``q`` does
-            not already include a LIMIT clause.
+            LIMIT clause, a bounded ``SKIP {offset} LIMIT {limit}`` is appended
+            so large-graph navigation can page through results without
+            shipping the whole graph in one response.
+        limit: Maximum rows to return (1–5000). Only applied if ``q`` does
+            not already include a LIMIT clause. Raised from the historical
+            cap of 500 to support large-repo graph navigation (LE-169a).
+        offset: Skip N matching rows before returning results (cursor paging).
+            Only applied if ``q`` does not already include a LIMIT clause —
+            clients that hand-write their own SKIP/LIMIT keep full control.
+            The engine-side fetch stays bounded at ``offset + limit`` (≤ 5000).
 
     Returns:
         StructuralSearchResponse: Nodes, relationships, and row count.
@@ -301,7 +309,7 @@ def structural_search(
     _t0 = time.monotonic()
     _status_code = 200
     try:
-        return _structural_search_impl(q=q, limit=limit, repo=repo)
+        return _structural_search_impl(q=q, limit=limit, offset=offset, repo=repo)
     except HTTPException as _e:
         _status_code = _e.status_code
         raise
@@ -313,6 +321,7 @@ def _structural_search_impl(
     *,
     q: str,
     limit: int,
+    offset: int = 0,
     repo: str | None,
 ) -> StructuralSearchResponse:
     """Inner implementation for structural_search (extracted for metrics wrapping)."""
@@ -339,8 +348,23 @@ def _structural_search_impl(
     # Detect a top-level LIMIT clause using a word-boundary regex so we don't
     # match the word "limit" inside a string literal (e.g. WHERE n.name = "limit")
     # or a sub-query. A simple .upper() substring check would match literals.
-    if not _re.search(r'\bLIMIT\b', cypher, _re.IGNORECASE):
-        cypher = f"{cypher}\nLIMIT {limit}"
+    #
+    # When the caller hasn't written their own LIMIT, append a bounded
+    # SKIP/LIMIT so the engine never fetches an unbounded result set. The
+    # engine fetches at most ``offset + limit`` rows (≤ 5000 — both params are
+    # Query-capped) then skips ``offset``, so at most ``limit`` rows reach the
+    # caller. Clients that hand-write their own LIMIT keep full pagination
+    # control (the historical contract — see the docstring) and bypass this.
+    if not _re.search(r"\bLIMIT\b", cypher, _re.IGNORECASE):
+        # Defensive clamp: the Query() validators already bound these, but the
+        # impl is also called directly (tests / internal callers) where the
+        # bounds aren't enforced. Never let an unbounded fetch through.
+        safe_limit = max(1, min(int(limit), 5000))
+        safe_offset = max(0, min(int(offset), 5000))
+        if safe_offset:
+            cypher = f"{cypher}\nSKIP {safe_offset} LIMIT {safe_limit}"
+        else:
+            cypher = f"{cypher}\nLIMIT {safe_limit}"
 
     try:
         conn = _get_conn(repo)

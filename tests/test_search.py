@@ -144,6 +144,134 @@ def test_structural_search_appends_limit() -> None:
 
 
 # ---------------------------------------------------------------------------
+# /search/structural — large-graph cap + offset paging (LE-169a)
+# ---------------------------------------------------------------------------
+
+
+def _paging_mock_conn(dataset: list[dict]) -> MagicMock:
+    """Mock connection that honours SKIP/LIMIT parsed from the Cypher.
+
+    Mirrors the LadybugDB/kuzu engine behaviour for ``SKIP n LIMIT m`` so the
+    test exercises the real paging contract (offset skips rows; pages don't
+    overlap) instead of asserting on the generated query string alone.
+    """
+    col_names = list(dataset[0].keys()) if dataset else []
+
+    def execute(cypher: str, *_args, **_kwargs):
+        import re
+
+        skip_m = re.search(r"\bSKIP\s+(\d+)", cypher, re.IGNORECASE)
+        limit_m = re.search(r"\bLIMIT\s+(\d+)", cypher, re.IGNORECASE)
+        skip = int(skip_m.group(1)) if skip_m else 0
+        lim = int(limit_m.group(1)) if limit_m else len(dataset)
+        page = dataset[skip : skip + lim]
+
+        result = MagicMock()
+        result.get_column_names.return_value = col_names
+        remaining = list(page)
+        result.has_next.side_effect = lambda: bool(remaining)
+        result.get_next.side_effect = lambda: list(remaining.pop(0).values())
+        return result
+
+    conn = MagicMock()
+    conn.execute.side_effect = execute
+    return conn
+
+
+def test_structural_search_accepts_limit_above_500() -> None:
+    """LE-169a: the historical le=500 cap is raised to 5000."""
+    dataset = [{"name": f"fn_{i}", "qualified_name": f"m.fn_{i}"} for i in range(2000)]
+    with patch("app.routers.search._get_conn", return_value=_paging_mock_conn(dataset)):
+        resp = client.get(
+            "/search/structural",
+            params={"q": "MATCH (n:Function) RETURN n.name AS name", "limit": 2000},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    # >500 rows must come back — proves the cap no longer clamps at 500.
+    assert body["row_count"] == 2000
+    assert len(body["nodes"]) == 2000
+
+
+def test_structural_search_rejects_limit_above_5000() -> None:
+    """The cap is 5000 — beyond that FastAPI rejects with 422 (bounded fetch)."""
+    with patch("app.routers.search._get_conn", return_value=_paging_mock_conn([])):
+        resp = client.get(
+            "/search/structural",
+            params={"q": "MATCH (n) RETURN n", "limit": 5001},
+        )
+    assert resp.status_code == 422
+
+
+def test_structural_search_offset_injects_skip() -> None:
+    """offset>0 appends a bounded SKIP/LIMIT to a LIMIT-less query."""
+    conn = MagicMock()
+    result = MagicMock()
+    result.get_column_names.return_value = []
+    result.has_next.return_value = False
+    conn.execute.return_value = result
+
+    with patch("app.routers.search._get_conn", return_value=conn):
+        client.get(
+            "/search/structural",
+            params={"q": "MATCH (n) RETURN n", "limit": 100, "offset": 50},
+        )
+
+    executed: str = conn.execute.call_args[0][0]
+    assert "SKIP 50" in executed.upper()
+    assert "LIMIT 100" in executed.upper()
+
+
+def test_structural_search_offset_pages_without_overlap() -> None:
+    """offset=N skips N rows; consecutive pages don't overlap or duplicate."""
+    dataset = [{"name": f"fn_{i}", "qualified_name": f"m.fn_{i}"} for i in range(1000)]
+    q = "MATCH (n:Function) RETURN n.name AS name, n.qualified_name AS qualified_name"
+
+    with patch("app.routers.search._get_conn", return_value=_paging_mock_conn(dataset)):
+        page1 = client.get(
+            "/search/structural", params={"q": q, "limit": 300, "offset": 0}
+        ).json()
+        page2 = client.get(
+            "/search/structural", params={"q": q, "limit": 300, "offset": 300}
+        ).json()
+        page3 = client.get(
+            "/search/structural", params={"q": q, "limit": 300, "offset": 600}
+        ).json()
+
+    names1 = [n["name"] for n in page1["nodes"]]
+    names2 = [n["name"] for n in page2["nodes"]]
+    names3 = [n["name"] for n in page3["nodes"]]
+
+    assert names1[0] == "fn_0"
+    assert names2[0] == "fn_300"  # offset skipped exactly 300 rows
+    assert names3[0] == "fn_600"
+    assert len(names1) == len(names2) == len(names3) == 300
+    # No overlap / no duplication across pages.
+    assert set(names1).isdisjoint(names2)
+    assert set(names2).isdisjoint(names3)
+    assert set(names1).isdisjoint(names3)
+
+
+def test_structural_search_preserves_user_supplied_limit() -> None:
+    """A caller's own LIMIT keeps full control — no SKIP injection."""
+    conn = MagicMock()
+    result = MagicMock()
+    result.get_column_names.return_value = []
+    result.has_next.return_value = False
+    conn.execute.return_value = result
+
+    with patch("app.routers.search._get_conn", return_value=conn):
+        client.get(
+            "/search/structural",
+            params={"q": "MATCH (n) RETURN n LIMIT 5", "offset": 100},
+        )
+
+    executed: str = conn.execute.call_args[0][0]
+    assert "SKIP" not in executed.upper()
+    assert "LIMIT 5" in executed.upper()
+
+
+# ---------------------------------------------------------------------------
 # /search/semantic
 # ---------------------------------------------------------------------------
 
