@@ -49,6 +49,72 @@ _TOKEN_BUDGET = 12_000
 
 
 # ---------------------------------------------------------------------------
+# Test/script path down-weighting (LE-180)
+# ---------------------------------------------------------------------------
+#
+# The reproduction bug: for an NL query like "Where is the zero-retrieval
+# refusal gate implemented and what threshold does it use?", the exact-name
+# and module-keyword boosts below matched calibration *scripts* (which mention
+# "refusal", "gate", "threshold") and flooded the seed cap, evicting the real
+# implementation that /search/semantic ranks at the top (~0.83). To match
+# /search/semantic quality we (a) seed primarily from the semantic ranking
+# and (b) push test/script paths *below* implementation symbols by applying a
+# multiplicative score penalty — mirroring TheForge's orchestrator-side ~0.4x
+# test-path multiplier.
+
+# A qualified_name segment (or substring) that marks a symbol as living in a
+# test or script file. The Code Indexer stores dotted FQNs (e.g.
+# ``TheForge.scripts.calibrate-refusal.pct``,
+# ``TheForge.src.foo.bar.test.helper``), so we match against the lowercased
+# dotted FQN rather than a filesystem path.
+_TEST_SCRIPT_MARKERS = (
+    ".test.",
+    ".spec.",
+    ".tests.",
+    "tests.",
+    ".scripts.",
+    "scripts.",
+    "__tests__",
+    "__mocks__",
+    ".stories.",
+    ".bench.",
+    ".benchmark.",
+    "conftest.",
+)
+
+
+def _is_test_or_script_path(qualified_name: str) -> bool:
+    """Return True when a symbol's qualified name looks like a test or script.
+
+    Conservative substring match against the lowercased dotted FQN. We bound
+    the match to the start-of-FQN or a dotted boundary so we don't penalise an
+    implementation symbol that merely *contains* the word "test" inside a
+    longer identifier (e.g. ``runTestSuite`` in production code).
+
+    Args:
+        qualified_name: Dotted symbol FQN (e.g. ``Repo.scripts.bench.run``).
+
+    Returns:
+        True if the FQN matches any test/script marker.
+    """
+    lower = qualified_name.lower()
+    for marker in _TEST_SCRIPT_MARKERS:
+        if marker.startswith("."):
+            # Dotted-boundary markers: must appear mid-FQN, not as a bare
+            # substring of an identifier.
+            if marker in lower:
+                return True
+        else:
+            # Prefix-style markers (``scripts.``, ``tests.``): match at the
+            # start of the FQN OR after a package boundary (``.scripts.`` is
+            # already covered above; this catches ``TheForge.scripts.…`` via
+            # the leading-segment form).
+            if lower.startswith(marker) or ("." + marker) in lower:
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Models (local to this router — not shared in models.py)
 # ---------------------------------------------------------------------------
 
@@ -859,11 +925,42 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         pass  # non-fatal; falls back to default
 
     try:
-        from codebase_rag.tools.semantic_search import semantic_code_search
-        # Over-fetch aggressively: fixture functions tend to have degenerate
-        # embeddings that score high for any query.  Fetch 500+ to guarantee
-        # we reach real application code below the fixture cluster.
-        seed_results = semantic_code_search(req.task_description, top_k=max(effective_k * 50, 500))
+        # LE-180: seed from the SAME ranking the HTTP /search/semantic surface
+        # uses, not from ``codebase_rag.tools.semantic_search`` directly.
+        #
+        # Root cause of the seed-quality bug: ``semantic_code_search`` embeds
+        # the query with ``codebase_rag.embedder.embed_query`` (the legacy
+        # in-package embedder), while the ``.duck`` vector store was written by
+        # ``app.embedders`` (the configured backend, e.g. local E5). The two
+        # live in different embedding spaces, so the cosine scores from
+        # ``semantic_code_search`` are near-degenerate (~0.12) and rank
+        # script/test files that merely mention the query terms above the real
+        # implementation. The search router's ``_semantic_search_impl`` embeds
+        # via ``app.embedders.sync_bridge`` (matching the index) AND applies
+        # the descriptive-query rewriter + PageRank + RRF/BM25 fusion — which
+        # is exactly why /search/semantic ranks the implementation at ~0.83.
+        # Reusing it makes the bundle's seeds match that quality.
+        from .search import _semantic_search_impl  # noqa: PLC0415
+
+        # Request a deep result pool so the score-based merge + test/script
+        # down-weight below has room to rank past the script cluster.
+        # ``_semantic_search_impl`` is called directly (not via the HTTP
+        # surface), so the route's ``k <= 100`` Query bound does not apply;
+        # it over-fetches ``k * 50`` candidates internally before de-noising
+        # and slicing to ``k``.
+        _seed_pool = max(effective_k * 5, 100)
+        _sem_resp = _semantic_search_impl(
+            q=req.task_description,
+            k=_seed_pool,
+            repo=repo_slug,
+            rerank=bool(req.rerank),
+        )
+        # Adapt the SemanticResult list to the {qualified_name, score} shape
+        # the existing de-noise + ranking code consumes.
+        seed_results = [
+            {"qualified_name": r.symbol, "score": r.score}
+            for r in _sem_resp.results
+        ]
         # Drop noise: test fixtures AND anonymous inline arrows/callbacks
         # (named `anonymous_LINE_COL` by the parser). Both have degenerate
         # embeddings that crowd real code out of the top-k window.
@@ -882,11 +979,27 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
                 return True
             return False
 
-        seed_symbols = [
-            r["qualified_name"]
-            for r in seed_results
-            if not _is_noise(r["qualified_name"])
-        ][: effective_k]
+        # Preserve the bi-encoder cosine score alongside each FQN so seed
+        # ranking below mirrors /search/semantic (which ranks the actual
+        # implementation at the top) rather than discarding scores and
+        # letting lexical boosts dominate by mere arrival order. We keep the
+        # full de-noised, score-ordered list (already sorted by the vector
+        # store) and slice to effective_k *after* applying the test/script
+        # down-weight — so an implementation symbol can't be pushed out of the
+        # window by a higher-arriving script.
+        semantic_ranked: list[tuple[str, float]] = []
+        for rank, r in enumerate(seed_results):
+            qn = r["qualified_name"]
+            if _is_noise(qn):
+                continue
+            # ``score`` is the cosine similarity from the vector store
+            # (higher = more relevant). When absent, synthesise a
+            # monotonically-decreasing score from rank so ordering is stable.
+            raw_score = r.get("score")
+            score = float(raw_score) if isinstance(raw_score, (int, float)) else max(0.0, 1.0 - rank * 0.001)
+            semantic_ranked.append((qn, score))
+
+        seed_symbols = [qn for qn, _ in semantic_ranked][: effective_k]
 
         # Open a connection for the boost queries below.  Shared across
         # the three boosters (exact-name, module-level, entry-points) so
@@ -949,20 +1062,71 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
                 if not _is_noise(qn)
             ]
 
-        # Merge order matters — highest-signal first so the BFS expansion
-        # prioritises them: exact name matches → module handlers → entry
-        # points → semantic seeds.  De-dupe while preserving order.
-        seen: set[str] = set()
-        merged: list[str] = []
-        for qn in exact_hits + module_hits + entrypoint_hits + seed_symbols:
-            if qn not in seen:
-                seen.add(qn)
-                merged.append(qn)
-        # Cap at 2× effective_k so a wide module boost on a small repo
-        # doesn't blow up the BFS frontier.  The exact cap adapts to
-        # how many boosts fired.
-        seed_cap = max(effective_k, len(exact_hits) + len(module_hits) + len(entrypoint_hits))
-        seed_symbols = merged[: min(seed_cap, effective_k * 2)]
+        # Score-based seed merge (LE-180). Previously this prepended the
+        # lexical boosts (exact-name / module-keyword / entry-point) AHEAD of
+        # the semantic seeds and capped by arrival order. For a query like
+        # "where is the zero-retrieval refusal gate implemented and what
+        # threshold does it use?" the exact-name boost matched *scripts* that
+        # merely mention "refusal" / "gate" / "threshold" (calibrate-refusal,
+        # latency-bench, …) and flooded the cap, evicting the real
+        # implementation that /search/semantic ranks at the top (~0.83).
+        #
+        # New approach — assign every candidate a comparable score, then sort:
+        #   * semantic seeds keep their bi-encoder cosine score (the same
+        #     signal that makes /search/semantic correct);
+        #   * lexical boosts are *augmentation* — they get a base score placed
+        #     just below the strongest semantic hit so they enrich the bundle
+        #     (long handlers with low embedding signal, exact-name asks) WITHOUT
+        #     outranking a clear semantic winner;
+        #   * every candidate whose FQN looks like a test/script file is
+        #     multiplied by CONTEXT_BUNDLE_TEST_PATH_PENALTY (~0.4) so it sorts
+        #     below real implementation — mirroring TheForge's orchestrator.
+        # The BFS then expands from genuinely high-signal seeds.
+        scored_seeds: dict[str, float] = {}
+
+        # Top semantic score anchors the boost band. When semantic returned
+        # nothing (degenerate repo), fall back to 1.0 so boosts still rank.
+        top_semantic = semantic_ranked[0][1] if semantic_ranked else 1.0
+
+        for qn, score in semantic_ranked[: effective_k * 2]:
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), score)
+
+        # Boost base scores sit just under the top semantic hit so a strong
+        # implementation match always leads, but boosts still beat the long
+        # tail of weak semantic seeds. Exact-name asks rank highest among
+        # boosts (the user typed the symbol), then module handlers, then
+        # generic entry points.
+        _BOOST_BASE = {
+            "exact": top_semantic * 0.98,
+            "module": top_semantic * 0.90,
+            "entrypoint": top_semantic * 0.85,
+        }
+        for qn in exact_hits:
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), _BOOST_BASE["exact"])
+        for qn in module_hits:
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), _BOOST_BASE["module"])
+        for qn in entrypoint_hits:
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), _BOOST_BASE["entrypoint"])
+
+        # Apply the test/script down-weight. Clamp the penalty to a sane
+        # (0, 1] band; out-of-range config falls back to 0.4.
+        _penalty = settings.CONTEXT_BUNDLE_TEST_PATH_PENALTY
+        if not (0.0 < _penalty <= 1.0):
+            _penalty = 0.4
+        for qn in list(scored_seeds):
+            if _is_test_or_script_path(qn):
+                scored_seeds[qn] *= _penalty
+
+        # Sort by adjusted score (desc); break ties on FQN for determinism.
+        ranked = sorted(scored_seeds.items(), key=lambda kv: (-kv[1], kv[0]))
+
+        # Cap at 2× effective_k so a wide module boost on a small repo doesn't
+        # blow up the BFS frontier.
+        seed_cap = min(
+            max(effective_k, len(exact_hits) + len(module_hits) + len(entrypoint_hits)),
+            effective_k * 2,
+        )
+        seed_symbols = [qn for qn, _ in ranked][:seed_cap]
 
         # Optional listwise rerank of the merged seed set (disabled by default).
         # When RERANK_ENABLED=true, this runs BEFORE BFS expansion so the

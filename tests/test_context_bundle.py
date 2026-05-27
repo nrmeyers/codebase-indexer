@@ -7,8 +7,25 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models import SemanticResult, SemanticSearchResponse
 
 client = TestClient(app)
+
+
+def _semantic_response(seed: list[dict]) -> SemanticSearchResponse:
+    """Build a SemanticSearchResponse from ``[{qualified_name, score}, ...]``.
+
+    Context-bundle seeds from the search router's ``_semantic_search_impl``
+    (LE-180 — same embedding path + fusion that /search/semantic uses), so
+    tests patch that function rather than the legacy ``semantic_code_search``.
+    """
+    return SemanticSearchResponse(
+        results=[
+            SemanticResult(symbol=r["qualified_name"], score=r.get("score", 0.5), type="")
+            for r in seed
+        ],
+        search_intent="semantic",
+    )
 
 
 def _mock_conn_with_calls(callee_map: dict[str, list[str]], source_rows: list[dict]) -> MagicMock:
@@ -59,10 +76,11 @@ def test_context_bundle_returns_symbols(tmp_path: Path) -> None:
     ]
     conn = _mock_conn_with_calls(callee_map, source_rows)
 
-    import codebase_rag.tools.semantic_search as _sem
-
     with (
-        patch.object(_sem, "semantic_code_search", return_value=seed),
+        patch(
+            "app.routers.search._semantic_search_impl",
+            return_value=_semantic_response(seed),
+        ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
     ):
         resp = client.post(
@@ -79,9 +97,10 @@ def test_context_bundle_returns_symbols(tmp_path: Path) -> None:
 
 
 def test_context_bundle_empty_when_no_semantic_results(tmp_path: Path) -> None:
-    import codebase_rag.tools.semantic_search as _sem
-
-    with patch.object(_sem, "semantic_code_search", return_value=[]):
+    with patch(
+        "app.routers.search._semantic_search_impl",
+        return_value=_semantic_response([]),
+    ):
         resp = client.post(
             "/context-bundle",
             json={"repo_path": str(tmp_path), "task_description": "nothing matches"},
@@ -103,10 +122,11 @@ def test_context_bundle_depth_zero(tmp_path: Path) -> None:
     result.has_next.return_value = False
     conn.execute.return_value = result
 
-    import codebase_rag.tools.semantic_search as _sem
-
     with (
-        patch.object(_sem, "semantic_code_search", return_value=seed),
+        patch(
+            "app.routers.search._semantic_search_impl",
+            return_value=_semantic_response(seed),
+        ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
     ):
         resp = client.post(
@@ -138,11 +158,158 @@ def test_context_bundle_rejects_nonexistent_repo() -> None:
     assert "does not exist" in detail_str or "repo_path" in detail_str
 
 
-def test_context_bundle_503_when_semantic_search_unavailable(tmp_path: Path) -> None:
-    """When semantic_code_search raises, the endpoint returns 503."""
-    import codebase_rag.tools.semantic_search as _sem
+def test_is_test_or_script_path_classification() -> None:
+    """Unit-level: the path classifier flags test/script FQNs but not impl."""
+    from app.routers.context_bundle import _is_test_or_script_path
 
-    with patch.object(_sem, "semantic_code_search", side_effect=RuntimeError("model not loaded")):
+    # Test / script paths — should be flagged.
+    assert _is_test_or_script_path("TheForge.scripts.calibrate-refusal.pct")
+    assert _is_test_or_script_path("TheForge.scripts.latency-bench.runSolo")
+    assert _is_test_or_script_path("repo.src.foo.bar.test.helper")
+    assert _is_test_or_script_path("repo.src.foo.bar.spec.case")
+    assert _is_test_or_script_path("repo.tests.unit.checkThing")
+    assert _is_test_or_script_path("repo.src.__tests__.fixture")
+
+    # Real implementation — must NOT be flagged (regression guard: a symbol
+    # that merely *contains* "test" inside a longer identifier in production
+    # code should pass through unpenalised).
+    assert not _is_test_or_script_path(
+        "TheForge.src.services.orchestration.zero-retrieval-refusal.evaluateRetrievalSignal"
+    )
+    assert not _is_test_or_script_path("repo.src.services.runTestSuite")
+
+
+def test_context_bundle_seeds_implementation_over_scripts(tmp_path: Path) -> None:
+    """LE-180 regression: for an NL query whose implementation lives in a
+    non-script file, the bundle seeds must include the implementation symbol
+    AHEAD of script/test files that merely mention the query terms.
+
+    Reproduces the live bug: /search/semantic ranked
+    ``…zero-retrieval-refusal.evaluateRetrievalSignal`` at ~0.83 while
+    /context-bundle's exact-name boost flooded the seed cap with
+    ``scripts.calibrate-refusal.*`` and dropped the implementation entirely.
+    """
+    src_file = tmp_path / "impl.py"
+    src_file.write_text("def evaluate():\n    return 0.30\n")
+
+    impl = "myrepo.src.services.orchestration.zero-retrieval-refusal.evaluateRetrievalSignal"
+    floor = "myrepo.src.services.orchestration.zero-retrieval-refusal.resolveSemanticFloor"
+    script_a = "myrepo.scripts.calibrate-refusal.pct"
+    script_b = "myrepo.scripts.latency-bench.runSolo"
+
+    # Semantic ranking (what /search/semantic uses) correctly puts the
+    # implementation at the top with the script ranked lower.
+    seed = [
+        {"qualified_name": impl, "score": 0.83, "node_id": impl, "name": "evaluateRetrievalSignal", "type": "Function"},
+        {"qualified_name": floor, "score": 0.82, "node_id": floor, "name": "resolveSemanticFloor", "type": "Function"},
+        {"qualified_name": script_a, "score": 0.80, "node_id": script_a, "name": "pct", "type": "Function"},
+    ]
+
+    # The boost connection returns the scripts as exact-name hits (the bug
+    # trigger: words like "refusal"/"gate"/"threshold" match script symbols),
+    # and CALLS/source queries behave normally.
+    def execute_side_effect(query: str, params: dict | None = None):
+        result = MagicMock()
+        if "n.name IN" in query:  # exact-name boost — return scripts
+            rows = [{"qn": script_a}, {"qn": script_b}]
+            cols = ["qn"]
+        elif "CALLS" in query and params:
+            rows = []
+            cols = ["callee"]
+        elif "start_line" in query and params:
+            qn = params.get("node_id", "")
+            rows = [{"qualified_name": qn, "start_line": 1, "end_line": 2, "path": str(src_file)}]
+            cols = ["qualified_name", "start_line", "end_line", "path"]
+        else:
+            rows, cols = [], []
+        remaining = list(rows)
+        result.get_column_names.return_value = cols
+        result.has_next.side_effect = lambda: bool(remaining)
+        result.get_next.side_effect = lambda: [remaining.pop(0).get(c) for c in cols]
+        return result
+
+    conn = MagicMock()
+    conn.execute.side_effect = execute_side_effect
+
+    with (
+        patch(
+            "app.routers.search._semantic_search_impl",
+            return_value=_semantic_response(seed),
+        ),
+        patch("app.routers.context_bundle._get_conn", return_value=conn),
+    ):
+        resp = client.post(
+            "/context-bundle",
+            json={
+                "repo_path": str(tmp_path),
+                "task_description": "Where is the zero-retrieval refusal gate implemented and what threshold does it use?",
+                "k": 20,
+                "depth": 0,
+            },
+        )
+
+    assert resp.status_code == 200
+    symbols = resp.json()["symbols"]
+
+    # The implementation symbol must be present in the seeds — the original
+    # bug dropped it entirely in favour of the scripts.
+    assert impl in symbols, f"implementation symbol missing from seeds: {symbols}"
+
+    from app.routers.context_bundle import _is_test_or_script_path
+
+    assert not _is_test_or_script_path(impl)
+    assert _is_test_or_script_path(script_a)
+
+    # Assert RANKING directly: the response ``symbols`` field is sorted
+    # alphabetically (a deliberate determinism choice in the router), which
+    # would hide the seed ordering. So we exercise the scored seed selection
+    # at a cap tight enough that the down-weighted scripts are excluded while
+    # the implementation survives. The intent upgrade floors effective_k at
+    # 12, but only 3 semantic + 2 script candidates exist here, so we assert
+    # the down-weight relationship holds: impl scores 0.83/0.82 vs scripts
+    # 0.80 * 0.4 = 0.32, so impl symbols MUST sort ahead of the scripts.
+    from app.routers import context_bundle as _cb
+
+    captured: dict[str, list[str]] = {}
+    orig_expand = _cb._expand_call_graph
+
+    def _capture_expand(conn_, seed_symbols, depth):  # type: ignore[no-untyped-def]
+        captured["seeds"] = list(seed_symbols)
+        return orig_expand(conn_, seed_symbols, depth)
+
+    with (
+        patch(
+            "app.routers.search._semantic_search_impl",
+            return_value=_semantic_response(seed),
+        ),
+        patch("app.routers.context_bundle._get_conn", return_value=conn),
+        patch.object(_cb, "_expand_call_graph", side_effect=_capture_expand),
+    ):
+        resp2 = client.post(
+            "/context-bundle",
+            json={
+                "repo_path": str(tmp_path),
+                "task_description": "Where is the zero-retrieval refusal gate implemented and what threshold does it use?",
+                "k": 20,
+                "depth": 1,
+            },
+        )
+    assert resp2.status_code == 200
+    ranked_seeds = captured["seeds"]
+    impl_idx = ranked_seeds.index(impl)
+    script_idx = ranked_seeds.index(script_a)
+    assert impl_idx < script_idx, (
+        f"implementation must rank ahead of down-weighted script; "
+        f"got order {ranked_seeds}"
+    )
+
+
+def test_context_bundle_503_when_semantic_search_unavailable(tmp_path: Path) -> None:
+    """When the semantic seed search raises, the endpoint returns 503."""
+    with patch(
+        "app.routers.search._semantic_search_impl",
+        side_effect=RuntimeError("model not loaded"),
+    ):
         resp = client.post(
             "/context-bundle",
             json={"repo_path": str(tmp_path), "task_description": "anything"},

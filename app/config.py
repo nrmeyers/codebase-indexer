@@ -144,6 +144,16 @@ class Settings(BaseSettings):
     # Maximum concurrent watchers (inotify budget guard).
     WATCH_MAX_REPOS: int = 32
 
+    # --- Context-bundle seed ranking (LE-180) ---
+    # Multiplicative penalty applied to a seed candidate's semantic score when
+    # its qualified_name / file path looks like a test or script file (e.g.
+    # ``.test.``, ``.spec.``, ``scripts.``, ``tests.``). Mirrors TheForge's
+    # orchestrator-side ~0.4x test-path multiplier so the implementation
+    # symbol leads over scripts that merely *mention* the query terms.
+    # Range (0, 1]; values >1 or <=0 fall back to the default. Set to 1.0 to
+    # disable the down-weight entirely.
+    CONTEXT_BUNDLE_TEST_PATH_PENALTY: float = 0.4
+
     # --- Rerank pipeline (disabled by default) ---
     # Master control for the two-stage retrieval rerank path.  When False (default),
     # dense vector ranking (e5-base-v2 + DuckDB cosine) is the only ranker.
