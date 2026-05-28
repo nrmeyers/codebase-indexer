@@ -32,7 +32,7 @@ RUN apt-get update && \
         build-essential cmake git libssl-dev zlib1g-dev libzstd-dev && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace
+WORKDIR /
 
 # code-graph-rag is the path-dep sibling (per pyproject.toml's
 # [tool.uv.sources]: `code-graph-rag = { path = "../code-graph-rag" }`).
@@ -50,9 +50,9 @@ COPY code-graph-rag ./code-graph-rag
 # Indexer manifest + lockfile only — `uv sync --no-install-project`
 # resolves deps without copying app source so subsequent app-only
 # changes hit a warm dep cache.
-COPY code-indexer-service/pyproject.toml code-indexer-service/uv.lock ./code-indexer-service/
+WORKDIR /app
+COPY code-indexer-service/pyproject.toml code-indexer-service/uv.lock ./
 
-WORKDIR /workspace/code-indexer-service
 
 # Install lockfile-resolved deps (no app source yet, no extras).
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -96,13 +96,13 @@ WORKDIR /app
 # Copy the venv first (heavy, changes infrequently) then app source
 # (light, changes often) — keeps the runtime image rebuild fast on
 # code-only changes.
-COPY --from=builder --chown=forge:forge /workspace/code-indexer-service/.venv /app/.venv
-COPY --from=builder --chown=forge:forge /workspace/code-indexer-service/app /app/app
-COPY --from=builder --chown=forge:forge /workspace/code-indexer-service/scripts /app/scripts
-COPY --from=builder --chown=forge:forge /workspace/code-indexer-service/main.py /app/main.py
+COPY --from=builder --chown=forge:forge /app/.venv /app/.venv
+COPY --from=builder --chown=forge:forge /app/app /app/app
+COPY --from=builder --chown=forge:forge /app/scripts /app/scripts
+COPY --from=builder --chown=forge:forge /app/main.py /app/main.py
 # code-graph-rag is editable-installed into the venv; keeping its source
 # tree at the path uv recorded means import resolves at runtime.
-COPY --from=builder --chown=forge:forge /workspace/code-graph-rag /code-graph-rag
+COPY --from=builder --chown=forge:forge /code-graph-rag /code-graph-rag
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -118,5 +118,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=45s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
+ENV PATH="/app/.venv/bin:$PATH"
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
