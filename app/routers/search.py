@@ -15,6 +15,7 @@ live in the per-repo DuckDB file (``.duck``) alongside the structural
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -270,6 +271,56 @@ def _clean(v: Any) -> Any:
     return v
 
 
+# Pattern for the explicit ``... AS <alias>`` projection columns that the KG
+# generator (and every well-formed paged caller) uses. We deliberately only
+# recognise EXPLICIT aliases: an aliased projection is guaranteed to be a
+# scalar column (string / number / label()) that the engine can ORDER BY, so
+# injecting ``ORDER BY`` over them is always legal Cypher. Bare projections
+# (e.g. ``RETURN n``) bind a node/relationship variable that is NOT orderable
+# in kuzu, so we skip the injection for those and preserve the legacy
+# (unordered) behaviour rather than risk a parser error.
+_RETURN_ALIAS_RE = re.compile(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+
+
+def _extract_return_aliases(cypher: str) -> list[str]:
+    """Return the explicit ``AS <alias>`` names from a Cypher RETURN clause.
+
+    Used to synthesise a deterministic ``ORDER BY`` for service-applied paging
+    so a paged complete-scan over an otherwise-unordered query visits every
+    matching row exactly once across repeated calls.
+
+    We scan only the text AFTER the final top-level ``RETURN`` keyword so an
+    alias bound earlier in a ``WITH ... AS x`` projection is not mistaken for a
+    final-projection column.
+
+    Args:
+        cypher: The (literal-stripped or raw) Cypher query text.
+
+    Returns:
+        Ordered, de-duplicated list of alias identifiers. Empty when the query
+        has no explicit aliases (e.g. ``RETURN n``) — the caller then leaves
+        ordering untouched.
+    """
+    # Anchor on the LAST RETURN so a WITH-clause alias doesn't leak in.
+    return_matches = list(re.finditer(r"\bRETURN\b", cypher, re.IGNORECASE))
+    if not return_matches:
+        return []
+    tail = cypher[return_matches[-1].end():]
+    seen: set[str] = set()
+    aliases: list[str] = []
+    for m in _RETURN_ALIAS_RE.finditer(tail):
+        alias = m.group(1)
+        # ``ASC``/``ASCENDING``/``AS`` keyword false-positives can't occur here
+        # because the regex requires ``AS`` followed by whitespace + identifier;
+        # but guard against a stray ORDER-BY direction token just in case.
+        if alias.upper() in {"ASC", "DESC", "ASCENDING", "DESCENDING"}:
+            continue
+        if alias not in seen:
+            seen.add(alias)
+            aliases.append(alias)
+    return aliases
+
+
 # ---------------------------------------------------------------------------
 # GET /search/structural
 # ---------------------------------------------------------------------------
@@ -299,6 +350,22 @@ def structural_search(
             Only applied if ``q`` does not already include a LIMIT clause —
             clients that hand-write their own SKIP/LIMIT keep full control.
             The engine-side fetch stays bounded at ``offset + limit`` (≤ 5000).
+
+            LE-181b — DETERMINISTIC COMPLETE-SCAN PAGING. When the service owns
+            paging (no caller LIMIT) and the query has explicit ``... AS alias``
+            RETURN columns but no ``ORDER BY``, a deterministic ``ORDER BY`` over
+            the full alias tuple is injected before SKIP/LIMIT. kuzu's
+            multi-label node pattern ``(n:A|B|C)`` is a UNION SCAN whose
+            cross-table order is NOT stable across executions; without an
+            ``ORDER BY`` a paged complete scan (offset += page_len) can skip and
+            double-count rows, leaving a handful of first-party files (web/*,
+            src/services/routes/*, src/adapters/identity/*) intermittently
+            absent from a consumer's complete-scan aggregate. Ordering on the
+            full projected tuple makes pages disjoint and the union complete and
+            byte-identical across repeated identical requests, WITHOUT any
+            caller-side ``ORDER BY`` (which front-loads the multiplied tests.*
+            rows and truncates the alphabetically-last layer). Bare projections
+            (``RETURN n``) and caller-supplied ``ORDER BY`` are left untouched.
 
     Returns:
         StructuralSearchResponse: Nodes, relationships, row count, plus
@@ -373,6 +440,49 @@ def _structural_search_impl(
     # while keeping the engine-side fetch bounded.
     fetch_limit = safe_limit
     if service_paged:
+        # LE-181b — deterministic complete-scan paging.
+        #
+        # ROOT CAUSE: kuzu's multi-label node pattern `(n:A|B|C)` is executed
+        # as a UNION SCAN across the per-label tables. The scan order across
+        # those tables is an incidental engine-internal detail, NOT stable
+        # across separate query executions. When the service appends a bare
+        # `SKIP/LIMIT` to such a query with NO `ORDER BY`, consecutive pages
+        # are cut out of an unstable ordering, so a paged complete-scan
+        # (offset += page_len) can skip rows that shifted between pages and
+        # double-count others — non-deterministic, incomplete results.
+        # Consumers (TheForge's KG generator) saw a residual handful of
+        # first-party files (web/* frontend, src/services/routes/*,
+        # src/adapters/identity/*) intermittently get zero nodes.
+        #
+        # The generator can NOT fix this caller-side: its symbol projection
+        # multiplies each distinct symbol into ~4 rows and duplicates the
+        # `tests.*` subtree so heavily that a caller-side `ORDER BY qname`
+        # front-loads tens of thousands of test rows and pushes the
+        # alphabetically-last layer (`web.*`) past any sane truncation budget,
+        # dropping the whole frontend.
+        #
+        # FIX: inject a deterministic `ORDER BY` over the query's explicit
+        # RETURN aliases (the full projected tuple) BEFORE the SKIP/LIMIT,
+        # but ONLY when the caller did not already specify an ORDER BY. This
+        # makes the paged scan a stable, gapless, duplicate-free total order:
+        # every matching row is visited exactly once across pages, regardless
+        # of the engine's incidental union-scan order, and the result is
+        # byte-identical across repeated identical requests. It does NOT
+        # truncate any layer — full-scan paging walks the COMPLETE result set
+        # (the layer-starvation only ever arose from caller-side ORDER BY +
+        # truncation, which this replaces). Row multiplicity is harmless under
+        # a complete scan: dedup happens downstream in the consumer.
+        #
+        # We order over the full alias tuple (not just the first column) so
+        # the order is TOTAL even when many rows share a leading column value
+        # (the multiplied rows), eliminating ties that the engine could break
+        # differently between calls.
+        has_order_by = bool(re.search(r"\bORDER\s+BY\b", cypher, re.IGNORECASE))
+        if not has_order_by:
+            aliases = _extract_return_aliases(scan_target)
+            if aliases:
+                order_cols = ", ".join(aliases)
+                cypher = f"{cypher}\nORDER BY {order_cols}"
         # Defensive clamp: the Query() validators already bound these, but the
         # impl is also called directly (tests / internal callers) where the
         # bounds aren't enforced. Never let an unbounded fetch through.

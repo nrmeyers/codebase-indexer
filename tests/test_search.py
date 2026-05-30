@@ -340,6 +340,209 @@ def test_structural_search_default_response_is_backward_compatible() -> None:
 
 
 # ---------------------------------------------------------------------------
+# /search/structural — deterministic complete-scan paging (LE-181b)
+# ---------------------------------------------------------------------------
+
+
+def _ordering_paging_mock_conn(unordered: list[dict], *, shuffle_seed: int) -> MagicMock:
+    """Mock connection that emulates kuzu's multi-label UNION SCAN.
+
+    Two engine behaviours are modelled:
+      * WITHOUT an ``ORDER BY`` the scan order is UNSTABLE across executions —
+        we deterministically reshuffle ``unordered`` per call keyed by an
+        incrementing counter, mirroring the real bug where a paged complete
+        scan over an unordered multi-label query skips/duplicates rows.
+      * WITH an ``ORDER BY <cols>`` the engine sorts by those columns FIRST,
+        producing a stable total order that SKIP/LIMIT then pages.
+
+    This is what makes the test exercise the real determinism contract: only
+    the ``ORDER BY`` path yields a gapless, repeatable complete scan.
+    """
+    import re as _re
+
+    call_counter = {"n": 0}
+
+    def execute(cypher: str, *_args, **_kwargs):
+        col_names = list(unordered[0].keys()) if unordered else []
+
+        order_m = _re.search(r"ORDER\s+BY\s+([^\n]+?)(?:\s+SKIP|\s+LIMIT|$)", cypher, _re.IGNORECASE)
+        if order_m:
+            cols = [c.strip() for c in order_m.group(1).split(",")]
+            data = sorted(unordered, key=lambda r: tuple(str(r.get(c, "")) for c in cols))
+        else:
+            # Unstable order: rotate by a per-call amount so consecutive pages
+            # see a DIFFERENT ordering — the exact failure the fix addresses.
+            call_counter["n"] += 1
+            rot = (call_counter["n"] * 7 + shuffle_seed) % max(1, len(unordered))
+            data = unordered[rot:] + unordered[:rot]
+
+        skip_m = _re.search(r"\bSKIP\s+(\d+)", cypher, _re.IGNORECASE)
+        limit_m = _re.search(r"\bLIMIT\s+(\d+)", cypher, _re.IGNORECASE)
+        skip = int(skip_m.group(1)) if skip_m else 0
+        lim = int(limit_m.group(1)) if limit_m else len(data)
+        page = data[skip : skip + lim]
+
+        result = MagicMock()
+        result.get_column_names.return_value = col_names
+        remaining = list(page)
+        result.has_next.side_effect = lambda: bool(remaining)
+        result.get_next.side_effect = lambda: list(remaining.pop(0).values())
+        return result
+
+    conn = MagicMock()
+    conn.execute.side_effect = execute
+    return conn
+
+
+def _page_all(client_, q: str, *, page_size: int) -> list[dict]:
+    """Walk every page of a service-paged structural query into one flat list."""
+    out: list[dict] = []
+    offset = 0
+    while True:
+        body = client_.get(
+            "/search/structural",
+            params={"q": q, "limit": page_size, "offset": offset},
+        ).json()
+        out.extend(body["nodes"])
+        if not body["has_more"] or not body["nodes"]:
+            break
+        offset += len(body["nodes"])
+    return out
+
+
+def test_structural_search_injects_order_by_for_service_paged_aliased_query() -> None:
+    """LE-181b: a service-paged query with explicit RETURN aliases gets a
+    deterministic ORDER BY over the full alias tuple injected before SKIP/LIMIT."""
+    conn = MagicMock()
+    result = MagicMock()
+    result.get_column_names.return_value = []
+    result.has_next.return_value = False
+    conn.execute.return_value = result
+
+    with patch("app.routers.search._get_conn", return_value=conn):
+        client.get(
+            "/search/structural",
+            params={
+                "q": "MATCH (n:Function|Class|Method) RETURN n.qualified_name AS qname, n.name AS name, label(n) AS node_type",
+            },
+        )
+
+    executed: str = conn.execute.call_args[0][0]
+    up = executed.upper()
+    assert "ORDER BY QNAME, NAME, NODE_TYPE" in up
+    # ORDER BY must precede LIMIT — otherwise it's a parse error / no-op.
+    assert up.index("ORDER BY") < up.index("LIMIT")
+
+
+def test_structural_search_no_order_by_for_bare_projection() -> None:
+    """A bare ``RETURN n`` (node variable, not orderable in kuzu) must NOT get
+    an injected ORDER BY — preserves legacy behaviour, avoids a parse error."""
+    conn = MagicMock()
+    result = MagicMock()
+    result.get_column_names.return_value = []
+    result.has_next.return_value = False
+    conn.execute.return_value = result
+
+    with patch("app.routers.search._get_conn", return_value=conn):
+        client.get("/search/structural", params={"q": "MATCH (n) RETURN n"})
+
+    executed: str = conn.execute.call_args[0][0]
+    assert "ORDER BY" not in executed.upper()
+
+
+def test_structural_search_respects_caller_supplied_order_by() -> None:
+    """When the caller already wrote an ORDER BY, the service must not add a
+    second (conflicting) one."""
+    conn = MagicMock()
+    result = MagicMock()
+    result.get_column_names.return_value = []
+    result.has_next.return_value = False
+    conn.execute.return_value = result
+
+    with patch("app.routers.search._get_conn", return_value=conn):
+        client.get(
+            "/search/structural",
+            params={"q": "MATCH (n:Function) RETURN n.name AS name ORDER BY name DESC"},
+        )
+
+    executed: str = conn.execute.call_args[0][0]
+    # Exactly one ORDER BY survives.
+    assert executed.upper().count("ORDER BY") == 1
+
+
+def test_structural_search_complete_scan_is_deterministic_across_repeats() -> None:
+    """LE-181b core regression: a paged complete scan over a multi-label query
+    whose underlying engine order is UNSTABLE still returns the SAME complete
+    result set in the SAME order across 3 repeated identical scans — and drops
+    NO layer (web.* / src.services.routes.* / src.adapters.identity.* survive)."""
+    # Build a dataset that mirrors the real failure: tests.* is multiplied
+    # heavily, web.* sorts last alphabetically, and the at-risk first-party
+    # files are present once each.
+    dataset: list[dict] = []
+    for i in range(400):  # heavy tests.* fan-out (the row-multiplication)
+        dataset.append({"qname": f"tests.unit.test_{i:03d}", "name": f"test_{i}"})
+    for i in range(120):
+        dataset.append({"qname": f"src.services.core.fn_{i:03d}", "name": f"fn_{i}"})
+    at_risk = [
+        {"qname": "src.services.routes.auth.handler", "name": "handler"},
+        {"qname": "src.adapters.identity.tailscale.resolve", "name": "resolve"},
+        {"qname": "web.src.pages.Home.render", "name": "render"},
+        {"qname": "web.src.components.Graph.draw", "name": "draw"},
+        {"qname": "web.src.hooks.useActor.useActor", "name": "useActor"},
+    ]
+    dataset.extend(at_risk)
+
+    q = "MATCH (n:Function|Class|Method|Interface) RETURN n.qualified_name AS qname, n.name AS name"
+
+    scans: list[list[tuple[str, str]]] = []
+    for _ in range(3):
+        # Fresh mock per scan so the per-call rotation counter restarts —
+        # proving determinism comes from the injected ORDER BY, not from a
+        # warm/static engine state.
+        conn = _ordering_paging_mock_conn(dataset, shuffle_seed=3)
+        with patch("app.routers.search._get_conn", return_value=conn):
+            rows = _page_all(client, q, page_size=100)
+        scans.append([(r["qname"], r["name"]) for r in rows])
+
+    # 1. COMPLETE — every distinct row present in each scan.
+    expected = sorted((d["qname"], d["name"]) for d in dataset)
+    for s in scans:
+        assert sorted(s) == expected, "paged scan dropped or duplicated rows"
+
+    # 2. DETERMINISTIC — identical result set AND identical order across repeats.
+    assert scans[0] == scans[1] == scans[2]
+
+    # 3. NO LAYER STARVED — the at-risk first-party files all survive.
+    qnames = {qn for qn, _ in scans[0]}
+    assert "web.src.pages.Home.render" in qnames
+    assert "web.src.components.Graph.draw" in qnames
+    assert "src.services.routes.auth.handler" in qnames
+    assert "src.adapters.identity.tailscale.resolve" in qnames
+
+
+def test_structural_search_unordered_scan_would_be_incomplete_control() -> None:
+    """Control: prove the mock's unordered path IS unstable (so the test above
+    is genuinely exercising the fix, not a no-op). A caller-supplied LIMIT
+    bypasses the service ORDER-BY injection, so paging the same query by hand
+    over the unstable engine order yields divergent pages across repeats."""
+    dataset = [{"qname": f"m.fn_{i:04d}", "name": f"fn_{i}"} for i in range(300)]
+    # Caller writes their OWN LIMIT → service paging (and ORDER BY) is bypassed.
+    q = "MATCH (n) RETURN n.qualified_name AS qname, n.name AS name LIMIT 50"
+
+    pages: list[list[str]] = []
+    for seed in (11, 53, 197):  # distinct seeds ⇒ distinct unstable orderings
+        conn = _ordering_paging_mock_conn(dataset, shuffle_seed=seed)
+        with patch("app.routers.search._get_conn", return_value=conn):
+            body = client.get("/search/structural", params={"q": q}).json()
+        pages.append([n["qname"] for n in body["nodes"]])
+
+    # Unstable engine order → at least two of the three first-pages differ.
+    assert not (pages[0] == pages[1] == pages[2]), (
+        "control mock returned a stable order — the determinism test would be a no-op"
+    )
+
+
+# ---------------------------------------------------------------------------
 # /search/semantic
 # ---------------------------------------------------------------------------
 
