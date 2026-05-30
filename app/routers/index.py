@@ -246,6 +246,11 @@ class _Job:
     eta_sec: float | None = None
     error: str | None = None
     started_at: float = field(default_factory=time.time)
+    # LE-143 fix: progress heartbeat. Advanced on every progress callback so
+    # the phase watchdog can distinguish a hung job (no progress) from a
+    # legitimately slow one. Distinct from ``started_at`` (whole-job age),
+    # which never advances and would falsely flag long healthy runs.
+    last_progress_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     exclude_paths: frozenset[str] = field(default_factory=frozenset)
 
@@ -790,6 +795,8 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             pct = job.progress_pct  # unchanged
 
         job.progress_pct = max(job.progress_pct, min(100.0, pct))
+        # LE-143 fix: heartbeat — every callback proves the job is alive.
+        job.last_progress_at = time.time()
 
         # Elapsed + ETA — computed at callback time (cheap, no extra polling).
         elapsed = time.time() - _job_start
@@ -798,6 +805,26 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
             job.eta_sec = elapsed * (100.0 - job.progress_pct) / job.progress_pct
         else:
             job.eta_sec = None
+
+        # LE-143 fix: mirror progress to the durable store so its ``updated_at``
+        # advances on every phase transition. The phase watchdog + reconcile
+        # path key staleness on ``updated_at``; without this a slow-but-healthy
+        # run would look hung. Throttled to phase transitions (not every
+        # ~1 Hz file callback) to keep SQLite writes coarse. Best-effort —
+        # never let a bookkeeping write fail the index worker.
+        if phase:
+            try:
+                _jobs_store.update_progress(
+                    job.job_id,
+                    phase=str(phase),
+                    progress_pct=job.progress_pct,
+                    files_total=job.files_total,
+                    files_done=job.files_done,
+                )
+            except RuntimeError:
+                pass  # jobs_store not initialised (tests without lifespan)
+            except Exception:  # noqa: BLE001
+                pass
 
     # Load .cgrignore patterns from the repo root and merge with explicit
     # exclude_paths from the POST body.  Without this the service would skip
@@ -1673,7 +1700,15 @@ async def start_index(
     # in-memory dict for the duration of this process.
     _store_active = None
     try:
-        _store_active = _jobs_store.find_active_for_repo(repo_path.name)
+        # LE-143 fix: reconcile orphaned/no-progress locks on the request path
+        # so a stuck job (dead worker, or no progress past the threshold) can
+        # never permanently 409-block a new reindex. Legitimate in-progress
+        # jobs (advancing updated_at) survive and still 409.
+        _store_active = _jobs_store.find_active_for_repo(
+            repo_path.name,
+            reconcile=True,
+            no_progress_seconds=settings.JOB_PHASE_WATCHDOG_SECONDS,
+        )
     except RuntimeError:
         pass  # jobs_store not yet initialised (tests without lifespan)
 
@@ -1689,6 +1724,9 @@ async def start_index(
     for j in _jobs.values():
         if (
             j.status == "running"
+            # LE-143 fix: a cancel-requested job is on its way to terminal —
+            # it no longer holds the lock for a new reindex, so don't 409 on it.
+            and not j.cancelled
             and Path(j.repo_path).resolve() == resolved
         ):
             _metrics.record_dedupe_409()
@@ -1720,6 +1758,13 @@ async def start_index(
     _raw_triggered_by = x_forge_triggered_by if isinstance(x_forge_triggered_by, str) else None
     _triggered_by = (_raw_triggered_by or "manual").strip().lower() or "manual"
     try:
+        # LE-143 fix: pass the SAME job_id the caller receives so the durable
+        # row and the in-memory tracker are one job. Previously create_job
+        # minted its own UUID, so mark_done / mark_failed / request_cancel
+        # (all keyed by the in-memory job.job_id) never touched the durable
+        # row — leaving it 'running' forever and permanently 409-locking the
+        # repo (the orphaned-lock bug). Unifying the id makes terminal
+        # transitions, cancel, and clear all release the per-repo lock.
         _jobs_store.create_job(
             kind="index",
             actor_oid="",
@@ -1731,13 +1776,8 @@ async def start_index(
             initial_status="running",
             initial_phase="queued",
             triggered_by=_triggered_by,
+            job_id=job_id,
         )
-        # Override the UUID to match the in-memory job so pollers get consistent ids.
-        # jobs_store.create_job generates its own UUID; we keep the in-memory job_id
-        # as authoritative since that's what we return to callers.
-        # For now the store row has a different job_id — Phase 2 full migration
-        # (replacing _jobs entirely) would unify them. This conservative wiring
-        # keeps the existing test surface intact.
     except RuntimeError:
         pass  # jobs_store not initialised (tests without lifespan)
     except Exception as _exc:
@@ -1936,18 +1976,59 @@ def cancel_index(job_id: str) -> CancelResponse:
         already in a terminal state (done or failed — nothing to cancel).
     """
     job = _jobs.get(job_id)
+    # LE-143 fix: an orphaned job can exist ONLY in the durable store (e.g.
+    # the in-memory record was pruned, or it survived a restart). Cancel must
+    # still be able to release that lock — fall back to the persistent row so
+    # cancel never 404s on a job that is still holding a per-repo lock.
     if job is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        stored = None
+        try:
+            stored = _jobs_store.get_job(job_id)
+        except RuntimeError:
+            stored = None
+        if stored is None:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        if stored.status not in ("queued", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Job {job_id} is already in terminal state "
+                    f"'{stored.status}'; nothing to cancel."
+                ),
+            )
+        # No live in-memory worker to honour the cancel flag — mark the
+        # durable row terminal directly so the per-repo lock is released.
+        try:
+            _jobs_store.mark_failed(
+                job_id, error="Cancelled by user", terminal_status="cancelled"
+            )
+        except RuntimeError:
+            pass
+        logger.info("Cancel released orphaned durable lock for job %s.", job_id)
+        return CancelResponse(
+            job_id=job_id,
+            cancelled=True,
+            message="Cancelled — orphaned job lock released.",
+        )
     if job.status != "running":
         raise HTTPException(
             status_code=409,
             detail=f"Job {job_id} is already in terminal state '{job.status}'; nothing to cancel.",
         )
     job.cancelled = True
-    # Phase 2: also set cancel flag in the persistent store so pollers on
-    # restart can see it. Best-effort — in-memory flag is authoritative.
+    # Phase 2: set cancel flag in the persistent store so the worker / pollers
+    # on restart can see it. LE-143 fix: ALSO transition the durable row to a
+    # terminal 'cancelled' state now so the per-repo lock is released on cancel
+    # intent — a reindex can proceed immediately rather than 409ing until the
+    # background worker happens to notice the flag (which never fires if the
+    # worker already died). The worker's own mark_failed on the next checkpoint
+    # is idempotent. Best-effort — the in-memory flag remains authoritative for
+    # in-flight progress reporting.
     try:
         _jobs_store.request_cancel(job_id)
+        _jobs_store.mark_failed(
+            job_id, error="Cancelled by user", terminal_status="cancelled"
+        )
     except RuntimeError:
         pass
     logger.info("Cancel requested for job %s.", job_id)
@@ -2111,21 +2192,38 @@ def reconcile_stale_running_jobs(
     # Check both the in-memory _jobs dict and the persistent jobs_store
     # for stale running jobs.
 
-    # 1. In-memory reconciliation (running jobs not yet written to disk)
+    # 1. In-memory reconciliation (running jobs not yet written to disk).
+    #    LE-143 fix: key staleness on the progress HEARTBEAT (last_progress_at),
+    #    NOT started_at. A long-but-healthy run keeps advancing last_progress_at
+    #    so it is never reaped; only a job whose current phase has gone fully
+    #    silent past the threshold (a hung phase) is failed. We also mark the
+    #    durable row failed so the per-repo lock is released, not just the
+    #    in-memory record.
     for job_id, job in list(_jobs.items()):
         if job.status == "running":
-            elapsed = now - job.started_at
-            if elapsed > staleness_threshold_seconds:
-                job.status = "failed"
-                job.error = (
-                    f"Job marked stale by heartbeat reconciliation "
-                    f"({int(elapsed)}s without progress)."
+            silent_for = now - job.last_progress_at
+            if silent_for > staleness_threshold_seconds:
+                err = (
+                    f"Job hung in phase '{job.phase}' — no progress for "
+                    f"{int(silent_for)}s (phase watchdog)."
                 )
+                job.status = "failed"
+                job.error = err
                 job.finished_at = now
                 reconciled += 1
+                # Release the durable per-repo lock (shared id since LE-143 fix).
+                try:
+                    _jobs_store.mark_failed(job_id, error=err, terminal_status="failed")
+                except RuntimeError:
+                    pass
+                except Exception as _exc:  # noqa: BLE001
+                    logger.warning(
+                        "phase-watchdog: durable mark_failed(%s) failed: %s",
+                        job_id[:8], _exc,
+                    )
                 logger.warning(
-                    "Reconciled stale running job %s (elapsed %.0fs)",
-                    job_id[:8], elapsed,
+                    "Phase watchdog failed hung job %s (phase=%s, silent %.0fs)",
+                    job_id[:8], job.phase, silent_for,
                 )
 
     # 2. Persistent store reconciliation (long-running or surviving jobs)
@@ -2814,8 +2912,30 @@ def clear_jobs(status: str = "done,failed") -> JobClearResponse:
     for jid in to_drop:
         del _jobs[jid]
 
-    logger.info("Cleared %d terminal job(s) (status=%s).", len(to_drop), ",".join(sorted(wanted)))
-    return JobClearResponse(cleared=len(to_drop), remaining=len(_jobs))
+    # LE-143 fix: also clear terminal rows from the durable store. The in-memory
+    # dict and the durable store are now the same job (shared id), but a row may
+    # exist ONLY in the durable store (pruned in-memory, or post-restart). Map
+    # the in-memory status filter onto durable terminal statuses so a clear
+    # actually empties the persistent history the 409 path reads from.
+    durable_statuses: set[str] = set()
+    if "done" in wanted:
+        durable_statuses.add("done")
+    if "failed" in wanted:
+        durable_statuses.update({"failed", "cancelled", "interrupted"})
+    cleared_durable = 0
+    try:
+        cleared_durable = _jobs_store.clear_terminal(statuses=durable_statuses)
+    except RuntimeError:
+        pass
+    except Exception as _exc:  # noqa: BLE001
+        logger.warning("clear_jobs: durable clear failed (non-fatal): %s", _exc)
+
+    total_cleared = max(len(to_drop), cleared_durable)
+    logger.info(
+        "Cleared %d terminal job(s) (in-memory=%d, durable=%d, status=%s).",
+        total_cleared, len(to_drop), cleared_durable, ",".join(sorted(wanted)),
+    )
+    return JobClearResponse(cleared=total_cleared, remaining=len(_jobs))
 
 
 @router.delete("/index/jobs/{job_id}", response_model=JobClearResponse)
@@ -2830,17 +2950,61 @@ def delete_job(job_id: str) -> JobClearResponse:
         is still running.
     """
     j = _jobs.get(job_id)
-    if j is None:
+    # LE-143 fix: a job may exist only in the durable store (pruned in-memory
+    # or post-restart). Resolve effective status from whichever record exists
+    # so delete never 404s on a durable-only row that is still holding a lock.
+    stored = None
+    try:
+        stored = _jobs_store.get_job(job_id)
+    except RuntimeError:
+        stored = None
+    if j is None and stored is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    if j.status == "running":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Job {job_id} is still running. Wait for it to finish "
-                f"or restart the service to reset state."
-            ),
-        )
-    del _jobs[job_id]
+
+    in_memory_running = j is not None and j.status == "running"
+    durable_active = stored is not None and stored.status in ("queued", "running")
+    if in_memory_running or durable_active:
+        # An actively-progressing job must not be silently deleted. Reconcile
+        # first: if it is orphaned (dead worker / no progress) release it, then
+        # allow the delete; otherwise reject so we never orphan a live worker.
+        reconciled = 0
+        if stored is not None:
+            try:
+                reconciled = _jobs_store.reconcile_active_for_repo(
+                    stored.repo_slug,
+                    no_progress_seconds=settings.JOB_PHASE_WATCHDOG_SECONDS,
+                )
+            except RuntimeError:
+                reconciled = 0
+        # Re-read durable status after reconcile.
+        still_active = False
+        if stored is not None:
+            try:
+                refreshed = _jobs_store.get_job(job_id)
+                still_active = (
+                    refreshed is not None
+                    and refreshed.status in ("queued", "running")
+                )
+            except RuntimeError:
+                still_active = False
+        if in_memory_running and (j is not None and j.status == "running") and reconciled == 0:
+            still_active = True
+        if still_active:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Job {job_id} is still running. Wait for it to finish, "
+                    f"or POST /index/{job_id}/cancel first."
+                ),
+            )
+
+    if j is not None:
+        del _jobs[job_id]
+    # Always drop the durable row so the per-repo lock + history are released.
+    try:
+        _jobs_store.delete_job(job_id)
+    except RuntimeError:
+        pass
     return JobClearResponse(cleared=1, remaining=len(_jobs))
 
 

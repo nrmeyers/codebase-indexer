@@ -205,6 +205,105 @@ def test_post_index_duplicate_same_repo_returns_409(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LE-143 follow-up — lock release on cancel/clear/delete + reindex reconcile
+# ---------------------------------------------------------------------------
+
+
+def test_durable_and_inmemory_job_id_unified(tmp_path: Path) -> None:
+    """The returned job_id matches the durable row id (root-cause fix).
+
+    Before the fix create_job minted a separate UUID, so terminal
+    transitions never touched the durable row and the lock leaked.
+    """
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        resp = client.post("/index", json={"repo_path": str(tmp_path)})
+    job_id = resp.json()["job_id"]
+    stored = jobs_store.get_job(job_id)
+    assert stored is not None
+    assert stored.job_id == job_id
+
+
+def test_cancel_releases_repo_lock_and_reindex_proceeds(tmp_path: Path) -> None:
+    """POST /cancel marks the durable row terminal so reindex is unblocked."""
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        r1 = client.post("/index", json={"repo_path": str(tmp_path)})
+        job_id = r1.json()["job_id"]
+        # Second request is locked out.
+        assert (
+            client.post("/index", json={"repo_path": str(tmp_path)}).status_code
+            == 409
+        )
+        # Cancel the running job — must release the durable lock.
+        assert client.post(f"/index/{job_id}/cancel").status_code == 200
+        # A new reindex now proceeds instead of 409ing.
+        r3 = client.post("/index", json={"repo_path": str(tmp_path)})
+    assert r3.status_code == 202, r3.text
+    assert jobs_store.find_active_for_repo(tmp_path.name) is not None
+
+
+def test_delete_running_job_reconciles_then_releases_lock(tmp_path: Path) -> None:
+    """DELETE of a no-progress running job releases the durable per-repo lock."""
+    import time
+
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        r1 = client.post("/index", json={"repo_path": str(tmp_path)})
+    job_id = r1.json()["job_id"]
+    # Make the in-memory + durable job look stuck (no progress).
+    _jobs[job_id].last_progress_at = time.time() - 2400
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+        (time.time() - 2400, job_id),
+    )
+    # Mark in-memory terminal so delete is permitted; durable still 'running'.
+    _jobs[job_id].status = "failed"
+    resp = client.delete(f"/index/jobs/{job_id}")
+    assert resp.status_code == 200, resp.text
+    # Durable row is gone — lock released, reindex would proceed.
+    assert jobs_store.get_job(job_id) is None
+    assert jobs_store.find_active_for_repo(tmp_path.name) is None
+
+
+def test_clear_jobs_clears_durable_terminal_rows(tmp_path: Path) -> None:
+    """POST /index/jobs/clear empties durable terminal history too."""
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        r1 = client.post("/index", json={"repo_path": str(tmp_path)})
+    job_id = r1.json()["job_id"]
+    jobs_store.mark_failed(job_id, error="boom", terminal_status="failed")
+    _jobs[job_id].status = "failed"
+    resp = client.post("/index/jobs/clear", params={"status": "done,failed"})
+    assert resp.status_code == 200, resp.text
+    assert jobs_store.get_job(job_id) is None
+
+
+def test_reindex_reconciles_stuck_lock_and_proceeds(tmp_path: Path) -> None:
+    """A reindex request reconciles a stuck (no-progress) lock and proceeds.
+
+    Direct reproduction of LE-143: a durable 'running' row with no progress
+    for 40 min must not 409-block a new reindex — the request path reconciles
+    it (releases the lock) and accepts the new job.
+    """
+    import time
+
+    # Seed a stuck durable running row directly (simulates orphaned worker).
+    stuck = jobs_store.create_job(
+        kind="index", actor_oid="", actor_email="",
+        repo_path=str(tmp_path), force_reindex=False, exclude_paths=frozenset(),
+    )
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+        (time.time() - 2400, stuck.job_id),
+    )
+    with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+        resp = client.post("/index", json={"repo_path": str(tmp_path)})
+    assert resp.status_code == 202, resp.text
+    # The stuck job was reconciled to a terminal state.
+    reaped = jobs_store.get_job(stuck.job_id)
+    assert reaped is not None and reaped.status == "failed"
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 integration tests — jobs_store persistence
 # ---------------------------------------------------------------------------
 
@@ -515,64 +614,63 @@ def test_get_status_with_live_embed_progress(tmp_path: Path) -> None:
 
 
 def test_reconcile_stale_running_jobs_in_memory() -> None:
-    """Verify in-memory job reconciliation for stale running jobs.
+    """A job whose progress heartbeat went silent past the threshold is failed.
 
-    A running job that exceeds the staleness threshold should be marked as
-    'failed' with an appropriate error message.
+    LE-143 phase-watchdog semantics: staleness is keyed on the progress
+    heartbeat (``last_progress_at``), not whole-job age. A job that has not
+    advanced progress past the threshold is treated as hung and failed.
     """
     import time
 
-    from app.routers.index import reconcile_stale_running_jobs
+    from app.routers.index import _Job, _jobs, reconcile_stale_running_jobs
 
-    # Create a running job and backdate its start time
     job_id = "test-stale-job-1"
     now = time.time()
-    stale_job = _jobs[job_id] = type("Job", (), {
-        "job_id": job_id,
-        "status": "running",
-        "started_at": now - 400,  # 400 seconds ago (> 300s threshold)
-        "finished_at": None,
-        "error": None,
-    })()
+    job = _Job(job_id=job_id, repo_path="/tmp/repo-stale")
+    job.status = "running"
+    job.phase = "writing"
+    job.started_at = now - 400
+    # Heartbeat went silent 400s ago (> 300s threshold) — hung phase.
+    job.last_progress_at = now - 400
+    _jobs[job_id] = job
 
-    # Reconcile with a 300s threshold
     reconciled = reconcile_stale_running_jobs(staleness_threshold_seconds=300)
 
-    # Should have reconciled 1 job
     assert reconciled == 1
+    failed = _jobs[job_id]
+    assert failed.status == "failed"
+    assert "phase watchdog" in (failed.error or "")
+    assert failed.finished_at is not None
+    _jobs.pop(job_id, None)
 
-    # Job should now be marked as failed
-    job = _jobs[job_id]
-    assert job.status == "failed"
-    assert "stale by heartbeat reconciliation" in (job.error or "")
-    assert job.finished_at is not None
 
+def test_reconcile_stale_running_jobs_ignores_recent_progress() -> None:
+    """A long-but-healthy job (recent heartbeat) is NOT reaped.
 
-def test_reconcile_stale_running_jobs_ignores_recent() -> None:
-    """Jobs not past the staleness threshold should be left alone."""
+    Critical no-regression: a job that started long ago but is still emitting
+    progress must survive. Old code keyed on ``started_at`` and would kill it;
+    the phase watchdog keys on ``last_progress_at`` so it is left alone.
+    """
     import time
 
-    from app.routers.index import reconcile_stale_running_jobs
+    from app.routers.index import _Job, _jobs, reconcile_stale_running_jobs
 
-    job_id = "test-recent-job"
+    job_id = "test-healthy-long-job"
     now = time.time()
-    recent_job = _jobs[job_id] = type("Job", (), {
-        "job_id": job_id,
-        "status": "running",
-        "started_at": now - 100,  # Only 100 seconds ago (< 300s threshold)
-        "finished_at": None,
-        "error": None,
-    })()
+    job = _Job(job_id=job_id, repo_path="/tmp/repo-healthy")
+    job.status = "running"
+    job.phase = "embedding"
+    job.started_at = now - 4000  # started over an hour ago
+    job.last_progress_at = now - 5  # but still progressing
+    _jobs[job_id] = job
 
     reconciled = reconcile_stale_running_jobs(staleness_threshold_seconds=300)
 
-    # Should not have reconciled anything
     assert reconciled == 0
-
-    # Job should still be running
-    job = _jobs[job_id]
-    assert job.status == "running"
-    assert job.error is None
+    survivor = _jobs[job_id]
+    assert survivor.status == "running"
+    assert survivor.error is None
+    _jobs.pop(job_id, None)
 
 
 def test_reconcile_stale_running_jobs_persistent_store(tmp_path: Path) -> None:

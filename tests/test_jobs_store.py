@@ -346,3 +346,92 @@ def test_record_event_rejects_bad_level(store_db: str) -> None:
     )
     with pytest.raises(sqlite3.IntegrityError):
         jobs_store.record_event(job.job_id, "debug", "should fail")
+
+
+# ---------------------------------------------------------------------------
+# LE-143 follow-up — orphaned-lock reconciliation
+# ---------------------------------------------------------------------------
+
+
+def test_create_job_honours_explicit_job_id(store_db: str) -> None:
+    """A caller-supplied job_id is used verbatim (id unification fix)."""
+    job = jobs_store.create_job(
+        kind="index", actor_oid="u", actor_email="u@x",
+        repo_path="/tmp/unify", force_reindex=False, exclude_paths=frozenset(),
+        job_id="caller-owned-uuid",
+    )
+    assert job.job_id == "caller-owned-uuid"
+    assert jobs_store.get_job("caller-owned-uuid") is not None
+
+
+def test_reconcile_active_for_repo_releases_no_progress_lock(store_db: str) -> None:
+    """A no-progress running job releases its per-repo lock on reconcile.
+
+    Reproduces the LE-143 orphaned-lock bug: a running row whose updated_at
+    has not advanced past the threshold permanently 409-blocks reindex. The
+    reconcile pass must mark it failed so find_active_for_repo returns None.
+    """
+    import time
+
+    job = jobs_store.create_job(
+        kind="index", actor_oid="u", actor_email="u@x",
+        repo_path="/tmp/stuck-repo", force_reindex=False,
+        exclude_paths=frozenset(),
+    )
+    # Backdate updated_at to simulate 40 minutes of no progress.
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+        (time.time() - 2400, job.job_id),
+    )
+    assert jobs_store.find_active_for_repo("stuck-repo") is not None
+
+    released = jobs_store.reconcile_active_for_repo(
+        "stuck-repo", no_progress_seconds=600
+    )
+    assert released == 1
+    # Lock is released — reindex would now proceed.
+    assert jobs_store.find_active_for_repo("stuck-repo") is None
+    got = jobs_store.get_job(job.job_id)
+    assert got is not None and got.status == "failed"
+
+
+def test_find_active_for_repo_reconcile_flag_unblocks_reindex(store_db: str) -> None:
+    """find_active_for_repo(reconcile=True) clears a stuck lock inline."""
+    import time
+
+    job = jobs_store.create_job(
+        kind="index", actor_oid="u", actor_email="u@x",
+        repo_path="/tmp/stuck2", force_reindex=False, exclude_paths=frozenset(),
+    )
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+        (time.time() - 2400, job.job_id),
+    )
+    # Without reconcile the lock is still reported.
+    assert jobs_store.find_active_for_repo("stuck2") is not None
+    # With reconcile the stuck lock is cleared and reindex can proceed.
+    assert (
+        jobs_store.find_active_for_repo(
+            "stuck2", reconcile=True, no_progress_seconds=600
+        )
+        is None
+    )
+
+
+def test_reconcile_active_for_repo_keeps_progressing_job(store_db: str) -> None:
+    """A job still advancing updated_at is NOT reconciled (no false kill)."""
+    import time
+
+    jobs_store.create_job(
+        kind="index", actor_oid="u", actor_email="u@x",
+        repo_path="/tmp/healthy", force_reindex=False, exclude_paths=frozenset(),
+    )
+    # Fresh updated_at (default is now) — well within the window.
+    released = jobs_store.reconcile_active_for_repo(
+        "healthy", no_progress_seconds=600
+    )
+    assert released == 0
+    assert jobs_store.find_active_for_repo("healthy") is not None
+    _ = time  # silence unused import in environments without it

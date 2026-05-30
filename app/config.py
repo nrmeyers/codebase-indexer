@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     # LE-143: heartbeat reconciliation of orphaned running jobs
     JOB_HEARTBEAT_INTERVAL_SECONDS: int = 60
     JOB_STALENESS_THRESHOLD_SECONDS: int = 300
+    # LE-143 follow-up: per-phase watchdog. A running job whose ``updated_at``
+    # (progress heartbeat) hasn't advanced within a single phase for longer
+    # than this is treated as hung — it is marked failed and its per-repo lock
+    # released, instead of hanging the service indefinitely. Generous + bounded
+    # so a legitimately slow phase (large repo embedding) is never killed while
+    # it keeps emitting progress; only a phase that goes fully silent trips it.
+    # Also used as the no-progress window for the reconcile-on-reindex path.
+    JOB_PHASE_WATCHDOG_SECONDS: int = 600
 
     # --- Prometheus metrics (Phase 4) ---
     METRICS_ENABLED: bool = True

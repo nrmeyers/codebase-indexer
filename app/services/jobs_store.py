@@ -354,10 +354,17 @@ def create_job(
     initial_status: str = "running",
     initial_phase: str = "queued",
     triggered_by: str = "manual",
+    job_id: str | None = None,
 ) -> Job:
     """Insert a new ``running`` job row and return the snapshot.
 
     Args:
+        job_id: Optional caller-supplied UUID. When provided, the persistent
+            row shares the id the caller already returned to clients so the
+            in-memory tracker and the durable row are the SAME job (LE-143
+            follow-up). When omitted a fresh UUID is generated — preserves
+            the historical behaviour for callers (watch_manager, tests) that
+            don't track a separate id.
         kind: One of ``index`` | ``embed`` | ``watch_partial``.
         actor_oid: M365 ``oid`` claim (Phase 1 dep). Falls back to
             ``"anon"`` upstream when auth is disabled.
@@ -377,7 +384,7 @@ def create_job(
         Job: Frozen snapshot of the inserted row.
     """
     conn = _require_conn()
-    job_id = str(uuid.uuid4())
+    job_id = job_id or str(uuid.uuid4())
     now = time.time()
     repo_slug = Path(repo_path).name or "repo"
     excludes_json = json.dumps(sorted({str(p) for p in exclude_paths}))
@@ -634,8 +641,126 @@ def get_job(job_id: str) -> Job | None:
 # longer than that.
 _PHANTOM_AGE_SEC = 4 * 60 * 60
 
+# Default no-progress window for the heartbeat reconcile on the lock-check
+# path.  A running row whose ``updated_at`` hasn't advanced in this long has
+# made no progress and is almost certainly orphaned (the original LE-143
+# repro: phase=queued, progress=0%, elapsed=40min). Distinct from
+# ``_PHANTOM_AGE_SEC`` (a coarse wall-clock backstop): this is keyed on
+# *progress* (updated_at), not absolute age, so a legitimately long-running
+# job that keeps emitting progress is never reaped.
+_DEFAULT_NO_PROGRESS_SEC = 10 * 60
 
-def find_active_for_repo(repo_slug: str) -> Job | None:
+
+def _process_alive(pid: int | None) -> bool:
+    """Best-effort liveness check for a job's owning process.
+
+    Returns True when we cannot prove the process is gone (no pid recorded,
+    or the platform doesn't support the probe) so we never reap a job on a
+    false negative. A reliable "process is gone" is the only signal that
+    lets us release a lock early regardless of the no-progress window.
+    """
+    if pid is None or pid <= 0:
+        return True
+    # A row owned by THIS process is by definition alive.
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is owned by another user — treat as alive.
+        return True
+    except OSError:
+        return True
+
+
+def _expire_job_unlocked(
+    conn: sqlite3.Connection, job_id: str, reason: str
+) -> None:
+    """Inline terminal transition used by read-path reconciliation.
+
+    Mirrors ``mark_failed`` but is callable without re-entering the module
+    lock from a caller that already holds it (or from a read path that takes
+    the lock itself).
+    """
+    now = time.time()
+    conn.execute(
+        """
+        UPDATE jobs SET
+          status = 'failed',
+          error = COALESCE(error, ?),
+          updated_at = ?,
+          finished_at = COALESCE(finished_at, ?)
+        WHERE job_id = ? AND status IN ('queued','running')
+        """,
+        (reason, now, now, job_id),
+    )
+
+
+def reconcile_active_for_repo(
+    repo_slug: str,
+    *,
+    no_progress_seconds: int = _DEFAULT_NO_PROGRESS_SEC,
+) -> int:
+    """Reconcile orphaned active rows for a repo, releasing the per-repo lock.
+
+    LE-143 (follow-up): called on the reindex request path (and the periodic
+    sweep) so a stuck/orphaned job never permanently blocks reindex. A row is
+    marked ``failed`` when EITHER:
+        * its owning process is provably gone (``pid`` not alive), OR
+        * it has made no progress (``updated_at`` unchanged) for longer than
+          ``no_progress_seconds``.
+
+    A row that keeps advancing ``updated_at`` is never touched, so legitimate
+    long runs survive. Returns the number of rows reconciled.
+    """
+    conn = _require_conn()
+    now = time.time()
+    rows = conn.execute(
+        """
+        SELECT job_id, pid, updated_at, started_at
+        FROM jobs
+        WHERE repo_slug = ? AND status IN ('queued','running')
+        """,
+        (repo_slug,),
+    ).fetchall()
+    reconciled = 0
+    with _lock:
+        for row in rows:
+            jid = row["job_id"]
+            pid = row["pid"]
+            updated_at = float(row["updated_at"] or 0)
+            no_progress = (now - updated_at) > max(1, no_progress_seconds)
+            dead = not _process_alive(pid)
+            if dead:
+                _expire_job_unlocked(
+                    conn, jid, "orphaned — owning process is gone"
+                )
+                reconciled += 1
+            elif no_progress:
+                _expire_job_unlocked(
+                    conn,
+                    jid,
+                    f"orphaned — no progress for "
+                    f"{int(now - updated_at)}s (heartbeat reconcile)",
+                )
+                reconciled += 1
+    if reconciled:
+        logger.warning(
+            "reconcile_active_for_repo(%s): released %d orphaned lock(s)",
+            repo_slug, reconciled,
+        )
+    return reconciled
+
+
+def find_active_for_repo(
+    repo_slug: str,
+    *,
+    reconcile: bool = False,
+    no_progress_seconds: int = _DEFAULT_NO_PROGRESS_SEC,
+) -> Job | None:
     """Return the most recent active (queued|running) job for a slug.
 
     Auto-expires phantom rows whose started_at is older than the wall-clock
@@ -643,7 +768,18 @@ def find_active_for_repo(repo_slug: str) -> Job | None:
     state, so reporting them as "still running" makes /index POST 409 on
     every retry forever.  We mark them ``failed`` with a clear error so
     they appear in the job history but no longer block new work.
+
+    Args:
+        reconcile: When True, run :func:`reconcile_active_for_repo` first so a
+            no-progress / dead-process row releases its lock BEFORE we report
+            it as active. The reindex request path passes ``reconcile=True``
+            so a stuck job can never permanently 409-block a new reindex.
+        no_progress_seconds: No-progress window passed to the reconcile pass.
     """
+    if reconcile:
+        reconcile_active_for_repo(
+            repo_slug, no_progress_seconds=no_progress_seconds
+        )
     conn = _require_conn()
     row = conn.execute(
         """
@@ -665,16 +801,8 @@ def find_active_for_repo(repo_slug: str) -> Job | None:
         # caring.  The next call to find_active_for_repo for this slug
         # will return None.
         with _lock:
-            conn.execute(
-                """
-                UPDATE jobs SET
-                  status = 'failed',
-                  error = COALESCE(error, 'phantom — worker died without flushing'),
-                  updated_at = ?,
-                  finished_at = COALESCE(finished_at, ?)
-                WHERE job_id = ? AND status IN ('queued','running')
-                """,
-                (time.time(), time.time(), job.job_id),
+            _expire_job_unlocked(
+                conn, job.job_id, "phantom — worker died without flushing"
             )
         return None
     return job
@@ -781,6 +909,17 @@ def clear_terminal(
         params.append(cutoff)
     conn = _require_conn()
     with _lock:
+        # Clear dependent job_events first to satisfy the FK constraint
+        # (job_events.job_id REFERENCES jobs.job_id). Without this the DELETE
+        # raises "FOREIGN KEY constraint failed" and leaves the lock-holding
+        # rows in place — the clear endpoint silently no-ops (LE-143 repro).
+        sel_ids = sql.replace("DELETE FROM jobs", "SELECT job_id FROM jobs", 1)
+        ids = [r[0] for r in conn.execute(sel_ids, params).fetchall()]
+        if ids:
+            qmarks = ",".join("?" for _ in ids)
+            conn.execute(
+                f"DELETE FROM job_events WHERE job_id IN ({qmarks})", ids
+            )
         cur = conn.execute(sql, params)
         return int(cur.rowcount)
 
@@ -816,6 +955,8 @@ def delete_job(job_id: str) -> bool:
     """Drop a single row. Returns True iff something was deleted."""
     conn = _require_conn()
     with _lock:
+        # FK-safe: clear dependent job_events before the parent row.
+        conn.execute("DELETE FROM job_events WHERE job_id = ?", (job_id,))
         cur = conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
         return cur.rowcount > 0
 
@@ -824,6 +965,12 @@ def delete_by_repo(repo_slug: str) -> int:
     """Delete all jobs for a given repo. Returns number of rows deleted."""
     conn = _require_conn()
     with _lock:
+        # FK-safe: clear dependent job_events for this repo's jobs first.
+        conn.execute(
+            "DELETE FROM job_events WHERE job_id IN "
+            "(SELECT job_id FROM jobs WHERE repo_slug = ?)",
+            (repo_slug,),
+        )
         cur = conn.execute("DELETE FROM jobs WHERE repo_slug = ?", (repo_slug,))
         return cur.rowcount
 
