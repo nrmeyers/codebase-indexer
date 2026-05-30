@@ -27,6 +27,8 @@ from datetime import UTC, datetime
 import real_ladybug as lb
 from loguru import logger
 
+from .ladybug_buffer_pool import resolve_buffer_pool_size
+
 from codebase_rag import exceptions as ex
 from codebase_rag import logs as ls
 from codebase_rag.constants import (
@@ -131,7 +133,9 @@ class LadybugIngestor:
     def __enter__(self) -> LadybugIngestor:
         logger.info(f"LadybugDB connecting to: {self._db_path}")
         migrate(self._db_path)
-        self._db = lb.Database(self._db_path)
+        self._db = lb.Database(
+            self._db_path, buffer_pool_size=resolve_buffer_pool_size()
+        )
         self.conn = lb.Connection(self._db)
         logger.info("LadybugDB connected ✓")
         return self

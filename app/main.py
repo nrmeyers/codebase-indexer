@@ -83,6 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from pathlib import Path as _Path
     import logging as _logging
     import real_ladybug as _lb
+    from .services.ladybug_buffer_pool import resolve_buffer_pool_size as _resolve_bps
     from .services.s3_store import restore_indexes as _s3_restore, snapshot_indexes as _s3_snapshot
 
     db_dir = _Path(settings.LADYBUG_DB_DIR)
@@ -107,7 +108,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     for db_file in sorted(db_dir.glob("*.db")):
         _probed += 1
         try:
-            _conn = _lb.Connection(_lb.Database(str(db_file)))
+            _conn = _lb.Connection(
+                _lb.Database(str(db_file), buffer_pool_size=_resolve_bps())
+            )
             del _conn
         except Exception as _exc:
             _msg = str(_exc)

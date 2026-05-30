@@ -311,6 +311,7 @@ flowchart LR
 | `LADYBUG_DB_DIR`          | `.cgr/repos`            | Per-repo `.db` + `.duck` storage root.                           |
 | `LADYBUG_DB_PATH`         | _(legacy)_              | Single-DB fallback for direct `code-graph-rag` callers.          |
 | `LADYBUG_BATCH_SIZE`      | `1000`                  | Ingestor flush batch size.                                       |
+| `KUZU_BUFFER_POOL_SIZE`   | `2147483648` (2 GiB)    | Bounded LadybugDB/Kùzu buffer-pool size in **bytes**. The engine's default (`0`) auto-sizes to ~80% of physical RAM and over-reserves; on a memory-pressured box (e.g. co-tenanted with a large local LLM) the mmap fails (`Buffer manager exception: Mmap for size … failed`) and **all** graph/structural/path queries break for every repo until restart. Every `Database` open passes this explicit bound so it degrades gracefully. Invalid / `0` / negative values fall back to the 2 GiB default. |
 | `TARGET_REPO_PATH`        | `.`                     | Default repo when a request omits `repo_path`.                   |
 | `INDEXER_HOST` / `HOST`   | `127.0.0.1`             | HTTP bind address. **Loopback-only by default** (see security note below). `INDEXER_HOST` takes precedence over `HOST`. Set to `0.0.0.0` to listen on all interfaces (containers / multi-host deploys). |
 | `PORT`                    | `8000`                  | HTTP bind port.                                                  |

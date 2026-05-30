@@ -906,8 +906,9 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     _count_conn = None
     try:
         import real_ladybug as lb  # type: ignore[import-untyped]
+        from ..services.ladybug_buffer_pool import resolve_buffer_pool_size  # noqa: PLC0415
 
-        _count_db = lb.Database(repo_db_path)
+        _count_db = lb.Database(repo_db_path, buffer_pool_size=resolve_buffer_pool_size())
         _count_conn = lb.Connection(_count_db)
 
         node_res = _count_conn.execute("MATCH (n) RETURN count(n) AS cnt")
@@ -971,8 +972,11 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         from ..services.tantivy_index import TantivyIndex  # noqa: PLC0415
         from ..config import slugify_repo  # noqa: PLC0415
         import real_ladybug as _lb_t  # type: ignore[import-untyped]  # noqa: PLC0415
+        from ..services.ladybug_buffer_pool import resolve_buffer_pool_size  # noqa: PLC0415
 
-        _t_db = _lb_t.Database(repo_db_path, read_only=True)
+        _t_db = _lb_t.Database(
+            repo_db_path, read_only=True, buffer_pool_size=resolve_buffer_pool_size()
+        )
         _t_conn = _lb_t.Connection(_t_db)
         try:
             _cypher = (

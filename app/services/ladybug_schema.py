@@ -37,6 +37,8 @@ from __future__ import annotations
 import real_ladybug as lb
 from loguru import logger
 
+from .ladybug_buffer_pool import resolve_buffer_pool_size
+
 # ---------------------------------------------------------------------------
 # Node table definitions
 # ---------------------------------------------------------------------------
@@ -533,7 +535,7 @@ def migrate(db_path: str) -> None:
     db: lb.Database | None = None
     conn: lb.Connection | None = None
     try:
-        db = lb.Database(db_path)
+        db = lb.Database(db_path, buffer_pool_size=resolve_buffer_pool_size())
         conn = lb.Connection(db)
         # 1. Node DDL — rel tables below reference these types.
         #    ``CREATE NODE TABLE IF NOT EXISTS`` is a no-op when the table

@@ -472,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
     # top) so that ``import app.scripts.embed_driver`` from a unit test
     # does not require the full embedding stack to be installed.
     import real_ladybug as lb
+    from app.services.ladybug_buffer_pool import resolve_buffer_pool_size
     from codebase_rag.storage.vector_store import (
         EmbeddingRow,
         bulk_insert,
@@ -531,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
     # with the live indexer — exactly what we want here, since the embed
     # pass only QUERIES the graph and writes vectors to a separate .duck
     # file.
-    _db = lb.Database(repo_db_path, read_only=True)
+    _db = lb.Database(repo_db_path, read_only=True, buffer_pool_size=resolve_buffer_pool_size())
     _conn_lb = lb.Connection(_db)
 
     _cypher = """
@@ -738,7 +739,7 @@ RETURN n.qualified_name AS qualified_name,
     # ------------------------------------------------------------------
     # 3. Class summaries (deterministic — Phase 1.2).
     # ------------------------------------------------------------------
-    _class_db = lb.Database(repo_db_path, read_only=True)
+    _class_db = lb.Database(repo_db_path, read_only=True, buffer_pool_size=resolve_buffer_pool_size())
     _class_conn = lb.Connection(_class_db)
     _class_cypher = """
 MATCH (m:Module)-[:DEFINES]->(c:Class)
@@ -859,7 +860,7 @@ RETURN c.qualified_name AS qualified_name,
     # ------------------------------------------------------------------
     # 4. Module summaries (deterministic — Phase 1.2b).
     # ------------------------------------------------------------------
-    _module_db = lb.Database(repo_db_path, read_only=True)
+    _module_db = lb.Database(repo_db_path, read_only=True, buffer_pool_size=resolve_buffer_pool_size())
     _module_conn = lb.Connection(_module_db)
     _module_cypher = """
 MATCH (m:Module)
@@ -948,7 +949,7 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
     # ------------------------------------------------------------------
     # 5. File summaries (Manifest Haiku — Phase 1.2b, cost-capped).
     # ------------------------------------------------------------------
-    _file_db = lb.Database(repo_db_path, read_only=True)
+    _file_db = lb.Database(repo_db_path, read_only=True, buffer_pool_size=resolve_buffer_pool_size())
     _file_conn = lb.Connection(_file_db)
     _file_cypher = """
 MATCH (m:Module)

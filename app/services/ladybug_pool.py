@@ -47,7 +47,11 @@ def open_read_conn(db_path: str) -> Tuple[Any, Any]:
     """
     import real_ladybug as lb  # type: ignore[import-untyped]
 
-    db = lb.Database(db_path, read_only=True)
+    from .ladybug_buffer_pool import resolve_buffer_pool_size
+
+    db = lb.Database(
+        db_path, read_only=True, buffer_pool_size=resolve_buffer_pool_size()
+    )
     conn = lb.Connection(db)
     return db, conn
 
@@ -66,6 +70,8 @@ def open_rw_conn(db_path: str) -> Tuple[Any, Any]:
     """
     import real_ladybug as lb  # type: ignore[import-untyped]
 
-    db = lb.Database(db_path)
+    from .ladybug_buffer_pool import resolve_buffer_pool_size
+
+    db = lb.Database(db_path, buffer_pool_size=resolve_buffer_pool_size())
     conn = lb.Connection(db)
     return db, conn
