@@ -185,6 +185,18 @@ Override the base URL at any time with `--base-url` or `CODE_INDEXER_BASE_URL`.
 
 The HTTP service listens on port `8000` by default when run directly (`uv run uvicorn app.main:app`), or `8003` when launched by the CLI to match TheForge's proxy.
 
+> **Security — bind host defaults to loopback.** Running `python main.py` binds
+> the server to `127.0.0.1` (loopback only). The service has **no
+> path-level authentication**, so binding to all interfaces (`0.0.0.0`) on a
+> Tailscale-connected or LAN-reachable host exposes the full index/search/admin
+> surface to anyone who can reach the IP. TheForge proxies the service over
+> `http://localhost:8003`, so the loopback default is transparent to TheForge.
+> To listen on all interfaces deliberately (containers, multi-host deploys),
+> set `INDEXER_HOST=0.0.0.0` (or `HOST=0.0.0.0`). The production Docker image's
+> `CMD` already passes `--host 0.0.0.0` explicitly, and the CLI `serve` /
+> daemon paths pass `--host 127.0.0.1` explicitly — both override this default
+> and are unaffected by the change.
+
 Full schema lives at `GET /openapi.json`. The most-used endpoints:
 
 | Method   | Path                     | Description                                             |
@@ -300,7 +312,7 @@ flowchart LR
 | `LADYBUG_DB_PATH`         | _(legacy)_              | Single-DB fallback for direct `code-graph-rag` callers.          |
 | `LADYBUG_BATCH_SIZE`      | `1000`                  | Ingestor flush batch size.                                       |
 | `TARGET_REPO_PATH`        | `.`                     | Default repo when a request omits `repo_path`.                   |
-| `HOST`                    | `0.0.0.0`               | HTTP bind address.                                               |
+| `INDEXER_HOST` / `HOST`   | `127.0.0.1`             | HTTP bind address. **Loopback-only by default** (see security note below). `INDEXER_HOST` takes precedence over `HOST`. Set to `0.0.0.0` to listen on all interfaces (containers / multi-host deploys). |
 | `PORT`                    | `8000`                  | HTTP bind port.                                                  |
 | `EMBEDDER_BACKEND`        | `local`                 | One of `local`, `sagemaker`, `tei`, `openai`.                    |
 | `LOCAL_EMBED_MODEL`       | `intfloat/e5-base-v2`   | Override only after re-indexing.                                 |

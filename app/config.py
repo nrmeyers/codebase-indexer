@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -116,7 +117,21 @@ class Settings(BaseSettings):
     TARGET_REPO_PATH: str = "."
 
     # --- Server ---
-    HOST: str = "0.0.0.0"
+    # Bind host for the HTTP server. Defaults to loopback (127.0.0.1) so a
+    # bare ``python main.py`` is localhost-only and is NOT exposed on the
+    # Tailscale IP / LAN by default (CVE hardening — the service had no
+    # path-level auth, so a 0.0.0.0 default made it reachable by the whole
+    # tailnet). TheForge proxies it over http://localhost:8003, so loopback
+    # is transparent to TheForge. Containers / multi-host deploys that
+    # genuinely need to listen on all interfaces set HOST (or INDEXER_HOST)
+    # to "0.0.0.0" explicitly — the production Dockerfile CMD does exactly
+    # that. ``INDEXER_HOST`` is the preferred env var name (namespaced to
+    # avoid clashing with a generic shared ``HOST``); plain ``HOST`` is
+    # still honoured as a fallback.
+    HOST: str = Field(
+        default="127.0.0.1",
+        validation_alias=AliasChoices("INDEXER_HOST", "HOST"),
+    )
     PORT: int = 8000
 
     # --- GitHub integration ---

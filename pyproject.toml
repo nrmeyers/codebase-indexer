@@ -11,6 +11,12 @@ authors = [
 ]
 dependencies = [
     "fastapi>=0.136.0",
+    # Explicit floor for CVE-2026-48710 ("BadHost"): Starlette < 1.0.1 has a
+    # Host-header path-auth bypass (auth-bypass / SSRF / RCE, CVSS ~7).
+    # fastapi 0.136.0 pulls starlette transitively (it allows starlette 1.0.x),
+    # but we pin the floor here so the safe version is locked even if fastapi's
+    # range loosens. Fixed in starlette 1.0.1.
+    "starlette>=1.0.1",
     "pydantic>=2.13.3",
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.2.2",
