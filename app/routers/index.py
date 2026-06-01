@@ -186,6 +186,24 @@ class _IndexCancelledError(RuntimeError):
     """Raised from the progress callback when a job receives a cancel signal."""
 
 
+class _GraphTruncatedError(RuntimeError):
+    """Raised after the parse pass when the persisted graph carries the
+    structural skeleton (Files / Modules) but ZERO definition nodes
+    (Function / Method / Class) even though parseable files were walked.
+
+    This is the "369-node" failure mode (DEV — definition-node-flush-at-scale):
+    a large repo whose run was reaped mid-write (OOM / phase-watchdog / SIGKILL)
+    after the structural pass but before any definition node committed, leaving
+    a graph that *looks* populated (megabytes on disk) yet contains no code
+    symbols. Reporting ``status=done`` on such a graph is the root harm: it (a)
+    hides the truncation from callers and (b) lets the on-disk hash cache be
+    trusted so every subsequent incremental run skips all files and the
+    truncation becomes permanent. Raising here converts a silent permanent
+    truncation into a loud, retryable failure — and the raising path also
+    deletes the poisoning hash cache so the operator's retry re-parses cleanly.
+    """
+
+
 # ---------------------------------------------------------------------------
 # In-memory job store
 # ---------------------------------------------------------------------------
@@ -1108,6 +1126,8 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # lock before the embedding subprocess tries to open the same file.
     _count_db = None
     _count_conn = None
+    _def_count = 0
+    _counts_ok = False
     try:
         import real_ladybug as lb  # type: ignore[import-untyped]
         from ..services.ladybug_buffer_pool import resolve_buffer_pool_size  # noqa: PLC0415
@@ -1122,6 +1142,20 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         rel_res = _count_conn.execute("MATCH ()-[r]->() RETURN count(r) AS cnt")
         if rel_res.has_next():
             job.rel_count = int(rel_res.get_next()[0])
+
+        # Definition-node tally for the post-flush truncation guard below.
+        # This dialect (Kùzu fork) rejects a disjunctive ``WHERE n:A OR n:B``
+        # label predicate, so we sum per-label counts (same approach as
+        # ``_graph_is_truncated``). Short-circuit on the first non-zero label.
+        for _lbl in _DEFINITION_NODE_LABELS:
+            _dres = _count_conn.execute(
+                f"MATCH (n:{_lbl}) RETURN count(n) AS cnt"
+            )
+            if _dres.has_next():
+                _def_count += int(_dres.get_next()[0])
+            if _def_count > 0:
+                break
+        _counts_ok = True
     except Exception:
         pass  # counts are best-effort
     finally:
@@ -1143,6 +1177,50 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         _count_db = None
         import gc as _gc
         _gc.collect()
+
+    # ------------------------------------------------------------------
+    # Post-flush truncation guard (DEV — definition-node-flush-at-scale).
+    # ------------------------------------------------------------------
+    # The "369-node" failure: the parse walked real files and committed the
+    # structural skeleton, yet ZERO definition nodes (Function/Method/Class)
+    # persisted. Marking such a run ``status=done`` is the root harm — it hides
+    # the data loss AND lets the on-disk hash cache be trusted, so every later
+    # incremental run skips all files and the truncation becomes permanent
+    # (the live TheForge.db reproduced exactly this: 369 nodes, 0 definitions,
+    # 1649 trusted hash-cache entries). Detect it here and FAIL LOUD instead.
+    #
+    # Conditions for the guard to fire (all must hold):
+    #   • counts were read successfully (else we can't judge — best-effort)
+    #   • the parse actually walked parseable files (files_done > 0) — an empty
+    #     or non-code repo legitimately has zero definitions and must NOT fail
+    #   • zero definition nodes persisted
+    #
+    # On fire we delete the poisoning hash + stat caches so the operator's
+    # retry re-parses every file from scratch, then raise so the job surfaces
+    # ``status=failed`` with a clear remediation message rather than a
+    # deceptive ``status=done`` over a skeleton graph.
+    _files_parsed = job.files_done or 0
+    if _counts_ok and _files_parsed > 0 and _def_count == 0:
+        for _poison in (
+            repo / ".cgr-hash-cache.json",
+            repo / ".cgr-stat-cache.json",
+        ):
+            try:
+                _poison.unlink(missing_ok=True)
+            except OSError:
+                pass  # best-effort — a locked cache is non-fatal
+        logger.error(
+            "Graph truncated for repo %s: parsed %d files but persisted 0 "
+            "definition nodes (total nodes=%d). Deleted hash/stat caches to "
+            "force a clean re-parse on retry. Failing the job instead of "
+            "reporting done over a skeleton graph.",
+            repo_name, _files_parsed, job.node_count,
+        )
+        raise _GraphTruncatedError(
+            f"graph truncated: {_files_parsed} files parsed but 0 definition "
+            f"nodes persisted (total nodes={job.node_count}). Hash cache "
+            f"cleared — retry the index to rebuild definitions."
+        )
 
     # Persist metadata sidecar AFTER counts are populated so the UI sees
     # authoritative node/rel totals in /stats without a separate query.
