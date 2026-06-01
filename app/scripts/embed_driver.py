@@ -228,6 +228,166 @@ def partition_batch_result(
     return ([(_m, _e) for _m, _e in zip(meta, embeddings)], 0)
 
 
+# ---------------------------------------------------------------------------
+# Durable persistence + fail-loud post-persist verification.
+#
+# Root cause (2026-05-31 dogfood): the embed driver relied entirely on
+# DuckDB's implicit checkpoint-on-clean-close to flush the ``embeddings``
+# rows from the write-ahead log (``<repo>.duck.wal``) into the main
+# ``<repo>.duck`` file.  DuckDB's default ``checkpoint_threshold`` is 16 MiB,
+# so a typical ~10 MB embed payload stays WAL-resident for the WHOLE run and
+# is only durably persisted on a clean ``conn.close()``.  Two live triggers
+# discard those COMMITTED-but-WAL-resident rows silently:
+#
+#   1. The subprocess is killed (OOM / SIGKILL / 4 hr timeout) before
+#      ``_vec_conn.close()`` runs — the WAL survives, but…
+#   2. …a subsequent/overlapping ``force_reindex`` in ``_blocking_index``
+#      unlinks ``<repo>.duck.wal`` (the duck_wal cleanup), discarding every
+#      committed row, after which ``_write_meta`` recreates an empty schema.
+#
+# Because ``_embedded_count`` is bumped in-process the instant ``bulk_insert``
+# returns (decoupled from durable persistence), the job still printed
+# ``EMBED_DONE`` / ``embedded_count=3698`` while ``SELECT COUNT(*) FROM
+# embeddings`` on the target ``.duck`` was 0 — a classic silent-success.
+#
+# Two-part defence (mirrors the PR #97/#98 ``fail loud at the flush``
+# pattern):
+#   * ``checkpoint_vec_store`` forces an explicit CHECKPOINT after writes so
+#     rows land in the main file IMMEDIATELY (not WAL-resident), closing the
+#     kill / WAL-delete window.
+#   * ``verify_persisted_embeddings`` REOPENS the file and counts the rows;
+#     ``main`` raises ``EmbedPersistError`` (non-zero exit, NO ``EMBED_DONE``)
+#     when the durable count grossly under-shoots what we claim to have
+#     embedded — converting any future silent-corruption mode into a visible
+#     per-run failure regardless of root cause.
+# ---------------------------------------------------------------------------
+
+
+class EmbedPersistError(RuntimeError):
+    """Raised when embeddings were counted but did not durably persist.
+
+    The fail-loud counterpart to the in-process ``_embedded_count``: if the
+    driver claims to have embedded N>0 symbols but the on-disk ``.duck``
+    holds (grossly) fewer rows after close, persistence silently failed and
+    the job MUST be marked failed rather than reporting ``EMBED_DONE``.
+    """
+
+
+def checkpoint_vec_store(conn: Any) -> None:
+    """Force a durable DuckDB CHECKPOINT, flushing the WAL into the main file.
+
+    DuckDB only auto-checkpoints once the WAL crosses ``checkpoint_threshold``
+    (16 MiB by default) or on a clean connection close.  The embed payload is
+    typically below that threshold, so without an explicit CHECKPOINT every
+    committed ``embeddings`` row stays in ``<repo>.duck.wal`` and is lost if
+    the process is killed or the WAL is unlinked before close.  Calling this
+    after the final flush makes the rows durable in the main ``.duck`` file
+    immediately.
+
+    Best-effort and non-fatal: a CHECKPOINT failure is swallowed (a clean
+    ``close()`` would still checkpoint, and the post-persist verification is
+    the real safety net).  ``FORCE CHECKPOINT`` is preferred so the flush is
+    not blocked by other read transactions on the same connection.
+
+    Args:
+        conn: Open DuckDB connection from ``open_or_create``.
+    """
+    for _stmt in ("FORCE CHECKPOINT", "CHECKPOINT"):
+        try:
+            conn.execute(_stmt)
+            return
+        except Exception:  # noqa: BLE001 — fall through to the plain CHECKPOINT
+            continue
+
+
+def count_persisted_embeddings(vec_db_path: str) -> int:
+    """Reopen the ``.duck`` file read-only and return the durable row count.
+
+    Opens a FRESH connection (so WAL replay / checkpoint state is whatever is
+    actually on disk after the embed connection closed) and counts the
+    ``embeddings`` table.  Returns 0 when the file or table does not exist —
+    a missing table after a non-empty embed pass is itself the failure the
+    caller is checking for.
+
+    Args:
+        vec_db_path: Filesystem path to the per-repo ``.duck`` file.
+
+    Returns:
+        Number of rows in the ``embeddings`` table, or 0 on any open/query
+        failure (treated as "nothing persisted" by the verifier).
+    """
+    try:
+        import duckdb
+    except ImportError:  # pragma: no cover — duckdb is a hard runtime dep
+        return 0
+    try:
+        _conn = duckdb.connect(vec_db_path, read_only=True)
+    except Exception:  # noqa: BLE001 — file missing / locked / corrupt
+        return 0
+    try:
+        row = _conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()
+        return int(row[0]) if row else 0
+    except Exception:  # noqa: BLE001 — table absent → nothing persisted
+        return 0
+    finally:
+        try:
+            _conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def verify_persisted_embeddings(
+    *,
+    embedded_count: int,
+    persisted_count: int,
+    min_ratio: float = 0.5,
+) -> str | None:
+    """Decide whether the durable row count is consistent with the claim.
+
+    The guard fires (returns an error message) when we CLAIMED to embed
+    ``embedded_count`` > 0 symbols but the on-disk store holds far fewer
+    rows.  The DELETE-then-INSERT upsert in ``bulk_insert`` legitimately
+    collapses duplicate ``qualified_name`` values (e.g. overloaded methods
+    that share a qname), so the persisted count is expected to be SLIGHTLY
+    below ``embedded_count`` — we only fail on a GROSS shortfall:
+
+    * ``persisted_count == 0`` while ``embedded_count > 0`` → total loss
+      (the exact 2026-05-31 dogfood mode: 3698 embedded, 0 persisted).
+    * ``persisted_count < embedded_count * min_ratio`` → a large fraction
+      of the committed rows vanished.
+
+    Args:
+        embedded_count: Rows the driver counted as embedded (``_embedded_count``).
+        persisted_count: Rows actually on disk after close
+            (``count_persisted_embeddings``).
+        min_ratio: Lower bound on ``persisted / embedded`` before we treat
+            the shortfall as corruption.  Default 0.5 — generous headroom
+            over the ~2% upsert-dedup seen on real repos, while still
+            catching the catastrophic 0-row / near-0-row case.
+
+    Returns:
+        A human-readable failure message when the guard fires, else ``None``.
+    """
+    if embedded_count <= 0:
+        # Nothing claimed embedded — a 0/0 outcome is a legitimate no-op
+        # (e.g. an incremental re-embed where every symbol was unchanged).
+        return None
+    if persisted_count <= 0:
+        return (
+            f"embedded_count={embedded_count} but 0 rows persisted to the "
+            f"vector store — committed embeddings did not survive to disk "
+            f"(WAL discarded before checkpoint?). Refusing to report success."
+        )
+    if persisted_count < embedded_count * min_ratio:
+        return (
+            f"embedded_count={embedded_count} but only persisted_count="
+            f"{persisted_count} rows survived to the vector store "
+            f"(< {min_ratio:.0%} of claimed). Gross persistence shortfall — "
+            f"refusing to report success."
+        )
+    return None
+
+
 def resolve_ingest_concurrency() -> int:
     """Resolve the number of concurrent SageMaker batch invocations.
 
@@ -1137,6 +1297,13 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
     )
 
     _pool.shutdown(wait=True)
+    # Force a durable CHECKPOINT BEFORE close so every committed ``embeddings``
+    # row is flushed out of the WAL into the main ``.duck`` file immediately.
+    # Without this the rows stay WAL-resident (DuckDB's 16 MiB
+    # checkpoint_threshold is rarely crossed by one embed pass) and are lost
+    # if this subprocess is killed, or if a subsequent force-reindex unlinks
+    # ``<repo>.duck.wal`` before close — the 2026-05-31 silent-success mode.
+    checkpoint_vec_store(_vec_conn)
     _vec_conn.close()
 
     # ------------------------------------------------------------------
@@ -1176,6 +1343,38 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
         f"filtered {_skipped_filtered}, "
         f"failed {_failed_count})"
     )
+
+    # ------------------------------------------------------------------
+    # 7. Fail-loud post-persist verification (2026-05-31 silent-success fix).
+    #
+    # GUARANTEED guard regardless of root cause: REOPEN the ``.duck`` file
+    # with a fresh connection and count the durable ``embeddings`` rows.  If
+    # we counted N>0 embedded symbols in-process but the on-disk store holds
+    # 0 (or grossly fewer) rows, persistence silently failed — the exact
+    # 2026-05-31 mode where ``embedded_count=3698`` yet ``SELECT COUNT(*) FROM
+    # embeddings`` was 0.  Mirror the PR #97/#98 ``fail loud at the flush``
+    # pattern: print a clear PERSIST line, emit EMBED_FAILED (NOT the
+    # EMBED_DONE success sentinel) and return non-zero so the parent worker
+    # marks the job failed and the operator re-runs.  This converts a silent
+    # corruption into a visible failure every single run.
+    _persisted_count = count_persisted_embeddings(vec_db_path)
+    print(
+        f"PERSIST_VERIFY embedded={_embedded_count} "
+        f"persisted={_persisted_count}",
+        flush=True,
+    )
+    _persist_problem = verify_persisted_embeddings(
+        embedded_count=_embedded_count,
+        persisted_count=_persisted_count,
+    )
+    if _persist_problem is not None:
+        print(f"WARN embed.persist_verify_failed {_persist_problem}", flush=True)
+        print(
+            f"EMBED_FAILED reason=persist_verify "
+            f"embedded={_embedded_count} persisted={_persisted_count}",
+            flush=True,
+        )
+        raise EmbedPersistError(_persist_problem)
 
     # LE-151b: fail loud. If ANY batch failed to embed (transient SageMaker
     # failure that survived retries, or a hard error), exit non-zero so the
