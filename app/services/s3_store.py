@@ -201,12 +201,79 @@ def _is_in_sync(local_path: Path, s3_obj: dict, client, bucket: str) -> bool:
     return local_md5 == s3_content_md5
 
 
+def _duck_embeddings_row_count(path: Path) -> int | None:
+    """Return the ``embeddings`` row count of a ``.duck`` file, or ``None``.
+
+    Used by the snapshot path to avoid pushing an EMPTY ``<repo>.duck`` over a
+    populated copy already in S3 (the second leg of the "embeddings vanish"
+    bug: a force-reindex / SIGKILL mid-embed leaves a 0-row ``.duck`` locally,
+    and the unconditional periodic snapshot would otherwise poison S3 with it).
+
+    Opens read-only and is fully fail-open: any error (duckdb missing, file
+    locked by the writer, no ``embeddings`` table) returns ``None`` so the
+    caller falls back to the legacy "always upload" behaviour.
+    """
+    try:
+        import duckdb
+    except Exception:
+        return None
+    try:
+        conn = duckdb.connect(str(path), read_only=True)
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()
+            return int(row[0]) if row is not None else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _s3_last_modified_epoch(obj: dict) -> float | None:
+    """Best-effort UTC epoch of an S3 object's ``LastModified``.
+
+    ``list_objects_v2`` (and ``head_object``) return a timezone-aware
+    ``datetime``.  We convert to a POSIX timestamp so it can be compared
+    directly against ``Path.stat().st_mtime`` (also UTC epoch).  Returns
+    ``None`` when the field is missing or unparsable so callers can fall
+    back to the legacy content-only behaviour.
+    """
+    lm = obj.get("LastModified")
+    if lm is None:
+        return None
+    try:
+        # botocore returns aware datetimes; .timestamp() yields the correct
+        # UTC epoch regardless of tzinfo.  A naive datetime is assumed local
+        # by Python, which is acceptable for the coarse staleness check.
+        return float(lm.timestamp())  # type: ignore[union-attr]
+    except (AttributeError, OSError, ValueError, OverflowError):
+        return None
+
+
+# A local file is treated as "newer than S3" only when it is at least this
+# many seconds ahead of the S3 object's LastModified.  The slack absorbs
+# clock skew and the lag between a local write and the subsequent S3 PUT so
+# we don't flap on a byte-identical pair whose timestamps differ by a blip.
+_RESTORE_MTIME_SLACK_SEC = 2.0
+
+
 def restore_indexes(db_dir: str | Path) -> int:
     """Pull index files from S3 into *db_dir* that are absent or stale locally.
 
     Uses size + custom content-md5 metadata header for staleness detection
     (see ``_is_in_sync``) so multipart-uploaded files don't get re-downloaded
     every startup despite being byte-identical.
+
+    Recency guard (fix/embed-rows-vanish-live): a local file that is NEWER
+    than the S3 object is NEVER overwritten, even when their content differs.
+    Without this, a freshly-embedded ``<repo>.duck`` (3618 rows, mtime = embed
+    time) is clobbered on the very next process boot by an older, EMPTY
+    ``<repo>.duck`` left in S3 from a prior force-reindex snapshot — the
+    ``restore_indexes`` call in the lifespan compared content only (size+MD5)
+    and "refreshed" the local file down to zero rows.  A crash-loop (or the
+    LE-137 respawn) makes this fire seconds after every embed, so embeddings
+    "silently vanish" with no visible job.  We now keep the local copy when it
+    is at least ``_RESTORE_MTIME_SLACK_SEC`` newer than S3; a genuinely-newer
+    S3 object (e.g. from another container) still refreshes a stale local.
 
     Args:
         db_dir: Local directory that holds per-repo ``.db`` / ``.duck`` files.
@@ -243,6 +310,23 @@ def restore_indexes(db_dir: str | Path) -> int:
                     logger.debug("s3_store: %s already up-to-date, skipping", filename)
                     continue
                 if local.exists():
+                    # Recency guard — never clobber a NEWER local file with an
+                    # older S3 copy.  This is the fix for the "embeddings
+                    # silently vanish" bug: a fresh local <repo>.duck must
+                    # survive a boot that finds a stale, empty copy in S3.
+                    s3_epoch = _s3_last_modified_epoch(obj)
+                    local_mtime = local.stat().st_mtime
+                    if (
+                        s3_epoch is not None
+                        and local_mtime > s3_epoch + _RESTORE_MTIME_SLACK_SEC
+                    ):
+                        logger.info(
+                            "s3_store: %s differs from S3 but local is newer "
+                            "(local_mtime=%.0f > s3=%.0f) — keeping local, "
+                            "skipping restore",
+                            filename, local_mtime, s3_epoch,
+                        )
+                        continue
                     logger.info("s3_store: %s out of sync — refreshing", filename)
                 else:
                     logger.info("s3_store: %s absent locally — downloading", filename)
@@ -343,6 +427,30 @@ def snapshot_indexes(db_dir: str | Path) -> int:
         if skip:
             logger.debug("s3_store: %s unchanged — skipping upload", local.name)
             continue
+
+        # Empty-.duck poison guard (fix/embed-rows-vanish-live): never push a
+        # 0-row ``<repo>.duck`` over a LARGER copy already in S3.  A
+        # force-reindex or a SIGKILL mid-embed can leave the local ``.duck``
+        # empty; the unconditional periodic snapshot would otherwise overwrite
+        # the good S3 copy with the empty one, which the next boot then
+        # restores everywhere.  Only ``.duck`` files are checked, only when S3
+        # already holds a larger object, and the row-count probe is fail-open
+        # (None → fall through to upload), so a legitimately-emptied repo on a
+        # first push (no prior S3 object) is unaffected.
+        if (
+            local.suffix == ".duck"
+            and existing is not None
+            and existing.get("size", 0) > local_size
+        ):
+            rows = _duck_embeddings_row_count(local)
+            if rows == 0:
+                logger.warning(
+                    "s3_store: refusing to push EMPTY %s (0 embedding rows, "
+                    "local_size=%d) over larger S3 copy (size=%d) — likely a "
+                    "post-reindex / interrupted-embed clobber; keeping S3 copy",
+                    local.name, local_size, existing.get("size", 0),
+                )
+                continue
 
         try:
             # Stamp the plain MD5 in user metadata so the next restore can

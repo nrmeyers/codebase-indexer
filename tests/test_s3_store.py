@@ -38,8 +38,16 @@ class TestRestoreIndexes:
         self,
         objects: list[dict],
         content_map: dict[str, bytes],
+        last_modified_map: dict[str, object] | None = None,
     ) -> MagicMock:
-        """Build a minimal mock boto3 S3 client."""
+        """Build a minimal mock boto3 S3 client.
+
+        ``last_modified_map`` (optional) maps S3 key → a value to expose as
+        the object's ``LastModified`` on both ``list_objects_v2`` and
+        ``head_object``.  When omitted the field is absent, exercising the
+        legacy content-only code path.
+        """
+        last_modified_map = last_modified_map or {}
         client = MagicMock()
 
         # paginator for list_objects_v2 — ensure all objects have Size (copy to avoid in-place mutation)
@@ -49,6 +57,8 @@ class TestRestoreIndexes:
             if "Size" not in enriched and "Key" in enriched:
                 key = enriched["Key"]
                 enriched["Size"] = len(content_map.get(key, b""))
+            if "LastModified" not in enriched and enriched.get("Key") in last_modified_map:
+                enriched["LastModified"] = last_modified_map[enriched["Key"]]
             enriched_objects.append(enriched)
         page = {"Contents": enriched_objects}
         paginator = MagicMock()
@@ -63,10 +73,12 @@ class TestRestoreIndexes:
 
         # Mock head_object for multipart detection
         def _head_object(Bucket, Key):  # type: ignore[override]
+            resp: dict[str, object] = {"Metadata": {}}
             if Key in content_map:
-                content = content_map[Key]
-                return {"Metadata": {"content-md5": _md5(content)}}
-            return {"Metadata": {}}
+                resp["Metadata"] = {"content-md5": _md5(content_map[Key])}
+            if Key in last_modified_map:
+                resp["LastModified"] = last_modified_map[Key]
+            return resp
         client.head_object.side_effect = _head_object
 
         return client
@@ -127,6 +139,82 @@ class TestRestoreIndexes:
 
         assert n == 1
         assert local_file.read_bytes() == new_content
+
+    def test_preserves_newer_local_when_s3_is_stale(self, tmp_path: Path) -> None:
+        """Regression (fix/embed-rows-vanish-live): a freshly-written local
+        ``.duck`` must NOT be clobbered by an older, differing S3 copy.
+
+        Reproduces the "embeddings silently vanish" production failure: an
+        empty ``<repo>.duck`` left in S3 from a prior force-reindex snapshot
+        was downloaded over a just-embedded local file on the next boot,
+        zeroing the embeddings table with no visible job.  The recency guard
+        keeps the newer local copy.
+        """
+        import datetime
+        import os as _os
+        import time as _time
+
+        stale_s3 = b"EMPTY-DUCK-SCHEMA-ONLY"          # what S3 wrongly holds
+        fresh_local = b"FRESH-EMBED-3618-ROWS" * 50    # newer + different
+        prefix = "code-indexer/indexes"
+        key = f"{prefix}/TheForge.duck"
+
+        local_file = tmp_path / "TheForge.duck"
+        local_file.write_bytes(fresh_local)
+        now = _time.time()
+        _os.utime(local_file, (now, now))  # local mtime = "now"
+
+        # S3 object is one hour OLDER than the local file.
+        s3_dt = datetime.datetime.fromtimestamp(now - 3600, tz=datetime.timezone.utc)
+        objects = [{"Key": key, "ETag": f'"{_md5(stale_s3)}"'}]
+        client = self._make_s3_client(
+            objects, {key: stale_s3}, last_modified_map={key: s3_dt}
+        )
+
+        with (
+            patch("app.services.s3_store._make_client", return_value=client),
+            patch.dict(os.environ, {"S3_INDEX_BUCKET": "test-bucket", "S3_INDEX_PREFIX": prefix}),
+        ):
+            n = restore_indexes(tmp_path)
+
+        assert n == 0, "stale S3 copy must not be downloaded over a newer local"
+        client.download_file.assert_not_called()
+        assert local_file.read_bytes() == fresh_local, "fresh local .duck must survive"
+
+    def test_refreshes_when_s3_is_genuinely_newer(self, tmp_path: Path) -> None:
+        """The recency guard must NOT over-correct: when the S3 object is
+        newer than the local file (e.g. another container re-indexed), a
+        differing local copy IS refreshed from S3.
+        """
+        import datetime
+        import os as _os
+        import time as _time
+
+        old_local = b"old-local-content"
+        new_s3 = b"new-content-from-another-container"
+        prefix = "code-indexer/indexes"
+        key = f"{prefix}/repo1.duck"
+
+        local_file = tmp_path / "repo1.duck"
+        local_file.write_bytes(old_local)
+        now = _time.time()
+        _os.utime(local_file, (now - 3600, now - 3600))  # local is one hour OLD
+
+        # S3 object is newer than local.
+        s3_dt = datetime.datetime.fromtimestamp(now, tz=datetime.timezone.utc)
+        objects = [{"Key": key, "ETag": f'"{_md5(new_s3)}"'}]
+        client = self._make_s3_client(
+            objects, {key: new_s3}, last_modified_map={key: s3_dt}
+        )
+
+        with (
+            patch("app.services.s3_store._make_client", return_value=client),
+            patch.dict(os.environ, {"S3_INDEX_BUCKET": "test-bucket", "S3_INDEX_PREFIX": prefix}),
+        ):
+            n = restore_indexes(tmp_path)
+
+        assert n == 1, "a genuinely-newer S3 object must refresh a stale local"
+        assert local_file.read_bytes() == new_s3
 
     def test_skips_non_index_extensions(self, tmp_path: Path) -> None:
         prefix = "code-indexer/indexes"
@@ -379,3 +467,60 @@ class TestSnapshotIndexes:
             state = get_sync_state()
 
         assert state["last_error"] is None
+
+    def test_refuses_to_push_empty_duck_over_larger_s3_copy(self, tmp_path: Path) -> None:
+        """Regression (fix/embed-rows-vanish-live): the periodic snapshot must
+        NOT overwrite a populated S3 ``.duck`` with a 0-row local ``.duck``.
+
+        This is the S3-poisoning leg of the bug — a force-reindex / SIGKILL
+        mid-embed leaves the local ``.duck`` empty, and the unconditional
+        periodic snapshot would push it over the good S3 copy, after which
+        every boot restores the empty file everywhere.
+        """
+        pytest.importorskip("duckdb")
+        from codebase_rag.storage.vector_store import open_or_create
+
+        # Real 0-row .duck (schema only).
+        duck_path = tmp_path / "TheForge.duck"
+        open_or_create(str(duck_path)).close()
+        local_size = duck_path.stat().st_size
+        assert local_size > 0  # schema-only files are non-empty on disk
+
+        key = "code-indexer/indexes/TheForge.duck"
+        # S3 already holds a LARGER (populated) copy.
+        client = self._make_s3_client(
+            existing_etags={key: "deadbeef"},
+            existing_sizes={key: local_size + 5_000_000},
+        )
+
+        with (
+            patch("app.services.s3_store._make_client", return_value=client),
+            patch.dict(os.environ, {"S3_INDEX_BUCKET": "test-bucket", "S3_INDEX_PREFIX": "code-indexer/indexes"}),
+        ):
+            n = snapshot_indexes(tmp_path)
+
+        assert n == 0, "empty .duck must not be pushed over a larger S3 copy"
+        client.upload_file.assert_not_called()
+
+    def test_pushes_empty_duck_when_no_prior_s3_copy(self, tmp_path: Path) -> None:
+        """The poison guard only triggers when S3 already holds a LARGER copy.
+
+        A first-ever push of a (legitimately) empty repo must still upload, so
+        the guard cannot strand a brand-new repo.
+        """
+        pytest.importorskip("duckdb")
+        from codebase_rag.storage.vector_store import open_or_create
+
+        duck_path = tmp_path / "NewRepo.duck"
+        open_or_create(str(duck_path)).close()
+
+        client = self._make_s3_client()  # no existing objects
+
+        with (
+            patch("app.services.s3_store._make_client", return_value=client),
+            patch.dict(os.environ, {"S3_INDEX_BUCKET": "test-bucket", "S3_INDEX_PREFIX": "code-indexer/indexes"}),
+        ):
+            n = snapshot_indexes(tmp_path)
+
+        assert n == 1, "first push of an empty repo must still upload"
+        client.upload_file.assert_called_once()
