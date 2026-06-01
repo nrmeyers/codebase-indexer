@@ -90,6 +90,45 @@ class DefinitionFlushError(RuntimeError):
     """
 
 
+class RelationshipFlushError(RuntimeError):
+    """Raised when a behavioral relationship type lands ZERO edges at flush.
+
+    The CALLS-drop counterpart to :class:`DefinitionFlushError`.  A graph whose
+    definition nodes persist but whose behavioral edges (CALLS especially)
+    silently vanish renders the knowledge-graph viewer disconnected ("nothing
+    is connected").  Historically the per-row fallback in
+    ``flush_relationships`` swallowed every inner failure without counting or
+    raising, so a batch that hit Kùzu's ``unordered_map::at: key not found``
+    on the UNWIND-MERGE path and then ALSO failed per-row produced 0 edges
+    while the job reported success.  This exception fires when a behavioral
+    rel type was *attempted* (rows were buffered) yet landed 0 successful
+    writes, surfacing the loss at the exact flush instead of over a
+    call-less graph 9 minutes later.
+    """
+
+
+# Behavioral relationship types whose total loss (attempted > 0, successful
+# == 0) is a fail-loud condition.  CALLS is the load-bearing one for the
+# knowledge-graph viewer; INHERITS / IMPLEMENTS / OVERRIDES are included
+# because a 0-edge landing for any of them is the same silent-drop family.
+# Structural rels (DEFINES / CONTAINS_* / BELONGS_TO) are intentionally
+# EXCLUDED: their loss is already covered by the definition-node guard and
+# a partial structural drop should not abort an otherwise-complete index.
+_BEHAVIORAL_REL_TYPES: frozenset[str] = frozenset(
+    {"CALLS", "INHERITS", "IMPLEMENTS", "OVERRIDES"}
+)
+
+# Substring of Kùzu's Binder exception when an endpoint's resolved label is
+# not a legal FROM/TO pair for the rel table (e.g. the call resolver tagged a
+# constructor call's callee as ``Class`` but CALLS only declares
+# Function/Method/Module endpoints).  Such a row CANNOT legally become an
+# edge — dropping it is correct, not a silent write-drop — so the fail-loud
+# guard treats a 0-landing caused purely by these as benign.  Distinct from a
+# genuine RUNTIME drop (Kùzu planner fault / endpoint not visible), which IS
+# fatal for a behavioral type.
+ERR_SUBSTR_SCHEMA_VIOLATION = "violates schema"
+
+
 def _result_to_rows(result: lb.QueryResult) -> list[ResultRow]:
     """Convert a LadybugDB QueryResult to the same list[ResultRow] shape
     that MemgraphIngestor returned from its cursor-based API."""
@@ -489,11 +528,22 @@ class LadybugIngestor:
 
         total_attempted = 0
         total_successful = 0
+        # Per-behavioral-rel-type (attempted, successful) accumulated across
+        # every pattern group in this flush.  A type that ends with
+        # attempted > 0 and successful == 0 trips the fail-loud guard below.
+        behavioral_totals: dict[str, tuple[int, int, int]] = {}
 
         for pattern, params_list in self._rel_groups.items():
             from_label, from_key, rel_type, to_label, to_key = pattern
             attempted = 0
             successful = 0
+            # Per-group failure classification.  ``rel_runtime_dropped`` is the
+            # silent-drop family (Kùzu planner fault / invisible endpoint) the
+            # fail-loud guard treats as fatal for a behavioral type;
+            # ``rel_schema_rejected`` is benign (resolver produced a callee
+            # whose label is not a legal endpoint for the rel table).
+            rel_runtime_dropped = 0
+            rel_schema_rejected = 0
 
             # Group rows by the set of property keys so each UNWIND batch
             # has a consistent column layout (LadybugDB's UNWIND expects
@@ -510,15 +560,24 @@ class LadybugIngestor:
                 by_shape[shape].append(entry)
 
             for prop_keys, batch_rows in by_shape.items():
-                # Use two sequential MATCH clauses instead of comma-separated
-                # MATCH (a), (b). The comma pattern triggers a Kuzu hash-join
-                # that uses an internal unordered_map which may not include
-                # nodes inserted in prior execute() calls on the same connection,
-                # producing "unordered_map::at: key not found". Sequential MATCHes
-                # perform two independent index lookups and avoid the hash join.
+                # Bind the endpoints with ``MATCH (n:Label) WHERE n.key = …``
+                # rather than an inline property pattern
+                # ``MATCH (n:Label {key: row.val})``.  The inline-property form
+                # inside an UNWIND-MERGE batch triggers a Kùzu rel-MERGE planner
+                # path that throws ``unordered_map::at: key not found`` — and it
+                # throws even when both endpoint nodes are fully committed and
+                # visible (confirmed: a CHECKPOINT between flush_nodes and
+                # flush_relationships does NOT fix it; switching the node bind to
+                # ``MATCH … WHERE`` does, while preserving MERGE idempotency on
+                # re-index).  This is the prevention that keeps CALLS off the
+                # slow, silently-failing per-row fallback path.  Two sequential
+                # MATCHes (not comma-separated) still avoid the secondary
+                # hash-join footgun.
                 match_clause = (
-                    f"MATCH (a:{from_label} {{{from_key}: row.from_val}})\n"
-                    f"MATCH (b:{to_label} {{{to_key}: row.to_val}})"
+                    f"MATCH (a:{from_label})\n"
+                    f"WHERE a.{from_key} = row.from_val\n"
+                    f"MATCH (b:{to_label})\n"
+                    f"WHERE b.{to_key} = row.to_val"
                 )
                 if self._use_merge:
                     if prop_keys:
@@ -549,6 +608,18 @@ class LadybugIngestor:
                         # Whole batch "already exists" is a soft-success —
                         # idempotent MERGE semantics say the graph is correct.
                         successful += batch_size_n
+                    elif ERR_SUBSTR_SCHEMA_VIOLATION in err_str:
+                        # The whole group's endpoint labels are not a legal
+                        # FROM/TO pair for this rel table (resolver tagged the
+                        # callee with a label the schema doesn't allow).  Every
+                        # row here is schema-illegal — none can legally become
+                        # an edge.  Record the benign reject (NOT a runtime
+                        # drop) and skip the per-row retry, which would just
+                        # re-raise the same Binder exception batch_size_n times.
+                        rel_schema_rejected += batch_size_n
+                        logger.warning(
+                            ls.MG_REL_FLUSH_ERROR.format(pattern=pattern, error=e)
+                        )
                     else:
                         # Fall back to per-row so one bad row doesn't poison
                         # the batch.  Rare path (schema bugs, missing PKs).
@@ -586,10 +657,47 @@ class LadybugIngestor:
                                     or ERR_SUBSTR_CONSTRAINT in inner_err
                                 ):
                                     successful += 1
+                                elif ERR_SUBSTR_SCHEMA_VIOLATION in inner_err:
+                                    # Single schema-illegal row — benign reject,
+                                    # not a runtime drop.  Cannot legally exist.
+                                    rel_schema_rejected += 1
+                                else:
+                                    # A genuine RUNTIME per-row failure (Kùzu
+                                    # planner fault, endpoint node not visible).
+                                    # Previously swallowed without a trace; now
+                                    # logged at DEBUG and counted so the
+                                    # fail-loud guard below can distinguish it
+                                    # from a benign schema reject.  Stays counted
+                                    # as a failure (``successful`` not bumped).
+                                    rel_runtime_dropped += 1
+                                    logger.debug(
+                                        "rel per-row RUNTIME drop pattern=%s "
+                                        "from=%r to=%r reason=%s",
+                                        pattern,
+                                        row_entry.get("from_val"),
+                                        row_entry.get("to_val"),
+                                        str(inner_e)[:160],
+                                    )
 
-            if rel_type == REL_TYPE_CALLS and (attempted - successful) > 0:
-                logger.warning(
-                    ls.MG_CALLS_FAILED.format(count=attempted - successful)
+            failed = attempted - successful
+            if rel_type == REL_TYPE_CALLS and failed > 0:
+                logger.warning(ls.MG_CALLS_FAILED.format(count=failed))
+
+            # Fail-loud accounting for behavioral edges (CALLS the load-bearing
+            # one).  A behavioral rel type that was attempted (rows buffered)
+            # yet landed ZERO successful writes WITH at least one genuine
+            # runtime drop is the silent CALLS-drop the knowledge-graph viewer
+            # surfaces as "nothing is connected".  Accumulate per-type
+            # (attempted, successful, runtime_dropped) so the guard after the
+            # loop can raise on the exact flush instead of reporting success
+            # over a call-less graph — while NOT firing on a type whose only
+            # failures were benign schema rejects.
+            if rel_type in _BEHAVIORAL_REL_TYPES and attempted > 0:
+                p_att, p_succ, p_rt = behavioral_totals.get(rel_type, (0, 0, 0))
+                behavioral_totals[rel_type] = (
+                    p_att + attempted,
+                    p_succ + successful,
+                    p_rt + rel_runtime_dropped,
                 )
 
             total_attempted += attempted
@@ -605,6 +713,51 @@ class LadybugIngestor:
         )
         self._rel_count = 0
         self._rel_groups.clear()
+
+        # Fail-loud on a total behavioral-edge drop CAUSED BY A RUNTIME FAULT.
+        # The buffers are already cleared and counters logged above, so the
+        # ingestor state is consistent before we raise.  A behavioral rel type
+        # (CALLS especially) that was attempted but landed ZERO edges *with at
+        # least one genuine runtime drop* means the batch hit Kùzu's
+        # UNWIND-MERGE planner bug AND the per-row fallback also failed — the
+        # exact silent path that produced a definition-rich but call-less
+        # graph.  Raising here surfaces the loss at the flush instead of the
+        # job reporting success over a disconnected knowledge graph.
+        #
+        # Two deliberate exclusions keep this from over-firing:
+        #   • PARTIAL drops (some edges landed) are logged via MG_CALLS_FAILED
+        #     but do NOT abort — only a total wipe is fatal, mirroring the
+        #     definition-node guard's "0 written" trip condition.
+        #   • SCHEMA-only rejects (0 landed but every failure was a Binder
+        #     "violates schema" — e.g. ``Interface INHERITS Class`` which the
+        #     schema forbids, or a constructor call resolved to a ``Class``
+        #     callee CALLS cannot target) are benign: those edges cannot
+        #     legally exist, so dropping them is correct.  They are excluded by
+        #     requiring ``runtime_dropped > 0``.
+        zero_landed = {
+            rel_type: (att, rt)
+            for rel_type, (att, succ, rt) in behavioral_totals.items()
+            if att > 0 and succ == 0 and rt > 0
+        }
+        if zero_landed:
+            detail = ", ".join(
+                f"{rt_name} (0/{att} edges written; {rt} runtime drops)"
+                for rt_name, (att, rt) in zero_landed.items()
+            )
+            logger.error(
+                "Behavioral relationship write-drop: %s. Every edge in these "
+                "types failed both the batched UNWIND insert and the per-row "
+                "fallback with a runtime fault — the knowledge graph would "
+                "render disconnected (\"nothing is connected\"). Failing the "
+                "flush so the index job surfaces the loss immediately. Likely "
+                "cause: a Kùzu rel-MERGE planner fault on the UNWIND batch "
+                "path, or endpoint nodes not visible to the relationship "
+                "MATCH.",
+                detail,
+            )
+            raise RelationshipFlushError(
+                f"behavioral relationships silently dropped during flush: {detail}"
+            )
 
     def flush_all(self) -> None:
         logger.info(ls.MG_FLUSH_START)
