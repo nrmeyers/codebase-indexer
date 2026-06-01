@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     # so a legitimately slow phase (large repo embedding) is never killed while
     # it keeps emitting progress; only a phase that goes fully silent trips it.
     # Also used as the no-progress window for the reconcile-on-reindex path.
+    #
+    # Write-stall fix: the ``writing`` phase emits a single progress callback
+    # and then blocks in the callback-silent Kùzu bulk flush
+    # (``LadybugIngestor.flush_all()``) for minutes on a large repo. To stop the
+    # reconciler/watchdog from false-killing a healthy slow write mid-flush
+    # (which left a partial graph — missing route handlers, degenerate KG
+    # mega-cluster), the index worker runs a 30s heartbeat thread during the
+    # write (``_writing_phase_heartbeat``) AND the reconciler holds a
+    # ``phase=='writing'`` job to THIS wider budget instead of
+    # ``JOB_STALENESS_THRESHOLD_SECONDS``. A genuinely dead worker stuck in
+    # ``writing`` past this budget is still reaped.
     JOB_PHASE_WATCHDOG_SECONDS: int = 600
 
     # --- Prometheus metrics (Phase 4) ---

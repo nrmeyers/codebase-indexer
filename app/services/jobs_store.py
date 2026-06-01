@@ -485,6 +485,25 @@ def update_progress(
         conn.execute(sql, params)
 
 
+def touch_heartbeat(job_id: str) -> None:
+    """Advance only the ``updated_at`` liveness clock of a running job.
+
+    Used by the writing-phase heartbeat (app.routers.index) to prove a job
+    that is blocked in a long, callback-silent Kùzu bulk write is still alive,
+    WITHOUT mutating phase / progress_pct (which the real progress callback
+    owns). list_stale_running_jobs() keys staleness on ``updated_at``, so a
+    bare timestamp bump is sufficient to keep the reconciler from false-killing
+    a healthy slow write. No-op (and never raises) if the row is not currently
+    running — a terminal/absent job has no liveness clock to advance.
+    """
+    conn = _require_conn()
+    with _lock:
+        conn.execute(
+            "UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'running'",
+            (time.time(), job_id),
+        )
+
+
 def mark_done(
     job_id: str,
     *,

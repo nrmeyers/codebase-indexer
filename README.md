@@ -327,6 +327,9 @@ flowchart LR
 | `OPENAI_BASE_URL`         | —                       | Override for Azure / vLLM / LiteLLM gateways.                    |
 | `RERANK_ENABLED`          | `false`                 | Opt into the future rerank stage (see `docs/SEARCH_RANKING.md`). |
 | `GITHUB_TOKEN`            | —                       | Fine-scoped PAT for `/github/*` routes.                          |
+| `JOB_HEARTBEAT_INTERVAL_SECONDS` | `60`             | Interval of the background reconciler that fails orphaned/hung running jobs and releases their per-repo lock. Min 10s. |
+| `JOB_STALENESS_THRESHOLD_SECONDS` | `300`           | A running job whose progress heartbeat (`last_progress_at` / durable `updated_at`) hasn't advanced within this window is treated as hung and failed. **Writing-phase aware:** a job in `phase=='writing'` (the callback-silent Kùzu bulk flush, which can run for minutes on a large repo) is held to the wider `JOB_PHASE_WATCHDOG_SECONDS` budget instead, and a 30s heartbeat thread keeps its liveness fresh during the flush — so a healthy slow write is never reaped mid-write (which previously left a partial graph with missing route handlers / a degenerate single mega-cluster in the KG viewer). |
+| `JOB_PHASE_WATCHDOG_SECONDS` | `600`                | Wider no-progress budget used on the request/delete reconcile paths and (since the write-stall fix) as the staleness budget while a job is in the `writing` phase. A genuinely dead worker stuck in `writing` past this is still reaped. |
 
 Copy [`.env.example`](.env.example) to `.env` and adjust paths for your machine. The example file documents every variable inline.
 

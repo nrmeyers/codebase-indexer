@@ -278,6 +278,90 @@ _jobs: dict[str, _Job] = {}
 # LadybugDB instance simultaneously (single-writer constraint).
 _repo_locks: dict[str, asyncio.Lock] = {}
 
+# Interval (seconds) between liveness ticks emitted by the writing-phase
+# heartbeat thread (see ``_writing_phase_heartbeat``). Must be well under the
+# reconciler/watchdog staleness threshold (JOB_STALENESS_THRESHOLD_SECONDS /
+# JOB_PHASE_WATCHDOG_SECONDS, both >= 300s) so a single missed tick never trips
+# a false-kill. 30s gives ~10x margin.
+_WRITING_HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+
+class _writing_phase_heartbeat:
+    """Keep a job observably-alive during a long, callback-silent bulk write.
+
+    Root cause (write-stall false-kill): ``GraphUpdater.run()`` emits a single
+    ``{"phase": "writing"}`` progress event and then calls the blocking
+    ``LadybugIngestor.flush_all()`` — a Kùzu bulk node + relationship COPY that
+    can run for minutes on a large repo while emitting **zero** further progress
+    callbacks. The progress callback is the only thing that advances both
+    ``job.last_progress_at`` (in-memory) and the durable jobs_store
+    ``updated_at``. With neither advancing, the periodic heartbeat reconciler
+    (``reconcile_stale_running_jobs``, JOB_STALENESS_THRESHOLD_SECONDS=300) and
+    the phase watchdog both see the job as "hung — no progress for >300s" and
+    mark it ``failed`` mid-write, leaving a partially-written graph (missing
+    route handlers, degenerate single mega-cluster in the KG viewer).
+
+    This context manager spawns a daemon thread that, while the wrapped write
+    runs, periodically bumps ``job.last_progress_at`` and advances the durable
+    ``updated_at`` (via ``update_progress(phase=...)``). Liveness is therefore
+    monotonic throughout the write and neither reaper false-kills a healthy
+    bulk flush. The tick is a no-op for progress_pct (it never goes backwards);
+    it exists purely to prove the worker thread is alive.
+
+    Best-effort: a failure to write the heartbeat (e.g. jobs_store not
+    initialised in tests) is swallowed — the heartbeat must never fail the
+    index worker. The thread is stopped + joined on ``__exit__``.
+    """
+
+    def __init__(
+        self,
+        job: _Job,
+        *,
+        interval_seconds: float = _WRITING_HEARTBEAT_INTERVAL_SECONDS,
+    ) -> None:
+        self._job = job
+        self._interval = max(1.0, float(interval_seconds))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _tick(self) -> None:
+        now = time.time()
+        # In-memory liveness — read by reconcile_stale_running_jobs path #1.
+        self._job.last_progress_at = now
+        # Durable liveness — touch_heartbeat() bumps ONLY ``updated_at`` (which
+        # list_stale_running_jobs / reconcile path #2 keys on) without touching
+        # phase or progress_pct, which the real progress callback owns. A tick
+        # mid-parsing must not clobber the live phase shown in the UI.
+        try:
+            _jobs_store.touch_heartbeat(self._job.job_id)
+        except RuntimeError:
+            pass  # jobs_store not initialised (tests without lifespan)
+        except Exception:  # noqa: BLE001
+            pass  # never let a bookkeeping write fail the index worker
+
+    def _run(self) -> None:
+        # Tick once immediately so a write that starts right after a long
+        # parsing gap resets the staleness clock, then on a fixed interval.
+        while not self._stop.wait(self._interval):
+            self._tick()
+
+    def __enter__(self) -> _writing_phase_heartbeat:
+        self._tick()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"writing-heartbeat-{self._job.job_id[:8]}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        # Final tick so the post-write transition starts from a fresh clock.
+        self._tick()
+
 # TTL: keep completed jobs for 1 hour so callers can poll after completion.
 _JOB_TTL_SECONDS = 3600
 
@@ -871,7 +955,15 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         )
 
         _t_run = time.monotonic()
-        updater.run(force=effective_force)
+        # updater.run() emits a single {"phase": "writing"} event and then
+        # blocks in LadybugIngestor.flush_all() — a Kùzu bulk write that runs
+        # for minutes on a large repo with NO further progress callbacks. The
+        # heartbeat thread bumps in-memory + durable liveness on a 30s tick so
+        # the reconciler/phase-watchdog never false-kill a healthy slow write
+        # mid-flush (see _writing_phase_heartbeat). The window also covers the
+        # silent parts of parsing/embedding for free.
+        with _writing_phase_heartbeat(job):
+            updater.run(force=effective_force)
         _metrics.record_index_phase("parse_run", time.monotonic() - _t_run)
         # GraphUpdater emits "done" at 100% at the end of run(); reset to 92%
         # so the UI knows the embedding subprocess pass still follows.
@@ -2206,7 +2298,19 @@ def reconcile_stale_running_jobs(
     for job_id, job in list(_jobs.items()):
         if job.status == "running":
             silent_for = now - job.last_progress_at
-            if silent_for > staleness_threshold_seconds:
+            # Writing-phase awareness (belt-and-suspenders to the heartbeat
+            # thread): the Kùzu bulk flush is callback-silent and can run for
+            # minutes. The heartbeat thread normally keeps last_progress_at
+            # fresh, but if it is itself starved (GIL contention behind the
+            # CPU-bound write) we widen the budget rather than reap a write
+            # that is demonstrably mid-flush. Never shrinks the budget.
+            effective_threshold = staleness_threshold_seconds
+            if job.phase == "writing":
+                effective_threshold = max(
+                    staleness_threshold_seconds,
+                    settings.JOB_PHASE_WATCHDOG_SECONDS,
+                )
+            if silent_for > effective_threshold:
                 err = (
                     f"Job hung in phase '{job.phase}' — no progress for "
                     f"{int(silent_for)}s (phase watchdog)."

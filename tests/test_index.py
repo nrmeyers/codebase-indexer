@@ -304,6 +304,263 @@ def test_reindex_reconciles_stuck_lock_and_proceeds(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Writing-phase heartbeat — regression for the slow-bulk-write false-kill
+#
+# Root cause: GraphUpdater.run() emits one {"phase": "writing"} event then
+# blocks in LadybugIngestor.flush_all() (a multi-minute Kùzu bulk COPY) with
+# zero further progress callbacks. last_progress_at / durable updated_at both
+# freeze, so reconcile_stale_running_jobs marks the job failed mid-write,
+# leaving a partial graph (missing route handlers, degenerate KG mega-cluster).
+# The fix emits periodic liveness ticks during the write so neither reaper
+# false-kills a healthy slow flush.
+# ---------------------------------------------------------------------------
+
+
+def _seed_running_job(repo_path: Path) -> str:
+    """Create a running _Job (in-memory + durable) and return its job_id."""
+    import time
+
+    from app.routers.index import _Job
+
+    durable = jobs_store.create_job(
+        kind="index", actor_oid="", actor_email="",
+        repo_path=str(repo_path), force_reindex=False, exclude_paths=frozenset(),
+    )
+    job_id = durable.job_id
+    _jobs[job_id] = _Job(
+        job_id=job_id,
+        repo_path=str(repo_path),
+        status="running",
+        phase="writing",
+        last_progress_at=time.time(),
+    )
+    return job_id
+
+
+def test_writing_heartbeat_keeps_slow_write_alive_so_reconciler_does_not_fail_it(
+    tmp_path: Path,
+) -> None:
+    """A callback-silent slow write that emits heartbeat ticks is NOT reaped.
+
+    Simulates the writing phase: no progress callbacks fire, but the heartbeat
+    thread bumps last_progress_at + durable updated_at on a short interval.
+    The reconciler (run with a small threshold) must see fresh liveness and
+    NOT mark the job failed, and the simulated write must complete.
+    """
+    import time
+
+    from app.routers.index import (
+        _writing_phase_heartbeat,
+        reconcile_stale_running_jobs,
+    )
+
+    job_id = _seed_running_job(tmp_path)
+    job = _jobs[job_id]
+    # Make the job look already-silent so that, WITHOUT ticks, a 1s-threshold
+    # reconcile would reap it immediately.
+    job.last_progress_at = time.time() - 10.0
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+        (time.time() - 10.0, job_id),
+    )
+
+    write_completed = {"done": False}
+
+    def _slow_write() -> None:
+        # Mimic LadybugIngestor.flush_all(): a few seconds of blocking work
+        # with NO progress callback. The heartbeat thread ticks underneath.
+        time.sleep(2.0)
+        write_completed["done"] = True
+
+    # Tick every 0.2s — well under the 1s reconcile threshold below.
+    with _writing_phase_heartbeat(job, interval_seconds=0.2):
+        # Reconcile mid-write: must NOT reap because ticks keep liveness fresh.
+        time.sleep(0.5)
+        reconciled_midwrite = reconcile_stale_running_jobs(
+            staleness_threshold_seconds=1
+        )
+        _slow_write()
+
+    assert write_completed["done"] is True
+    assert reconciled_midwrite == 0, "heartbeat tick should keep the write alive"
+    assert job.status == "running"
+    # After ticks, in-memory + durable liveness are fresh (within the last 1s).
+    assert time.time() - job.last_progress_at < 1.0
+    row = jobs_store.get_job(job_id)
+    assert row is not None and row.status == "running"
+    assert time.time() - row.updated_at < 1.0
+
+
+def test_writing_heartbeat_advances_inmemory_and_durable_liveness(
+    tmp_path: Path,
+) -> None:
+    """Each tick advances BOTH last_progress_at and durable updated_at."""
+    import time
+
+    from app.routers.index import _writing_phase_heartbeat
+
+    job_id = _seed_running_job(tmp_path)
+    job = _jobs[job_id]
+    stale = time.time() - 100.0
+    job.last_progress_at = stale
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?", (stale, job_id)
+    )
+
+    with _writing_phase_heartbeat(job, interval_seconds=0.1):
+        time.sleep(0.35)  # ~3 ticks
+
+    assert job.last_progress_at > stale + 50.0
+    row = jobs_store.get_job(job_id)
+    assert row is not None and row.updated_at > stale + 50.0
+    # Heartbeat never mutated phase/progress — those belong to the real
+    # callback. The durable phase stays as create_job seeded it ('queued').
+    assert row.phase == "queued"
+
+
+def test_touch_heartbeat_only_bumps_running_jobs(tmp_path: Path) -> None:
+    """touch_heartbeat advances a running row and is a no-op on a terminal one."""
+    import time
+
+    job_id = _seed_running_job(tmp_path)
+    before = jobs_store.get_job(job_id).updated_at
+    time.sleep(0.01)
+    jobs_store.touch_heartbeat(job_id)
+    after = jobs_store.get_job(job_id).updated_at
+    assert after > before
+
+    # Terminal row: touch is a no-op (no liveness clock to advance).
+    jobs_store.mark_failed(job_id, error="x", terminal_status="failed")
+    failed_at = jobs_store.get_job(job_id).updated_at
+    time.sleep(0.01)
+    jobs_store.touch_heartbeat(job_id)
+    assert jobs_store.get_job(job_id).updated_at == failed_at
+
+
+def test_reconciler_widens_budget_during_writing_phase(tmp_path: Path) -> None:
+    """Even with starved ticks, a job in phase=='writing' gets the wider budget.
+
+    Belt-and-suspenders: if the heartbeat thread is itself starved (GIL
+    contention behind the CPU-bound write), the reconciler must still not reap
+    a job demonstrably in the writing phase until JOB_PHASE_WATCHDOG_SECONDS.
+    """
+    import time
+
+    from app.config import settings
+    from app.routers.index import reconcile_stale_running_jobs
+
+    # Silent for longer than the small threshold but less than the watchdog.
+    silent_for = settings.JOB_STALENESS_THRESHOLD_SECONDS + 60
+    assert silent_for < settings.JOB_PHASE_WATCHDOG_SECONDS
+
+    job_id = _seed_running_job(tmp_path)
+    job = _jobs[job_id]
+    job.phase = "writing"
+    job.last_progress_at = time.time() - silent_for
+
+    reconciled = reconcile_stale_running_jobs(
+        staleness_threshold_seconds=settings.JOB_STALENESS_THRESHOLD_SECONDS
+    )
+    assert reconciled == 0, "a writing-phase job must not be reaped before the watchdog"
+    assert job.status == "running"
+
+
+def test_blocking_index_completes_with_heartbeat_wrapper_and_resolves_symbols(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: a real structural index runs through the writing-phase
+    heartbeat wrapper, reaches non-zero node/rel counts, and a route-handler
+    symbol resolves in the graph.
+
+    This is the STEP-3 bar in miniature: the heartbeat wrapper must not break
+    the real write path, the graph must be fully written (counts > 0), and a
+    previously-missing-style symbol (a route handler) must be present. No
+    embedder/model is loaded — _blocking_index is the structural pass only.
+    """
+    import time
+
+    from app.routers.index import _Job, _blocking_index
+
+    # Tiny synthetic repo with a "route handler" so we can assert it resolves.
+    repo = tmp_path / "tinyrepo"
+    pkg = repo / "src" / "routes"
+    pkg.mkdir(parents=True)
+    (repo / "src" / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text("")
+    (pkg / "chat.py").write_text(
+        "def handle_list_conversations(actor_id):\n"
+        "    return _query(actor_id)\n\n"
+        "def _query(actor_id):\n"
+        "    return []\n"
+    )
+
+    job = _Job(job_id="e2e-heartbeat-job", repo_path=str(repo), status="running")
+    _jobs[job.job_id] = job
+
+    # Mock the downstream embed pass (loads sentence-transformers — out of
+    # scope; the bug is the structural Kùzu write) and tantivy (best-effort).
+    with patch("app.routers.index._blocking_embed"), patch(
+        "app.services.tantivy_index.TantivyIndex", create=True
+    ):
+        _blocking_index(job, force_reindex=True)
+
+    # Graph was fully written — counts are non-zero and stable.
+    assert job.node_count > 0, "structural write produced no nodes"
+    assert job.rel_count > 0, "structural write produced no relationships"
+
+    # The route handler resolves in the written graph (no partial write).
+    import real_ladybug as lb  # type: ignore[import-untyped]
+
+    from app.config import settings as _settings
+    from app.services.slug import derive_slug as _derive_slug
+
+    repo_name = _derive_slug(repo.resolve(), repo.name)
+    db_path = _settings.db_path_for_repo(repo_name)
+    db = lb.Database(db_path)
+    conn = lb.Connection(db)
+    try:
+        res = conn.execute(
+            "MATCH (f:Function) WHERE f.name = $n RETURN count(f) AS c",
+            {"n": "handle_list_conversations"},
+        )
+        found = int(res.get_next()[0]) if res.has_next() else 0
+    finally:
+        try:
+            conn.close()
+            db.close()
+        except Exception:
+            pass
+    assert found >= 1, "route handler missing — partial/incomplete write"
+    _jobs.pop(job.job_id, None)
+
+
+def test_reconciler_still_reaps_genuinely_hung_writing_job(tmp_path: Path) -> None:
+    """A writing-phase job silent past the WATCHDOG budget is still reaped.
+
+    The widened budget must not be infinite — a genuinely dead worker stuck in
+    'writing' past JOB_PHASE_WATCHDOG_SECONDS is still failed + lock released.
+    """
+    import time
+
+    from app.config import settings
+    from app.routers.index import reconcile_stale_running_jobs
+
+    job_id = _seed_running_job(tmp_path)
+    job = _jobs[job_id]
+    job.phase = "writing"
+    job.last_progress_at = time.time() - (settings.JOB_PHASE_WATCHDOG_SECONDS + 60)
+
+    reconciled = reconcile_stale_running_jobs(
+        staleness_threshold_seconds=settings.JOB_STALENESS_THRESHOLD_SECONDS
+    )
+    assert reconciled == 1
+    assert job.status == "failed"
+    assert "writing" in (job.error or "")
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 integration tests — jobs_store persistence
 # ---------------------------------------------------------------------------
 
@@ -628,7 +885,10 @@ def test_reconcile_stale_running_jobs_in_memory() -> None:
     now = time.time()
     job = _Job(job_id=job_id, repo_path="/tmp/repo-stale")
     job.status = "running"
-    job.phase = "writing"
+    # NOTE: phase 'parsing' (not 'writing') — the writing phase gets a widened
+    # budget (it emits no callbacks during the slow Kùzu bulk flush); 'parsing'
+    # emits ~1 Hz callbacks so silence there is a genuine hang.
+    job.phase = "parsing"
     job.started_at = now - 400
     # Heartbeat went silent 400s ago (> 300s threshold) — hung phase.
     job.last_progress_at = now - 400
