@@ -62,6 +62,34 @@ from codebase_rag.types_defs import (
 from app.services.ladybug_schema import migrate
 
 
+#: Node labels that carry code *definitions* (Function / Method / Class /
+#: Interface / Enum).  A healthy parse of a code repo MUST land thousands of
+#: these.  When a non-empty batch of one of these labels flushes with ZERO
+#: successful writes AND the failures were genuine runtime errors (not benign
+#: "already exists" idempotency), the write was silently dropped — the
+#: deterministic "369-node truncation" footgun: Kùzu's mmap-backed buffer pool
+#: cannot back its dirty pages under host memory pressure (the documented
+#: ``ladybug_buffer_pool`` failure mode, but at write time rather than open
+#: time), so the COPY/SET no-ops while ``execute()`` raises a binder/IO error
+#: that the per-node try/except previously swallowed to DEBUG.  Catching it at
+#: the flush that dropped — instead of 9.5 min later in the post-job guard —
+#: lets the caller fail loud + retry against the exact failing batch.
+_DEFINITION_NODE_LABELS: frozenset[str] = frozenset(
+    {"Function", "Method", "Class", "Interface", "Enum"}
+)
+
+
+class DefinitionFlushError(RuntimeError):
+    """Raised when a definition-node batch flushed with zero successful writes.
+
+    Signals a silent write-drop (every Function/Method/Class/Interface/Enum in
+    a non-empty batch failed with a real runtime error rather than a benign
+    idempotency hit).  Raising here surfaces the drop at the exact flush that
+    lost the data so the indexer can fail loud and the operator can retry,
+    rather than reporting ``status=done`` over a structural-only skeleton.
+    """
+
+
 def _result_to_rows(result: lb.QueryResult) -> list[ResultRow]:
     """Convert a LadybugDB QueryResult to the same list[ResultRow] shape
     that MemgraphIngestor returned from its cursor-based API."""
@@ -269,6 +297,11 @@ class LadybugIngestor:
 
         flushed_total = 0
         skipped_total = 0
+        # Definition labels whose batch had inputs but landed ZERO rows because
+        # of genuine runtime errors (not benign idempotency).  Populated below;
+        # a non-empty set means a silent write-drop that we raise on after the
+        # loop so the buffer state + counters are still consistent.
+        dropped_definition_labels: dict[str, tuple[int, str | None]] = {}
 
         for label, props_list in nodes_by_label.items():
             id_key = NODE_UNIQUE_CONSTRAINTS.get(label)
@@ -279,6 +312,11 @@ class LadybugIngestor:
 
             skipped = 0
             flushed = 0
+            # Track real (non-idempotent) failures separately from
+            # missing-PK skips so we only trip the definition-drop guard on a
+            # genuine write failure, not on a malformed-input skip.
+            error_skips = 0
+            last_error: str | None = None
             for props in props_list:
                 if id_key not in props:
                     logger.warning(
@@ -344,9 +382,24 @@ class LadybugIngestor:
                     else:
                         logger.error(ls.MG_LABEL_FLUSH_ERROR.format(label=label, error=e))
                         skipped += 1
+                        error_skips += 1
+                        last_error = str(e)
 
             skipped_total += skipped
             flushed_total += flushed
+
+            # Silent-write-drop detection: a non-empty definition-label batch
+            # that landed ZERO rows because every write raised a real runtime
+            # error (not idempotency, not a missing-PK skip) is the "369-node
+            # truncation" footgun.  Record it; we raise after the loop so the
+            # buffer is cleared + counters are consistent first.
+            if (
+                label in _DEFINITION_NODE_LABELS
+                and props_list
+                and flushed == 0
+                and error_skips > 0
+            ):
+                dropped_definition_labels[label] = (error_skips, last_error)
 
         self._node_count_total += flushed_total
         logger.info(
@@ -355,6 +408,32 @@ class LadybugIngestor:
         if skipped_total:
             logger.info(ls.MG_NODES_SKIPPED.format(count=skipped_total))
         self.node_buffer.clear()
+
+        # Fail loud on a silent definition write-drop. The buffer is already
+        # cleared and counters logged above, so the ingestor state is
+        # consistent before we raise. The caller (GraphUpdater.run via
+        # _blocking_index) lets this propagate so the job is marked failed at
+        # the EXACT flush that lost data — instead of the post-job guard
+        # discovering 0 definitions 9.5 minutes later over a skeleton graph.
+        if dropped_definition_labels:
+            detail = ", ".join(
+                f"{lbl} (0/{len(nodes_by_label[lbl])} written; "
+                f"{cnt} runtime errors; last: {err})"
+                for lbl, (cnt, err) in dropped_definition_labels.items()
+            )
+            logger.error(
+                "Definition write-drop: %s. Every write in these batches "
+                "failed with a runtime error (not idempotency) — the graph "
+                "would be truncated to structural-only nodes. Failing the "
+                "flush so the index job surfaces the loss immediately and the "
+                "batch can be retried. Likely cause: Kùzu buffer-pool mmap "
+                "cannot back its dirty pages under host memory pressure "
+                "(lower co-tenant RAM use or KUZU_BUFFER_POOL_SIZE).",
+                detail,
+            )
+            raise DefinitionFlushError(
+                f"definition nodes silently dropped during flush: {detail}"
+            )
 
     # ------------------------------------------------------------------
     # Relationship batching
