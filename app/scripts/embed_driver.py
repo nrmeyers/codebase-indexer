@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import faulthandler
 import hashlib
 import os
 import re
@@ -44,6 +45,14 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+# Enable faulthandler so a hung subprocess automatically prints a full Python
+# traceback (all threads) to stderr every 60 seconds.  This makes hang
+# diagnosis possible without attaching py-spy: the parent captures stderr via
+# the log file redirect, so stuck-stack output lands in
+# /tmp/cis_embed_{job_id}.log automatically.
+faulthandler.enable()
+faulthandler.dump_traceback_later(60, repeat=True, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

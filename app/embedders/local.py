@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from typing import Any, Callable
 
 from .base import EMBEDDING_DIM, EmbedderBackend, EmbedderError
@@ -71,6 +72,22 @@ class LocalEmbedder(EmbedderBackend):
     Construction is cheap — model loading is deferred until the first
     ``embed()`` call so ``get_embedder()`` can return immediately at
     startup. The model handle is then cached for the process lifetime.
+
+    Thread-safety note
+    ------------------
+    ``embed_driver.py`` runs this backend from multiple ``asyncio.run()``
+    calls in different ``ThreadPoolExecutor`` threads (one per concurrent
+    batch).  Each ``asyncio.run()`` creates a private event loop, so an
+    ``asyncio.Lock`` is NOT safe here: a waiter Future added to the lock
+    on loop L1 can never be woken up by a ``release()`` that fires on loop
+    L0, causing the second thread to hang indefinitely.
+
+    The model-loading guard therefore uses ``threading.Lock`` — a plain OS
+    primitive that is loop-agnostic and safe across concurrent
+    ``asyncio.run()`` invocations.  The fast path (model already loaded)
+    checks ``self._model is not None`` without acquiring the lock, which is
+    safe because ``_model`` is only ever written once (from ``None`` to a
+    loaded object) under the lock.
     """
 
     name = "local"
@@ -98,7 +115,15 @@ class LocalEmbedder(EmbedderBackend):
         else:
             self.dim = EMBEDDING_DIM
         self._model: Any | None = None
-        self._lock = asyncio.Lock()
+        # threading.Lock — NOT asyncio.Lock.
+        # This guard must work across concurrent asyncio.run() calls in
+        # different ThreadPoolExecutor threads (the embed_driver.py use
+        # case).  asyncio.Lock waiters are tied to the event loop they were
+        # created on; a release() on L0 cannot wake a waiter registered on
+        # L1, producing a permanent hang.  threading.Lock has no such
+        # restriction and is the correct primitive for cross-thread,
+        # cross-loop mutual exclusion.
+        self._load_lock = threading.Lock()
 
     def _load_model(self) -> Any:
         """Import and instantiate ``SentenceTransformer`` lazily.
@@ -206,6 +231,26 @@ class LocalEmbedder(EmbedderBackend):
 
         return result
 
+    def _ensure_model_loaded(self) -> None:
+        """Load the sentence-transformers model exactly once, thread-safely.
+
+        Uses ``threading.Lock`` (not ``asyncio.Lock``) so the guard works
+        correctly across concurrent ``asyncio.run()`` calls in different
+        threads — the ``embed_driver.py`` subprocess pattern.  The fast
+        path (``self._model is not None``) is a plain attribute read that
+        races safely because the attribute transitions from ``None`` to a
+        non-``None`` object exactly once and is never set back to ``None``.
+
+        Raises:
+            EmbedderError: If ``sentence-transformers`` is not installed or
+                the model fails to download / load.
+        """
+        if self._model is not None:
+            return
+        with self._load_lock:
+            if self._model is None:
+                self._model = self._load_model()
+
     async def embed(
         self,
         texts: list[str],
@@ -234,14 +279,13 @@ class LocalEmbedder(EmbedderBackend):
         if not texts:
             return []
 
-        # Serialise model construction under a lock so two concurrent first-
-        # call requests don't both pay the 30-60s load cost.
+        # Ensure the model is loaded.  _ensure_model_loaded uses a
+        # threading.Lock internally so it is safe to call from concurrent
+        # asyncio.run() contexts in different threads (the embed_driver.py
+        # subprocess pattern).  Offload to a worker thread so the event
+        # loop is not stalled during the 30-60 s first-load download.
         if self._model is None:
-            async with self._lock:
-                if self._model is None:
-                    # ``_load_model`` is cheap once cached; offload anyway
-                    # so the event loop doesn't stall on first call.
-                    self._model = await asyncio.to_thread(self._load_model)
+            await asyncio.to_thread(self._ensure_model_loaded)
 
         vectors = await asyncio.to_thread(
             self._encode_sync, texts, batch_callback=batch_callback

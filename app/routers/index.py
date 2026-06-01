@@ -1889,6 +1889,14 @@ def _blocking_embed(job: _EmbedJob) -> None:
     sub_env = _os.environ.copy()
     if settings.EMBED_DEVICE == "cpu":
         sub_env["CUDA_VISIBLE_DEVICES"] = ""
+    # Prevent torch/OpenMP/HuggingFace tokenizers from spawning internal
+    # thread pools that can deadlock after fork (the embed driver is a
+    # subprocess, not a fresh exec on all platforms).  These are no-ops for
+    # the SageMaker / TEI backends which make HTTP calls rather than running
+    # a local model.
+    sub_env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    sub_env.setdefault("OMP_NUM_THREADS", "1")
+    sub_env.setdefault("MKL_NUM_THREADS", "1")
 
     log_path = Path(f"/tmp/cis_embed_{job.job_id}.log")
     with log_path.open("w") as log_fh:
