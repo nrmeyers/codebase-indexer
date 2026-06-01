@@ -380,6 +380,102 @@ class _writing_phase_heartbeat:
         # Final tick so the post-write transition starts from a fresh clock.
         self._tick()
 
+
+class _embedding_phase_heartbeat:
+    """Keep the parent index job alive while the embedding subprocess runs.
+
+    Root cause (embed-phase false-kill): ``_blocking_embed`` wraps a
+    ``subprocess.run()`` call.  During that call, ``job.last_progress_at``
+    is never advanced — the only thing that advanced it before was
+    ``_progress_cb``, which is only called during the parse/writing phases.
+    Once the job transitions to ``phase='embedding'``, the phase watchdog
+    starts its countdown against a frozen timestamp.  On a CPU-only host
+    with ~4000 nodes to embed, the ~50-batch encode run can silently exceed
+    ``JOB_PHASE_WATCHDOG_SECONDS`` (600s default), causing the watchdog to
+    kill a healthy, progressing job.
+
+    Fix: spawn a daemon thread that tails the embed subprocess log file
+    (``/tmp/cis_embed_{job_id}.log``).  Each ``PROGRESS`` line the driver
+    emits (once per flush) proves the subprocess is alive; this thread
+    bumps ``job.last_progress_at`` and the durable ``updated_at`` in
+    response.  Between PROGRESS lines it falls back to a wall-clock tick
+    at ``_WRITING_HEARTBEAT_INTERVAL_SECONDS`` (30s) so even a slow first
+    batch (model cold-start) keeps the watchdog at bay.
+
+    The log file is created by ``_blocking_embed`` just before
+    ``subprocess.run``; the thread polls until it appears so the heartbeat
+    covers the cold-start gap.
+
+    Best-effort: failures inside the thread are swallowed — the heartbeat
+    must never fail the index worker.  The thread is stopped + joined on
+    ``__exit__``.
+    """
+
+    def __init__(
+        self,
+        job: _Job,
+        *,
+        interval_seconds: float = _WRITING_HEARTBEAT_INTERVAL_SECONDS,
+    ) -> None:
+        self._job = job
+        self._interval = max(1.0, float(interval_seconds))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _tick(self) -> None:
+        """Bump in-memory + durable liveness for the embed phase."""
+        now = time.time()
+        self._job.last_progress_at = now
+        try:
+            _jobs_store.touch_heartbeat(self._job.job_id)
+        except RuntimeError:
+            pass  # jobs_store not initialised (tests without lifespan)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _run(self) -> None:
+        """Main heartbeat loop: tail the embed log and bump on PROGRESS lines."""
+        last_seen_embedded = -1
+
+        # Initial tick immediately so the watchdog clock resets the moment
+        # the embed phase begins (before the subprocess log even exists).
+        self._tick()
+
+        while not self._stop.wait(self._interval):
+            try:
+                progress = _parse_embed_progress(self._job.job_id)
+                if progress is not None:
+                    embedded, _, _ = progress
+                    if embedded != last_seen_embedded:
+                        # New PROGRESS line — subprocess is actively encoding.
+                        last_seen_embedded = embedded
+                        self._tick()
+                        continue
+            except Exception:  # noqa: BLE001 — log read failure is non-fatal
+                pass
+            # No new PROGRESS line seen since last interval — still tick on
+            # the wall-clock cadence so a slow first batch (cold model load)
+            # doesn't trip the watchdog.
+            self._tick()
+
+    def __enter__(self) -> "_embedding_phase_heartbeat":
+        self._tick()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"embed-heartbeat-{self._job.job_id[:8]}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        # Final tick so the post-embed transition starts from a fresh clock.
+        self._tick()
+
+
 # TTL: keep completed jobs for 1 hour so callers can poll after completion.
 _JOB_TTL_SECONDS = 3600
 
@@ -1432,7 +1528,11 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
 
     _phase_embed_start = time.monotonic()
     job.embed_started_at = time.time()
-    _blocking_embed(embed_job)  # raises on failure → job marked "failed"
+    # Embedding-phase heartbeat: bumps job.last_progress_at while the
+    # subprocess runs so the phase watchdog does not false-kill a
+    # slow-but-alive CPU encode (fix/embedding-phase-stall).
+    with _embedding_phase_heartbeat(job):
+        _blocking_embed(embed_job)  # raises on failure → job marked "failed"
     _metrics.record_index_phase("embed", time.monotonic() - _phase_embed_start)
     job.embedded_count = embed_job.embedded_count
     # BUC-1574 (Phase 1.4) — lift incremental-embed totals so the

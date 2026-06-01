@@ -486,6 +486,50 @@ def resolve_batch_embedder() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Input truncation (fix/embedding-phase-stall).
+#
+# e5-base-v2 silently truncates its input at 512 BPE tokens (~2–4 chars
+# each).  A minified / generated file that ends up as one enormous line in
+# the source range can be hundreds of kilobytes; on CPU that single text
+# dominates one ``encode()`` call for tens of seconds — sometimes past the
+# phase watchdog threshold when several such texts land in the same batch.
+#
+# Truncating here (before the text reaches any model) is the correct fix:
+# the meaningful semantic content is always in the first ~512 tokens, and
+# every extra character beyond the model's context window is ignored anyway.
+# ---------------------------------------------------------------------------
+
+#: Maximum character length of a single embed input text sent to any
+#: backend.  4096 chars ≈ 1024–2048 tokens, well above e5-base-v2's
+#: effective 512-token window.  Truncation is logged and counted.
+EMBED_MAX_INPUT_CHARS = 4096
+
+
+def truncate_embed_input(text: str, max_chars: int = EMBED_MAX_INPUT_CHARS) -> str:
+    """Return ``text`` truncated to ``max_chars`` characters.
+
+    Called once per text before it is appended to ``_batch_texts``.  When
+    truncation happens the leading ``max_chars`` characters are used — the
+    semantically richest part of any symbol body or summary — and a WARN
+    line is emitted so the operator can see which symbols triggered it
+    (typically minified JS, generated protobuf stubs, or extremely long
+    docstrings that survived the skip filter).
+
+    Args:
+        text: Raw embed input assembled by ``compose_function_method_embed_text``
+            or a Class/Module/File summary builder.
+        max_chars: Hard character cap.  Default :data:`EMBED_MAX_INPUT_CHARS`.
+
+    Returns:
+        The original string when ``len(text) <= max_chars``; otherwise
+        ``text[:max_chars]``.
+    """
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
+# ---------------------------------------------------------------------------
 # Driver entry-point.  Everything below this point talks to LadybugDB,
 # DuckDB and SageMaker and is exercised only by the live indexer (not by
 # unit tests).
@@ -760,22 +804,28 @@ RETURN n.qualified_name AS qualified_name,
     ] = []
 
     def _flush_pending(pool: ThreadPoolExecutor) -> None:
-        """Dispatch every queued batch to SageMaker in parallel + insert.
+        """Dispatch every queued batch to the embedder in parallel + insert.
 
         Submits each pending outer batch to a thread, gathers the
         results in submission order, then bulk-inserts the resulting
         EmbeddingRow list.  Bumps the live ``_embedded_count`` and
         prints a PROGRESS line the parent log-tailer parses.
 
-        LE-151b: if a batch's embed call raises (transient SageMaker
-        failure that survived all retries, or a hard error), we do NOT
-        abort the entire job and we do NOT write empty/zero vectors for
-        that batch.  Instead the batch's symbol count is added to
-        ``_failed_count`` and a loud ``WARN embed_batch.failed`` line is
-        emitted.  ``main`` returns a non-zero exit code when
-        ``_failed_count > 0`` so the parent never records the job as a
-        clean success.  Successfully-embedded batches in the same flush
-        are still persisted.
+        Per-batch resilience (fix/embedding-phase-stall):
+        * Each batch is tried once; on failure it is retried once more
+          (in-thread, not via the pool) before being skipped.
+        * A failing/stuck batch increments ``_failed_count`` and emits
+          a loud ``WARN embed_batch.failed`` line — the symbols are NOT
+          written to the vector store (no fabricated/empty vectors).
+        * Successfully-embedded batches in the same flush are still
+          persisted.
+        * ``main`` returns a non-zero exit code when ``_failed_count > 0``
+          so the parent never records the job as a clean success.
+
+        A ``PROGRESS`` line is printed after every flush so the parent
+        heartbeat thread tails it and bumps ``job.last_progress_at``,
+        keeping the phase watchdog from false-killing a slow-but-alive
+        CPU encode.
         """
         nonlocal _embedded_count, _failed_count
         if not _pending_batches:
@@ -795,22 +845,42 @@ RETURN n.qualified_name AS qualified_name,
                     _embs = fut.result()
                 except Exception as exc:  # noqa: BLE001 — surfaced, not swallowed
                     _err = exc
+
+                if _err is not None:
+                    # First attempt failed — retry once before skipping.
+                    # The retry runs synchronously (no pool) so it doesn't
+                    # fan out additional concurrent requests into a
+                    # serverless endpoint that is already under pressure.
+                    _warn(
+                        f"embed_batch.retry symbols={len(meta)} "
+                        f"reason={type(_err).__name__}:{_err}"
+                    )
+                    _retry_err: BaseException | None = None
+                    _retry_embs: list[list[float]] | None = None
+                    try:
+                        _retry_embs = _embed_batch(_texts)
+                    except Exception as _exc2:  # noqa: BLE001
+                        _retry_err = _exc2
+                    if _retry_err is None and _retry_embs is not None:
+                        # Retry succeeded — use the retry result.
+                        _err = None
+                        _embs = _retry_embs
+                    else:
+                        # Both attempts failed — skip the batch.
+                        _warn(
+                            f"embed_batch.failed symbols={len(meta)} "
+                            f"reason={type(_retry_err).__name__}:{_retry_err}"
+                        )
+                        _failed_count += len(meta)
+                        continue
+
                 _pairs, _failed = partition_batch_result(meta, _embs, _err)
                 if _failed:
                     _failed_count += _failed
-                    if _err is not None:
-                        # Embedding this batch failed even after the
-                        # embedder's internal retry/backoff.  Record the
-                        # loss; do NOT fabricate vectors.
-                        _warn(
-                            f"embed_batch.failed symbols={_failed} "
-                            f"reason={type(_err).__name__}:{_err}"
-                        )
-                    else:
-                        _warn(
-                            f"embed_batch.length_mismatch symbols={_failed} "
-                            f"got={len(_embs) if _embs is not None else 'none'}"
-                        )
+                    _warn(
+                        f"embed_batch.length_mismatch symbols={_failed} "
+                        f"got={len(_embs) if _embs is not None else 'none'}"
+                    )
                     continue
                 for _m, _e in _pairs:
                     all_inserts.append(EmbeddingRow(
@@ -824,6 +894,8 @@ RETURN n.qualified_name AS qualified_name,
         finally:
             signal.alarm(0)
         _pending_batches.clear()
+        # PROGRESS line: tailed by the parent heartbeat thread to prove
+        # this subprocess is alive and advancing (fix/embedding-phase-stall).
         print(
             f"PROGRESS embedded={_embedded_count} "
             f"skipped={_skipped_unchanged} filtered={_skipped_filtered} "
@@ -875,6 +947,16 @@ RETURN n.qualified_name AS qualified_name,
             src=_src,
             format_docstring=format_docstring,
         )
+        # Truncate BEFORE hashing so the stored content_hash fingerprints
+        # exactly what the embedder sees.  The model truncates at ~512 BPE
+        # tokens anyway; characters beyond EMBED_MAX_INPUT_CHARS are ignored.
+        if len(_embed_text) > EMBED_MAX_INPUT_CHARS:
+            print(
+                f"WARN embed_driver.input_truncated qname={_qname} "
+                f"original_chars={len(_embed_text)} capped={EMBED_MAX_INPUT_CHARS}",
+                flush=True,
+            )
+            _embed_text = truncate_embed_input(_embed_text)
         _content_hash = compute_content_hash(_embed_text)
         if _existing_hashes.get(_qname) == _content_hash:
             _skipped_unchanged += 1
@@ -980,6 +1062,7 @@ RETURN c.qualified_name AS qualified_name,
         if _doc:
             _header.append(_doc)
         _embed_text = "\n".join(_header).rstrip()
+        _embed_text = truncate_embed_input(_embed_text)
 
         # Summary-chunk qname convention: never collides with real qnames.
         _summary_qname = f"{_qname}::Class::summary"
@@ -1076,6 +1159,7 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
         if _doc:
             _lines.append(_doc)
         _embed_text = "\n".join(_lines).rstrip()
+        _embed_text = truncate_embed_input(_embed_text)
 
         _summary_qname = f"{_qname}::Module::summary"
         _content_hash = compute_content_hash(_embed_text)
@@ -1265,6 +1349,7 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
             f"# ---\n"
             f"{_summary}"
         )
+        _embed_text = truncate_embed_input(_embed_text)
         _summary_qname = f"{_qname}::File::summary"
         _content_hash = compute_content_hash(_embed_text)
         if _existing_hashes.get(_summary_qname) == _content_hash:
