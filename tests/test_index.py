@@ -479,8 +479,6 @@ def test_blocking_index_completes_with_heartbeat_wrapper_and_resolves_symbols(
     previously-missing-style symbol (a route handler) must be present. No
     embedder/model is loaded — _blocking_index is the structural pass only.
     """
-    import time
-
     from app.routers.index import _Job, _blocking_index
 
     # Tiny synthetic repo with a "route handler" so we can assert it resolves.
@@ -534,6 +532,101 @@ def test_blocking_index_completes_with_heartbeat_wrapper_and_resolves_symbols(
             pass
     assert found >= 1, "route handler missing — partial/incomplete write"
     _jobs.pop(job.job_id, None)
+
+
+def test_truncated_graph_self_heals_on_incremental_reindex(tmp_path: Path) -> None:
+    """A truncated graph (structure-only) must self-heal on the NEXT reindex.
+
+    Reproduces the "369-node" durable failure: a prior run persisted the
+    structural skeleton (Folders / Files / Modules) but no definition nodes,
+    while the on-disk hash cache was written for every file. A naive
+    incremental reindex would see every file "unchanged", skip parsing, and
+    leave the graph truncated forever — even though it reports status=done.
+
+    _graph_is_truncated() must detect the zero-definition state and force a
+    full re-parse so definitions + relationships come back.
+    """
+    from app.routers.index import _Job, _blocking_index, _graph_is_truncated
+
+    repo = tmp_path / "tinyrepo"
+    pkg = repo / "src" / "routes"
+    pkg.mkdir(parents=True)
+    (repo / "src" / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text("")
+    (pkg / "chat.py").write_text(
+        "def handle_list_conversations(actor_id):\n"
+        "    return _query(actor_id)\n\n"
+        "def _query(actor_id):\n"
+        "    return []\n"
+    )
+
+    # --- Run 1: full index. Graph is complete. ---
+    job1 = _Job(job_id="heal-run-1", repo_path=str(repo), status="running")
+    _jobs[job1.job_id] = job1
+    with patch("app.routers.index._blocking_embed"), patch(
+        "app.services.tantivy_index.TantivyIndex", create=True
+    ):
+        _blocking_index(job1, force_reindex=True)
+    assert job1.node_count > 0
+    assert job1.rel_count > 0
+
+    from app.config import settings as _settings
+    from app.services.slug import derive_slug as _derive_slug
+
+    repo_name = _derive_slug(repo.resolve(), repo.name)
+    db_path = _settings.db_path_for_repo(repo_name)
+
+    # A healthy graph is NOT truncated.
+    assert _graph_is_truncated(db_path) is False
+
+    # --- Simulate truncation: delete all definition nodes, keeping structure
+    # and the (now-stale) hash cache. This is the live "369-node" state. ---
+    import real_ladybug as lb  # type: ignore[import-untyped]
+
+    db = lb.Database(db_path)
+    conn = lb.Connection(db)
+    for label in ("Function", "Method", "Class", "Interface", "Enum"):
+        conn.execute(f"MATCH (n:{label}) DETACH DELETE n")
+    conn.close()
+    db.close()
+    import gc
+
+    gc.collect()
+
+    # The hash cache from run 1 still lists chat.py as indexed.
+    hash_cache = repo / ".cgr-hash-cache.json"
+    assert hash_cache.exists(), "run 1 should have written a hash cache"
+
+    # Now the graph IS truncated — detector must fire.
+    assert _graph_is_truncated(db_path) is True
+
+    # --- Run 2: incremental (force_reindex=False). Must self-heal. ---
+    job2 = _Job(job_id="heal-run-2", repo_path=str(repo), status="running")
+    _jobs[job2.job_id] = job2
+    with patch("app.routers.index._blocking_embed"), patch(
+        "app.services.tantivy_index.TantivyIndex", create=True
+    ):
+        _blocking_index(job2, force_reindex=False)
+
+    # Definitions are back — the route handler resolves again.
+    db = lb.Database(db_path)
+    conn = lb.Connection(db)
+    try:
+        res = conn.execute(
+            "MATCH (f:Function) WHERE f.name = $n RETURN count(f) AS c",
+            {"n": "handle_list_conversations"},
+        )
+        found = int(res.get_next()[0]) if res.has_next() else 0
+    finally:
+        conn.close()
+        db.close()
+    assert found >= 1, (
+        "truncated graph did NOT self-heal — definitions still missing after "
+        "an incremental reindex (the 369-node bug)"
+    )
+    assert _graph_is_truncated(db_path) is False
+    _jobs.pop(job1.job_id, None)
+    _jobs.pop(job2.job_id, None)
 
 
 def test_reconciler_still_reaps_genuinely_hung_writing_job(tmp_path: Path) -> None:
@@ -960,8 +1053,6 @@ def test_reconcile_stale_running_jobs_persistent_store(tmp_path: Path) -> None:
     job_id = persisted.job_id
 
     # Backdate the job in the database by directly updating updated_at
-    import sqlite3
-
     conn = jobs_store._require_conn()
     conn.execute(
         "UPDATE jobs SET updated_at = ? WHERE job_id = ?",

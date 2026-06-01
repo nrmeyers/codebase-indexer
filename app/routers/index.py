@@ -730,6 +730,91 @@ def _index_markdown_corpus(
     return inserted
 
 
+#: Node labels that represent code *definitions* (as opposed to the structural
+#: skeleton — Folder / File / Module / Project / Package). A healthy graph for a
+#: non-trivial source repo always has thousands of these; a truncated graph
+#: (reaped / failed mid-write after the structural pass) has zero.
+_DEFINITION_NODE_LABELS: tuple[str, ...] = (
+    "Function",
+    "Method",
+    "Class",
+    "Interface",
+    "Enum",
+)
+
+
+def _graph_is_truncated(repo_db_path: str) -> bool:
+    """Return True if the graph holds structural nodes but ZERO definitions.
+
+    Diagnoses the "369-node" failure mode: a previous run persisted the
+    structural skeleton (Folders / Files / Modules) but was reaped or failed
+    before any Function / Method / Class node was written, leaving a graph that
+    the size-based emptiness check treats as "populated" (megabytes on disk)
+    even though it carries no code symbols. Because the on-disk hash cache was
+    written for every seen file, subsequent incremental runs skip every file
+    and never re-emit definitions — the truncation is permanent until a force
+    re-parse.
+
+    Best-effort and side-effect free: opens the DB read-only with the bounded
+    buffer pool, counts definition nodes, and closes immediately. Any failure
+    (DB locked, missing, malformed) returns False so the caller falls back to
+    normal incremental behaviour rather than over-forcing a re-parse.
+    """
+    db = None
+    conn = None
+    try:
+        import real_ladybug as lb  # type: ignore[import-untyped]  # noqa: PLC0415
+        from ..services.ladybug_buffer_pool import (  # noqa: PLC0415
+            resolve_buffer_pool_size,
+        )
+
+        if not Path(repo_db_path).exists():
+            return False
+
+        db = lb.Database(
+            repo_db_path,
+            read_only=True,
+            buffer_pool_size=resolve_buffer_pool_size(),
+        )
+        conn = lb.Connection(db)
+
+        # Count definition nodes via per-label MATCH queries. This dialect of
+        # LadybugDB (Kùzu fork) does not support a disjunctive
+        # ``WHERE n:A OR n:B`` label predicate (it raises a parser error), so
+        # we sum per-label counts and short-circuit on the first non-zero.
+        def_count = 0
+        for label in _DEFINITION_NODE_LABELS:
+            res = conn.execute(f"MATCH (n:{label}) RETURN count(n) AS cnt")
+            if res.has_next():
+                def_count += int(res.get_next()[0])
+            if def_count > 0:
+                return False  # has definitions — not truncated
+
+        # Zero definitions. Only call it "truncated" if the structural skeleton
+        # IS present — an entirely empty DB is the db_was_new case, already
+        # handled by the size check, and forcing there is harmless but we keep
+        # the signals distinct for clearer logs.
+        struct_res = conn.execute("MATCH (n) RETURN count(n) AS cnt")
+        struct_count = int(struct_res.get_next()[0]) if struct_res.has_next() else 0
+        return struct_count > 0
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        try:
+            if conn is not None and hasattr(conn, "close"):
+                conn.close()
+        except Exception:
+            pass
+        try:
+            if db is not None and hasattr(db, "close"):
+                db.close()
+        except Exception:
+            pass
+        import gc as _gc  # noqa: PLC0415
+
+        _gc.collect()
+
+
 def _blocking_index(job: _Job, force_reindex: bool) -> None:
     """Synchronous ingestion — called from the thread pool.
 
@@ -784,7 +869,34 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
         not Path(repo_db_path).exists()
         or Path(repo_db_path).stat().st_size < 4096  # < 4 KB = essentially empty
     )
-    effective_force = force_reindex or db_was_new
+    # Detect a TRUNCATED graph (the "369-node" failure mode): the DB file is
+    # non-trivially sized (it holds the structural skeleton — Folders / Files /
+    # Modules / Project) yet contains ZERO definition nodes (Function / Method /
+    # Class). This happens when a previous run was reaped or failed mid-write
+    # AFTER the structural pass but BEFORE definitions persisted, while the
+    # on-disk hash cache was still written for every "seen" file. On the next
+    # incremental run the updater finds every file hash unchanged, skips
+    # _process_single_file for all of them, and the definitions never come
+    # back — the graph stays truncated forever while the job reports
+    # status=done. The size-only emptiness check above misses this because a
+    # structure-only graph is megabytes, not <4 KB. Counting definition nodes
+    # is the authoritative signal; force a full re-parse so the hash cache is
+    # rebuilt from scratch and every file is re-walked. Best-effort: any error
+    # opening the DB for the count leaves db_was_truncated False (we fall back
+    # to today's behaviour rather than over-forcing).
+    db_was_truncated = (
+        not db_was_new
+        and not force_reindex
+        and _graph_is_truncated(repo_db_path)
+    )
+    effective_force = force_reindex or db_was_new or db_was_truncated
+    if db_was_truncated:
+        logger.warning(
+            "Repo %s graph is truncated (structural nodes present, zero "
+            "definition nodes) — forcing full re-parse to rebuild definitions "
+            "+ relationships. The on-disk hash cache will be regenerated.",
+            repo_name,
+        )
 
     # When the caller requested a full force-reindex, physically delete the
     # per-repo DB file + WAL + hash cache.  Without this, GraphUpdater's
@@ -793,7 +905,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # the new parse just layers fresh copies on top.  Symptoms: junk
     # symbols persist across re-indexes, node count grows monotonically,
     # cgrignore changes only partially take effect.
-    if force_reindex:
+    if force_reindex or db_was_truncated:
         db_file = Path(repo_db_path)
         # LadybugDB artefacts (kuzu naming: .db-wal, .db-shm)
         ladybug_wal = db_file.with_suffix(db_file.suffix + "-wal")
