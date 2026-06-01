@@ -495,12 +495,47 @@ def _get_last_indexed_at(repo_name: str) -> float | None:
 
 
 def is_repo_indexing(repo_name: str) -> bool:
-    """Return True when any currently-running job targets ``repo_name``.
+    """Return True when any LIVE currently-running job targets ``repo_name``.
 
     Used by /health and /stats to signal UI-level mutual exclusion.
+
+    Lazy self-healing: a "running" job whose last_progress_at heartbeat has
+    not advanced for longer than JOB_STALENESS_THRESHOLD_SECONDS is treated as
+    dead — it is transitioned to "failed" in-place and the persistent row is
+    also marked failed so a subsequent reindex request is not 409-blocked.
+    This is the lazy counterpart to the periodic reconcile_stale_running_jobs
+    and fires on every /health poll, ensuring the stale flag clears within one
+    poll cycle rather than after the full 5-minute reconcile interval.
     """
+    now = time.time()
     for j in _jobs.values():
         if j.status == "running" and Path(j.repo_path).name == repo_name:
+            silent_for = now - j.last_progress_at
+            threshold = settings.JOB_STALENESS_THRESHOLD_SECONDS
+            if silent_for > threshold:
+                # Lazily preempt the stale job — identical to what
+                # reconcile_stale_running_jobs does on its scheduled tick but
+                # triggered on-demand so /health returns the correct value
+                # immediately instead of staying stuck until the next tick.
+                err = (
+                    f"Job orphaned (no progress for {int(silent_for)}s) — "
+                    "cleared by is_repo_indexing lazy reconcile."
+                )
+                j.status = "failed"
+                j.error = err
+                j.finished_at = now
+                try:
+                    _jobs_store.mark_failed(j.job_id, error=err, terminal_status="failed")
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "is_repo_indexing: lazily failed orphaned job %s for repo %s "
+                    "(silent %.0fs > threshold %ds)",
+                    j.job_id[:8], repo_name, silent_for, threshold,
+                )
+                # This job is now terminal — keep scanning in case there is a
+                # second running job (shouldn't happen but be safe).
+                continue
             return True
     return False
 
@@ -576,6 +611,30 @@ async def _run_ingestion(job: _Job, force_reindex: bool) -> None:
             except RuntimeError:
                 pass
             _metrics.record_index_terminal("failed", kind="index")
+        except BaseException as exc:
+            # Catch asyncio.CancelledError (BaseException in Python 3.8+) and
+            # any other non-Exception base class so a task that is externally
+            # cancelled never leaves job.status stuck at "running".
+            # This is the root cause of the orphaned-indexing-flag bug: when
+            # the background asyncio task is cancelled the except-Exception
+            # clause above is bypassed, the job stays "running" in _jobs, and
+            # /health reports indexing:true forever (until the periodic
+            # reconciler fires 5 min later).
+            _now = time.time()
+            if job.status == "running":
+                job.status = "failed"
+                job.error = f"Task cancelled/interrupted: {type(exc).__name__}"
+                job.finished_at = _now
+            try:
+                _jobs_store.mark_failed(
+                    job.job_id,
+                    error=f"Task cancelled/interrupted: {type(exc).__name__}",
+                    terminal_status="failed",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            _metrics.record_index_terminal("failed", kind="index")
+            raise  # re-raise so the event loop still sees CancelledError
 
 
 def _index_markdown_corpus(
@@ -2007,6 +2066,7 @@ async def start_index(
             ),
         )
 
+    _inmem_now = time.time()
     for j in _jobs.values():
         if (
             j.status == "running"
@@ -2015,6 +2075,32 @@ async def start_index(
             and not j.cancelled
             and Path(j.repo_path).resolve() == resolved
         ):
+            # Orphaned-flag self-heal: if the in-memory job has not advanced
+            # its heartbeat for longer than the staleness threshold its worker
+            # is dead (task was cancelled/killed without transitioning the job).
+            # Preempt it here — identical logic to reconcile_stale_running_jobs
+            # but fired on the reindex request path so operators never have to
+            # wait for the periodic tick (default 5 min) to retry after a crash.
+            _inmem_silent = _inmem_now - j.last_progress_at
+            if _inmem_silent > settings.JOB_STALENESS_THRESHOLD_SECONDS:
+                _stale_err = (
+                    f"Job orphaned (no progress for {int(_inmem_silent)}s) — "
+                    "preempted by reindex request."
+                )
+                j.status = "failed"
+                j.error = _stale_err
+                j.finished_at = _inmem_now
+                try:
+                    _jobs_store.mark_failed(j.job_id, error=_stale_err, terminal_status="failed")
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "start_index: preempted orphaned job %s for repo %s "
+                    "(silent %.0fs > threshold %ds) — proceeding with new reindex",
+                    j.job_id[:8], repo_path.name, _inmem_silent,
+                    settings.JOB_STALENESS_THRESHOLD_SECONDS,
+                )
+                continue  # allow the new reindex to proceed
             _metrics.record_dedupe_409()
             raise HTTPException(
                 status_code=409,

@@ -1072,3 +1072,186 @@ def test_reconcile_stale_running_jobs_persistent_store(tmp_path: Path) -> None:
     body = resp.json()
     assert body["status"] == "failed"
     assert "stale by heartbeat reconciliation" in (body.get("error") or "")
+
+
+# ---------------------------------------------------------------------------
+# Orphaned-indexing-flag regression tests
+#
+# Root cause: when a background asyncio task dies without transitioning the
+# _Job to a terminal state (e.g. CancelledError propagating as BaseException,
+# bypassing the except-Exception handler), job.status stays "running" and
+# /health reports indexing:true until the periodic reconciler fires (up to
+# 5 min).  Simultaneously, the reindex path sees an in-memory "running" job
+# and returns 409, permanently blocking reindex without a process restart.
+#
+# The fix adds three layers:
+#   1. _run_ingestion catches BaseException and always transitions the job.
+#   2. is_repo_indexing() lazily preempts stale in-memory jobs.
+#   3. start_index()'s in-memory loop preempts stale jobs instead of 409ing.
+# ---------------------------------------------------------------------------
+
+
+def _plant_dead_job(repo_path: Path, *, stale_seconds: int = 2400) -> str:
+    """Seed a job that looks exactly like one whose worker died mid-run.
+
+    Creates BOTH the in-memory _Job (status='running', heartbeat stale) AND
+    the persistent durable row (status='running', updated_at stale) without
+    any live asyncio task behind it — this is the orphaned-flag scenario.
+    """
+    import time
+
+    from app.routers.index import _Job
+
+    durable = jobs_store.create_job(
+        kind="index",
+        actor_oid="",
+        actor_email="",
+        repo_path=str(repo_path),
+        force_reindex=False,
+        exclude_paths=frozenset(),
+    )
+    job_id = durable.job_id
+    stale_ts = time.time() - stale_seconds
+    # In-memory job with a stale heartbeat (simulates dead asyncio task).
+    _jobs[job_id] = _Job(
+        job_id=job_id,
+        repo_path=str(repo_path),
+        status="running",
+        phase="parsing",
+        last_progress_at=stale_ts,
+    )
+    # Make the durable row stale too.
+    conn = jobs_store._require_conn()
+    conn.execute(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+        (stale_ts, job_id),
+    )
+    return job_id
+
+
+def test_health_reports_not_indexing_for_dead_job(tmp_path: Path) -> None:
+    """is_repo_indexing() must return False when the in-memory job is stale.
+
+    Regression: before the fix, /health returned indexing:true even after the
+    worker died because is_repo_indexing() trusted job.status without checking
+    the heartbeat age.
+    """
+    from app.routers.index import is_repo_indexing
+
+    dead_job_id = _plant_dead_job(tmp_path)
+    repo_name = tmp_path.name
+
+    # With a stale heartbeat the job must be treated as dead.
+    assert is_repo_indexing(repo_name) is False, (
+        "is_repo_indexing should return False for a job with a stale heartbeat"
+    )
+    # The dead job must have been lazily transitioned to failed.
+    assert _jobs[dead_job_id].status == "failed"
+    row = jobs_store.get_job(dead_job_id)
+    assert row is not None and row.status == "failed"
+
+
+def test_reindex_unblocked_after_dead_job_clears_stale_flag(tmp_path: Path) -> None:
+    """POST /repos/{name}/reindex must succeed (not 409) when the only running
+    job has a stale heartbeat — i.e. its worker is dead.
+
+    Regression: before the fix, start_index() unconditionally 409'd on any
+    in-memory "running" job regardless of heartbeat freshness, permanently
+    blocking reindex until a process restart.
+    """
+    from app.routers.index import indexed_repo_paths
+
+    repo_name = tmp_path.name
+    indexed_repo_paths[repo_name] = str(tmp_path)
+    dead_job_id = _plant_dead_job(tmp_path)
+    try:
+        with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+            resp = client.post(
+                f"/repos/{repo_name}/reindex", json={"force": True}
+            )
+        assert resp.status_code == 202, (
+            f"Expected 202 after dead-job preemption, got {resp.status_code}: {resp.text}"
+        )
+        new_job_id = resp.json()["job_id"]
+        assert new_job_id != dead_job_id
+        # The dead job was transitioned to failed.
+        assert _jobs[dead_job_id].status == "failed"
+        row = jobs_store.get_job(dead_job_id)
+        assert row is not None and row.status == "failed"
+    finally:
+        indexed_repo_paths.pop(repo_name, None)
+
+
+def test_live_job_still_returns_409_on_concurrent_reindex(tmp_path: Path) -> None:
+    """A genuinely live job (fresh heartbeat) must still return 409 conflict.
+
+    Validates that the stale-job self-heal does NOT remove the concurrency
+    guard for healthy in-progress jobs.
+    """
+    from app.routers.index import indexed_repo_paths
+
+    repo_name = tmp_path.name
+    indexed_repo_paths[repo_name] = str(tmp_path)
+    try:
+        with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+            r1 = client.post(f"/repos/{repo_name}/reindex", json={"force": True})
+        assert r1.status_code == 202
+
+        # The job was just created — its heartbeat is fresh.
+        job_id = r1.json()["job_id"]
+        assert _jobs[job_id].status == "running"
+
+        # A second concurrent reindex must still be blocked.
+        with patch("app.routers.index._run_ingestion", new_callable=AsyncMock):
+            r2 = client.post(f"/repos/{repo_name}/reindex", json={"force": True})
+        assert r2.status_code == 409, (
+            f"Expected 409 for a genuinely live job, got {r2.status_code}"
+        )
+    finally:
+        indexed_repo_paths.pop(repo_name, None)
+
+
+def test_run_ingestion_transitions_job_on_cancellation(tmp_path: Path) -> None:
+    """_run_ingestion must mark the job failed when the asyncio task is cancelled.
+
+    Regression: the original except-Exception block did not catch
+    asyncio.CancelledError (a BaseException subclass since Python 3.8), so a
+    cancelled task left job.status = "running" and the stale flag stuck.
+    """
+    import asyncio
+    import time
+
+    from app.routers.index import _Job, _run_ingestion
+
+    job_id = "cancel-regression-job"
+    job = _Job(
+        job_id=job_id,
+        repo_path=str(tmp_path),
+        status="running",
+        phase="parsing",
+        last_progress_at=time.time(),
+    )
+    _jobs[job_id] = job
+
+    def _raise_cancelled(_job: object, _force: bool) -> None:
+        # Simulate the executor raising CancelledError mid-indexing.
+        raise asyncio.CancelledError("test-induced cancellation")
+
+    async def _drive() -> None:
+        with patch("app.routers.index._blocking_index", side_effect=_raise_cancelled):
+            try:
+                await _run_ingestion(job, False)
+            except asyncio.CancelledError:
+                pass  # expected — BaseException handler re-raises
+
+    asyncio.run(_drive())
+
+    # The job must be terminal — NOT stuck at "running".
+    assert job.status == "failed", (
+        f"Expected job.status='failed' after CancelledError, got '{job.status}'"
+    )
+    assert job.error is not None and "cancelled" in job.error.lower()
+    # The durable row must also be terminal.
+    row = jobs_store.get_job(job_id)
+    if row is not None:
+        assert row.status == "failed"
