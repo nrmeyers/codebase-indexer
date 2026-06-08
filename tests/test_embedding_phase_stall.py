@@ -24,6 +24,7 @@ import time
 import threading
 import types
 import sys
+from typing import Any
 from unittest.mock import MagicMock, patch, call as mock_call
 
 import pytest
@@ -417,3 +418,176 @@ def test_should_persist_successful_batches_even_when_one_batch_fails() -> None:
         f"expected 1 inserted row, got {len(inserted_rows)}"
     )
     assert inserted_rows[0][0] == meta_b[0]
+
+
+# ---------------------------------------------------------------------------
+# 4. Markdown corpus path: forward-hang guard
+#    Regression for the bug captured in the faulthandler dump:
+#      _index_markdown_corpus → _flush → embed_code_batch → model(**encoded)
+#    The torch CPU forward() never returns, the phase watchdog reaps the job.
+#
+#    Fix: _flush uses _embed_batch_torch_with_deadline which runs embed_code_batch
+#    inside a ProcessPoolExecutor with a wall-clock deadline.  On timeout the
+#    batch is skipped (counted) and the loop continues to completion.
+# ---------------------------------------------------------------------------
+
+
+def _hanging_embed(texts: list[str]) -> list[list[float]]:
+    """Simulate a hung torch forward() by sleeping forever."""
+    import time as _t
+    _t.sleep(9999)
+    return []  # unreachable
+
+
+def _ok_embed(texts: list[str]) -> list[list[float]]:
+    """Fast embed stub: return zero-vectors of length 768."""
+    return [[0.0] * 768 for _ in texts]
+
+
+def _deadline_call(
+    embed_fn: Any,
+    texts: list[str],
+    timeout_secs: int,
+) -> list[list[float]] | None:
+    """Reproduce _embed_batch_torch_with_deadline logic for tests.
+
+    Uses a ProcessPoolExecutor with a hard SIGKILL on timeout so tests never
+    hang even when embed_fn sleeps forever (simulating a stuck forward()).
+
+    This mirrors the production fix in _index_markdown_corpus: we must
+    explicitly SIGKILL the worker process before calling shutdown, otherwise
+    the ProcessPoolExecutor.__exit__ / shutdown(wait=True) blocks indefinitely
+    waiting for the stuck worker — the very bug this fix targets.
+    """
+    import os as _os_  # noqa: PLC0415
+    import signal as _signal  # noqa: PLC0415
+    from concurrent.futures import ProcessPoolExecutor, TimeoutError as _FTE  # noqa: PLC0415
+
+    ppe = ProcessPoolExecutor(max_workers=1)
+    try:
+        fut = ppe.submit(embed_fn, texts)
+        try:
+            return fut.result(timeout=timeout_secs)
+        except _FTE:
+            # Kill the worker process so shutdown(wait=True) returns immediately.
+            for _pid in ppe._processes:  # type: ignore[attr-defined]
+                try:
+                    _os_.kill(_pid, _signal.SIGKILL)
+                except OSError:
+                    pass
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+    finally:
+        try:
+            ppe.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def test_should_skip_batch_and_complete_when_torch_forward_hangs() -> None:
+    """_embed_batch_torch_with_deadline times out a hung forward and returns None.
+
+    The caller (_flush) must then skip the batch and continue — the job must
+    reach completion, not hang indefinitely.  This is the primary regression
+    for the faulthandler-captured stack:
+        _index_markdown_corpus → _flush → embed_code_batch → model(**encoded) ← stuck
+    """
+    texts = [f"# MarkdownDoc: chunk_{i}\n# Heading: H1\n\nbody text {i}" for i in range(4)]
+    result = _deadline_call(_hanging_embed, texts, timeout_secs=2)
+
+    assert result is None, (
+        "Expected None (timeout/skip) from a hanging forward(), "
+        f"got {type(result).__name__}"
+    )
+
+
+def test_should_embed_good_batch_when_torch_forward_succeeds() -> None:
+    """_embed_batch_torch_with_deadline returns vectors when forward completes.
+
+    Ensures the deadline wrapper doesn't interfere with the happy path:
+    a fast embed_code_batch must return all vectors correctly.
+    """
+    texts = [f"# MarkdownDoc: chunk_{i}\n# Heading: H1\n\nbody text {i}" for i in range(4)]
+    result = _deadline_call(_ok_embed, texts, timeout_secs=30)
+
+    assert result is not None, "Expected vectors from a fast forward(), got None"
+    assert len(result) == len(texts), (
+        f"Expected {len(texts)} vectors, got {len(result)}"
+    )
+    assert all(len(v) == 768 for v in result), "Expected 768-dim vectors"
+
+
+def test_should_truncate_oversized_markdown_text_before_embedding() -> None:
+    """embed texts are capped at EMBED_MAX_INPUT_CHARS before reaching the model.
+
+    The markdown chunker caps body at _MAX_CHARS=3500 chars; with the
+    ~60-char header from compose_markdown_embed_text, the embed text is
+    ~3560 chars — just under 4096.  For whole-document fallback chunks or
+    pathologically long headings, truncate_embed_input provides a hard cap.
+
+    This test confirms that oversized embed texts are truncated, not passed
+    raw to the forward().
+    """
+    from app.scripts.embed_driver import EMBED_MAX_INPUT_CHARS, truncate_embed_input
+
+    oversized = "x" * (EMBED_MAX_INPUT_CHARS + 5000)
+    truncated = truncate_embed_input(oversized)
+
+    assert len(truncated) == EMBED_MAX_INPUT_CHARS, (
+        f"Expected {EMBED_MAX_INPUT_CHARS} chars, got {len(truncated)}"
+    )
+    assert truncated == oversized[:EMBED_MAX_INPUT_CHARS]
+
+
+def test_should_complete_loop_when_one_batch_hangs_and_one_succeeds() -> None:
+    """Loop completes and inserts the good batch when one batch times out.
+
+    Simulates the _flush() loop behavior: two batches queued, first hangs
+    (returns None from deadline wrapper), second succeeds.  The loop must
+    complete with inserted=batch_size_of_second_batch, skipped_batches=1.
+    """
+    inserted_rows: list[tuple] = []
+    skipped_batches = 0
+
+    def _simulated_flush(
+        batch_texts: list[str],
+        batch_meta: list[tuple],
+        embed_fn: Any,
+        timeout_secs: int = 2,
+    ) -> int:
+        """Simulate _flush with the SIGKILL deadline logic from _index_markdown_corpus."""
+        nonlocal skipped_batches
+        if not batch_texts:
+            return 0
+
+        embs = _deadline_call(embed_fn, batch_texts, timeout_secs=timeout_secs)
+
+        if embs is None:
+            skipped_batches += 1
+            return 0
+
+        for meta_tuple, emb in zip(batch_meta, embs):
+            inserted_rows.append((meta_tuple, emb))
+        return len(batch_meta)
+
+    # Batch A: hangs (simulate stuck forward()).
+    texts_a = ["chunk_a_0", "chunk_a_1"]
+    meta_a = [("qn_a_0", "docs/a.md", 1, 5, "hash_a_0"), ("qn_a_1", "docs/a.md", 6, 10, "hash_a_1")]
+    _simulated_flush(texts_a, meta_a, _hanging_embed, timeout_secs=2)
+
+    # Batch B: succeeds fast.
+    texts_b = ["chunk_b_0", "chunk_b_1", "chunk_b_2"]
+    meta_b = [
+        ("qn_b_0", "docs/b.md", 1, 3, "hash_b_0"),
+        ("qn_b_1", "docs/b.md", 4, 6, "hash_b_1"),
+        ("qn_b_2", "docs/b.md", 7, 9, "hash_b_2"),
+    ]
+    _simulated_flush(texts_b, meta_b, _ok_embed, timeout_secs=30)
+
+    assert skipped_batches == 1, (
+        f"Expected 1 skipped batch (hung), got {skipped_batches}"
+    )
+    assert len(inserted_rows) == 3, (
+        f"Expected 3 inserted rows from good batch, got {len(inserted_rows)}"
+    )

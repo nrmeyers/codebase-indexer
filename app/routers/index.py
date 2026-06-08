@@ -812,21 +812,155 @@ def _index_markdown_corpus(
     )
     from app.scripts.embed_driver import compute_content_hash  # noqa: PLC0415
 
+    # -----------------------------------------------------------------------
+    # Resolve the embedder to use for this markdown pass.
+    #
+    # Priority mirrors embed_driver.resolve_batch_embedder():
+    #   1. Configured backend (SageMaker / LocalEmbedder / TEI) — preferred.
+    #      The backend is already guarded by its own timeout/retry logic and
+    #      runs via asyncio, never blocking the forward() directly.
+    #   2. In-process torch codebase_rag.embed_code_batch — last resort.
+    #      The torch CPU forward() cannot be interrupted from within its own
+    #      thread, so we run each batch inside a ProcessPoolExecutor with a
+    #      hard wall-clock deadline.  On timeout the batch is SKIPPED (logged
+    #      + counted); subsequent batches still run.  This ensures the job
+    #      always completes even when a single nomic-BERT forward hangs.
+    #
+    # The EMBED_MAX_INPUT_CHARS cap is applied to every text before it enters
+    # either path so an oversized chunk never causes an unbounded encode.
+    # -----------------------------------------------------------------------
+    from concurrent.futures import ProcessPoolExecutor, TimeoutError as _FutureTimeout
+    from app.scripts.embed_driver import truncate_embed_input  # noqa: PLC0415
+
+    _configured_backend = None
+    try:
+        from app.embedders.sync_bridge import get_embedder_or_none  # noqa: PLC0415
+        _configured_backend = get_embedder_or_none()
+    except Exception:  # noqa: BLE001 — import/config failure is non-fatal
+        pass
+
+    def _embed_batch_configured(texts: list[str]) -> list[list[float]] | None:
+        """Embed via the configured backend (SageMaker / LocalEmbedder / TEI).
+
+        Returns None on any failure so the caller can fall back to the torch
+        path or skip the batch.
+        """
+        if _configured_backend is None:
+            return None
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            return _asyncio.run(_configured_backend.embed(texts))
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning(
+                "markdown_indexer._embed_batch_configured failed (%s) — "
+                "will attempt torch fallback",
+                _exc,
+            )
+            return None
+
+    # Per-batch deadline for the torch fallback path.
+    # The nomic-BERT forward() on CPU cannot be interrupted in-thread; the
+    # only safe boundary is a subprocess.  ProcessPoolExecutor spawns a
+    # fresh OS process per worker so a hung forward() is abandoned when the
+    # Future times out, and the pool (and its worker) is shut down to avoid
+    # leaving zombie processes.
+    _MD_EMBED_TIMEOUT_SECS: int = int(
+        _os.environ.get("FORGE_MD_EMBED_TIMEOUT_SECS") or "120"
+    )
+
+    def _embed_batch_torch_with_deadline(
+        texts: list[str],
+    ) -> list[list[float]] | None:
+        """Run embed_code_batch in a child process; return None on timeout/error.
+
+        A hung torch CPU forward() cannot be interrupted from within its own
+        thread.  The only reliable interrupt boundary is an OS process.
+
+        Implementation note — why we avoid ProcessPoolExecutor as a context manager:
+        ``__exit__`` calls ``shutdown(wait=True)``, which blocks until the worker
+        finishes.  When the worker is stuck in ``model(**encoded)`` that never
+        returns, ``__exit__`` would hang indefinitely — the same bug we are fixing.
+        Instead we manage the pool and its worker pids explicitly: on timeout we
+        SIGKILL every worker process in the pool before calling shutdown so the
+        ``wait=True`` call in the finaliser returns immediately.
+        """
+        import signal as _signal  # noqa: PLC0415
+
+        _ppe = ProcessPoolExecutor(max_workers=1)
+        try:
+            _fut = _ppe.submit(embed_code_batch, texts)
+            try:
+                return _fut.result(timeout=_MD_EMBED_TIMEOUT_SECS)
+            except _FutureTimeout:
+                logger.warning(
+                    "markdown_indexer: torch forward() exceeded %ds — "
+                    "skipping batch of %d chunks (batch will not be indexed)",
+                    _MD_EMBED_TIMEOUT_SECS,
+                    len(texts),
+                )
+                # Kill every worker process so shutdown(wait=True) returns
+                # immediately instead of blocking on the stuck forward().
+                for _pid in _ppe._processes:  # type: ignore[attr-defined]  # private but stable
+                    try:
+                        _os.kill(_pid, _signal.SIGKILL)
+                    except OSError:
+                        pass
+                return None
+            except Exception as _exc:  # noqa: BLE001
+                logger.warning(
+                    "markdown_indexer: torch embed_code_batch failed (%s) — "
+                    "skipping batch of %d chunks",
+                    _exc,
+                    len(texts),
+                )
+                return None
+        finally:
+            # Attempt a non-blocking shutdown; worker pids were killed on
+            # timeout so this is typically instantaneous.
+            try:
+                _ppe.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+    #: Markdown chunks are larger than fn bodies; use a smaller batch so the
+    #: forward() finishes quickly and the timeout guards a short window.
+    #: Reduced from 32 to 16 for the torch path; the configured backend uses
+    #: its own batching internally so BATCH only controls the DuckDB insert
+    #: granularity there.
+    BATCH = 16
+    _md_skipped_batches = 0
+
     vec_conn = open_or_create(vec_db_path)
     try:
         existing_hashes = read_content_hashes(vec_conn)
         batch_texts: list[str] = []
         batch_meta: list[tuple[Any, str, int, int, str]] = []
         rows: list[EmbeddingRow] = []
-        BATCH = 32  # markdown chunks are larger than fn bodies; smaller batch
         inserted = 0
 
         def _flush() -> None:
-            nonlocal inserted
+            nonlocal inserted, _md_skipped_batches
             if not batch_texts:
                 return
-            embs = embed_code_batch(batch_texts)
-            for meta_tuple, emb, text in zip(batch_meta, embs, batch_texts):
+
+            # 1. Truncate every text to EMBED_MAX_INPUT_CHARS before embedding.
+            #    The markdown chunker caps body at 3500 chars + ~60 char header,
+            #    so most texts are already under 4096; the cap is a hard safety net
+            #    for edge cases (no-heading whole-file chunks of large docs).
+            safe_texts = [truncate_embed_input(t) for t in batch_texts]
+
+            # 2. Embed: configured backend first, torch fallback with deadline.
+            embs: list[list[float]] | None = _embed_batch_configured(safe_texts)
+            if embs is None:
+                embs = _embed_batch_torch_with_deadline(safe_texts)
+            if embs is None:
+                # Both paths failed / timed out — skip this batch entirely.
+                _md_skipped_batches += 1
+                batch_texts.clear()
+                batch_meta.clear()
+                return
+
+            for meta_tuple, emb in zip(batch_meta, embs):
                 _qn, _fp, _sl, _el, _content_hash = meta_tuple
                 rows.append(
                     EmbeddingRow(
@@ -849,7 +983,7 @@ def _index_markdown_corpus(
             embed_text = composer(chunk)
             content_hash = compute_content_hash(embed_text)
             if existing_hashes.get(chunk.qualified_name) == content_hash:
-                continue  # unchanged — skip the SageMaker call
+                continue  # unchanged — skip the embed call
             batch_texts.append(embed_text)
             batch_meta.append(
                 (
@@ -863,6 +997,14 @@ def _index_markdown_corpus(
             if len(batch_texts) >= BATCH:
                 _flush()
         _flush()
+
+        if _md_skipped_batches:
+            logger.warning(
+                "markdown_indexer: %d batch(es) skipped due to embed timeout "
+                "or failure (torch forward() hang guard). Inserted %d chunks.",
+                _md_skipped_batches,
+                inserted,
+            )
     finally:
         try:
             vec_conn.close()
