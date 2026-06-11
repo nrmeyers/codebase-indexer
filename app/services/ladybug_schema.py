@@ -179,11 +179,19 @@ _REL_TABLES: list[str] = [
         FROM Project TO Module,
         FROM Package TO Module
     )""",
+    # NAVI-92-A: file_path carries the defining module's relative path so
+    # centrality-overlay consumers (TheForge KG viewer, mergeAndRank) can
+    # resolve a symbol to its source file without an extra Module lookup.
+    # Parity with CALLS (file_path STRING DEFAULT '') and REBINDS.
+    # Old DBs pick up the column via the _REL_ALTERS backfill below; a
+    # full re-index is required to populate non-empty values on existing
+    # edges (the ALTER only sets the DEFAULT, not the actual file paths).
     """CREATE REL TABLE IF NOT EXISTS DEFINES(
         FROM Module TO Class,
         FROM Module TO Function,
         FROM Module TO Interface,
-        FROM Module TO Enum
+        FROM Module TO Enum,
+        file_path STRING DEFAULT ''
     )""",
     """CREATE REL TABLE IF NOT EXISTS DEFINES_METHOD(
         FROM Class TO Method
@@ -321,6 +329,12 @@ _REL_ALTERS: list[str] = [
     # the column converges on the resolver-supplied values.
     "ALTER TABLE CALLS ADD resolved_via STRING DEFAULT 'unknown'",
     "ALTER TABLE CALLS ADD confidence DOUBLE DEFAULT 1.0",
+    # NAVI-92-A: DEFINES.file_path — existing DBs missing this column must
+    # not crash.  The ALTER backfills the DEFAULT '' for all pre-existing
+    # DEFINES edges; a full re-index is required to populate real paths.
+    # Listed AFTER CALLS alters so older DBs that already have CALLS
+    # provenance columns apply this cleanly on the next startup.
+    "ALTER TABLE DEFINES ADD file_path STRING DEFAULT ''",
 ]
 
 # BUC-1621: backfill ALTERs for node tables.  CREATE NODE TABLE IF NOT EXISTS

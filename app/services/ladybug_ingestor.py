@@ -759,10 +759,38 @@ class LadybugIngestor:
                 f"behavioral relationships silently dropped during flush: {detail}"
             )
 
+    def _backfill_defines_file_paths(self) -> None:
+        """NAVI-92-A: populate DEFINES.file_path from the connected Module node.
+
+        After ``flush_relationships`` writes DEFINES edges (which carry
+        ``file_path = ''`` because the parsers don't populate the column yet),
+        this method runs a single batch Cypher to copy the Module's ``path``
+        property onto every DEFINES edge whose ``file_path`` is still empty.
+
+        Single-pass, constant-time relative to edge count (one planner call).
+        Best-effort: any LadybugDB failure is logged at WARNING and does NOT
+        abort the flush — the graph is structurally correct regardless; only
+        the file-path enrichment is missing, which degrades to the pre-NAVI-92
+        behaviour (centrality overlay shows empty file paths rather than crashing).
+        """
+        if self.conn is None:
+            return
+        try:
+            with self._conn_lock:
+                self.conn.execute(
+                    "MATCH (m:Module)-[r:DEFINES]->()\n"
+                    "WHERE r.file_path = '' AND m.path IS NOT NULL AND m.path <> ''\n"
+                    "SET r.file_path = m.path"
+                )
+            logger.debug("DEFINES.file_path backfill complete")
+        except Exception as exc:
+            logger.warning("DEFINES.file_path backfill failed (non-fatal): %s", exc)
+
     def flush_all(self) -> None:
         logger.info(ls.MG_FLUSH_START)
         self.flush_nodes()
         self.flush_relationships()
+        self._backfill_defines_file_paths()
         logger.info(ls.MG_FLUSH_COMPLETE)
 
     # ------------------------------------------------------------------

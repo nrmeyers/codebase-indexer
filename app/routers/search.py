@@ -1010,7 +1010,7 @@ def _enrich_centrality_locations(
 
 @router.get("/centrality", response_model=CentralityResponse)
 def centrality_top_n(
-    limit: int = Query(default=10, ge=1, le=200),
+    limit: int = Query(default=10, ge=1, le=500),
     repo: str | None = Query(
         default=None,
         description="Repo slug to scope the query to. Omit for first indexed DB.",
@@ -1025,7 +1025,9 @@ def centrality_top_n(
     (qualified_name + score, with empty ``file_path`` and ``line_range``).
 
     Args:
-        limit: Max number of rows to return (1–200; default 10).
+        limit: Max number of rows to return (1–500; default 10).
+              Raised from 200 → 500 (NAVI-93) — ``_enrich_centrality_locations``
+              is O(limit) (one batch KùZu IN query) so this is safe.
         repo: Optional repo slug.
 
     Returns:

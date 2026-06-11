@@ -714,7 +714,7 @@ class CentralityListResponse(BaseModel):
 )
 def repo_centrality_top_n(
     name: str,
-    limit: int = Query(default=20, ge=1, le=200),
+    limit: int = Query(default=20, ge=1, le=500),
 ) -> CentralityListResponse:
     """Return the ``limit`` most-central symbols for ``name``.
 
@@ -731,7 +731,10 @@ def repo_centrality_top_n(
 
     Args:
         name: Repo slug — the same key used by ``/repos/{name}/stats``.
-        limit: Max rows to return (1–200; default 20 per the brief).
+        limit: Max rows to return (1–500; default 20). Raised from 200 → 500
+               (NAVI-93) — the underlying SELECT is a pure DuckDB read over
+               the pre-computed centrality table; O(limit) with no on-demand
+               compute.
 
     Returns:
         CentralityListResponse: ``{ symbols: [{ qname, centrality }],
