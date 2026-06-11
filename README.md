@@ -7,7 +7,7 @@
 [![Ruff](https://img.shields.io/badge/code%20style-ruff-d7ff64?logo=ruff)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-`code-indexer-service` is a FastAPI gateway and CLI that indexes source repositories into a [tree-sitter](https://tree-sitter.github.io/)–parsed symbol graph (LadybugDB, an embedded kuzu fork — no Docker) backed by a DuckDB vector store. It is powered by the [`code-graph-rag`](https://github.com/navistone/code-graph-rag) engine and supports 11 languages out of the box.
+`code-indexer-service` is a FastAPI gateway and CLI that indexes source repositories into a [tree-sitter](https://tree-sitter.github.io/)–parsed symbol graph (LadybugDB, an embedded kuzu fork — no Docker) backed by a DuckDB vector store. It is powered by the [`code-graph-rag`](https://github.com/navistone/code-graph-rag) engine and supports 12 languages out of the box (Python, JavaScript, TypeScript, TSX, Rust, Go, Scala, Java, C++, C#, PHP, Lua).
 
 Use it standalone from your shell, or embed it as a sidecar — the same HTTP surface drives both.
 
@@ -101,6 +101,20 @@ The CLI auto-starts the FastAPI service in the background on first use. To run t
 - **Cross-file and cross-repo by default.** Imports, calls, inheritance, and references are first-class graph edges. Ask "who calls X" across the entire indexed corpus, not just the current file.
 - **Structural Cypher queries.** The symbol graph is queryable directly — return every `Function` that imports from a given module, list all `Class` nodes with more than 20 methods, etc.
 - **Grounded context bundles for LLMs.** `/context-bundle` returns the symbols, snippets, and call graph relevant to a task — primary use case is feeding a coding agent without dumping whole files.
+
+---
+
+## Ecosystem
+
+`code-indexer-service` is part of a three-repo orbit centered on [TheForge](https://github.com/navistone/TheForge):
+
+| Service | Role | Repo | Default port |
+|---------|------|------|-------------|
+| **TheForge** | Governed delivery hub + AI orchestrator | [navistone/TheForge](https://github.com/navistone/TheForge) | 3001 (API), 3000 (UI) |
+| **code-indexer-service** | Repo graph + semantic search sidecar | [navistone/code-indexer-service](https://github.com/navistone/code-indexer-service) | 8003 |
+| **agentalloy** | Skill composition engine | [ZZachary-M/agentalloy](https://github.com/ZZachary-M/agentalloy) | 47950 |
+
+TheForge auto-starts this service via `scripts/start-indexer.sh` and proxies it under `/api/code-indexer/*`. You can also run it completely standalone — the CLI and HTTP surface work independently of TheForge.
 
 ---
 
@@ -210,9 +224,12 @@ Full schema lives at `GET /openapi.json`. The most-used endpoints:
 | `GET`    | `/search/structural?q=`  | Arbitrary Cypher against LadybugDB.                     |
 | `GET`    | `/search/lexical?q=`     | BM25 search via Tantivy.                                |
 | `GET`    | `/search/symbol?fqn=`    | Exact FQN lookup.                                       |
-| `GET`    | `/search/callers?fqn=`   | Upstream callers.                                       |
-| `GET`    | `/search/callees?fqn=`   | Downstream callees.                                     |
-| `GET`    | `/search/centrality`     | PageRank scores over the symbol graph.                  |
+| `GET`    | `/search/centrality`     | PageRank scores over the whole graph (any-repo).        |
+| `GET`    | `/search/graph/overview` | Layer/cluster overview for graph visualisation.         |
+| `GET`    | `/symbols/{fqn}/callers` | Upstream callers of a fully-qualified symbol.           |
+| `GET`    | `/symbols/{fqn}/callees` | Downstream callees of a fully-qualified symbol.         |
+| `GET`    | `/symbols/{fqn}`         | Symbol source + location by FQN.                        |
+| `GET`    | `/repos/{name}/centrality` | Per-repo PageRank top-N (5-min cache for TheForge boost). |
 | `GET`    | `/search/files`          | Browse the package/file tree.                           |
 | `GET`    | `/search/types`          | Enumerate node labels + counts.                         |
 | `POST`   | `/context-bundle`        | Grounded context for a task description.                |
@@ -278,22 +295,48 @@ Three latency taxes are paid once at `uvicorn` startup so they are never charged
 
 ## Architecture
 
+### Ingest → query flow
+
 ```mermaid
-flowchart LR
-    User([CLI / curl / TheForge UI]) -->|HTTP| API[FastAPI service<br/>app/routers/*]
-    API -->|index, search| Engine[code-graph-rag engine<br/>LadybugIngestor + DuckDB store]
-    Engine -->|parse| TS[tree-sitter<br/>11 languages]
-    Engine -->|embed| EMB{Embedder<br/>backend}
-    EMB -->|local| Local[sentence-transformers<br/>in-process]
-    EMB -->|sagemaker| SM[AWS SageMaker<br/>Serverless Inference]
-    EMB -->|tei| TEI[Text-Embeddings-Inference<br/>HTTP sidecar]
-    Engine -->|graph writes| LB[(LadybugDB<br/>.cgr/repos/&lt;slug&gt;.db)]
-    Engine -->|vectors| DD[(DuckDB<br/>.cgr/repos/&lt;slug&gt;.duck)]
-    API -.->|read-only| LB
-    API -.->|read-only| DD
+flowchart TD
+    subgraph Ingest["POST /index → background job"]
+        SRC([source repo]) -->|walk files| TS[tree-sitter parser\n12 languages]
+        TS -->|typed nodes + edges| LB[(LadybugDB\n.cgr/repos/slug.db\nCypher graph)]
+        TS -->|symbol text| EMB{Embedder backend}
+        EMB -->|local| LOC[sentence-transformers\nin-process]
+        EMB -->|sagemaker| SM[AWS SageMaker\nServerless Inference]
+        EMB -->|tei| TEI[HF Text-Embeddings-Inference\nHTTP sidecar]
+        LOC & SM & TEI -->|FLOAT[768] vectors| DD[(DuckDB\n.cgr/repos/slug.duck\nvector store)]
+        TS -->|token index| TAN[(Tantivy\nslug.tantivy\nBM25 lexical)]
+        LB -->|PageRank pass| CR[(centrality table\nDuckDB)]
+    end
+
+    subgraph Query["GET /search/* · POST /context-bundle"]
+        Q([query]) -->|semantic| DD
+        Q -->|structural Cypher| LB
+        Q -->|BM25 lexical| TAN
+        Q -->|FQN lookup| LB
+        Q -->|context bundle| CB[merge + rerank\nhydrate snippets]
+        DD & LB & TAN --> CB
+        CB -->|grounded symbols| OUT([LLM-ready context])
+    end
 ```
 
-- **Parsing.** [tree-sitter](https://tree-sitter.github.io/) grammars for Python, JavaScript, TypeScript, Go, Java, C#, Rust, and more. Symbols (functions, classes, methods), files, modules, and references become typed graph nodes.
+### Component overview
+
+```mermaid
+flowchart LR
+    User([CLI / curl / TheForge]) -->|HTTP :8003| API[FastAPI service\napp/routers/*]
+    API -->|index, search| Engine[code-graph-rag engine\nLadybugIngestor]
+    Engine --> LB[(LadybugDB .db)]
+    Engine --> DD[(DuckDB .duck)]
+    Engine --> TAN[(Tantivy .tantivy)]
+    API -.->|read-only| LB
+    API -.->|read-only| DD
+    API -.->|read-only| TAN
+```
+
+- **Parsing.** [tree-sitter](https://tree-sitter.github.io/) grammars for 12 languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Scala, Java, C++, C#, PHP, and Lua. Symbols (functions, classes, methods), files, modules, and references become typed graph nodes.
 - **Graph store.** [LadybugDB](https://docs.ladybugdb.com/) — an embedded, file-backed [kuzu](https://kuzudb.com/) fork. One `.db` file per repo at `.cgr/repos/<slug>.db`. Cypher-queryable. No Docker.
 - **Vector store.** DuckDB `FLOAT[768]` column plus `array_cosine_distance` for similarity search. One `.duck` file per repo at `.cgr/repos/<slug>.duck`.
 - **Embedders.** Four interchangeable backends behind a single `EmbedderBackend` protocol. The three "native" backends all produce 768-dim `intfloat/e5-base-v2` vectors (`local` / `tei` / `sagemaker`) so the on-disk index shape is portable across them — but indexes built under one model are NOT interchangeable with another. (A 2026-05-26 swap to `jinaai/jina-code-embeddings-v2` was benchmarked and **reverted** — 16% vs 83% recall@5 on the golden set; E5 is the retained choice, see LE-144.) A fourth backend, `openai`, is the bring-your-own path (1536 or 3072 dim — needs a re-index). Switch with `EMBEDDER_BACKEND={local|sagemaker|tei|openai}` and restart. See [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
