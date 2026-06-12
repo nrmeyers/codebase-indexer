@@ -1,7 +1,7 @@
 """Embedder availability probe + cached status surfaced in ``/health``.
 
 A dev box can boot the Code Indexer with ``EMBEDDER_BACKEND=local`` while
-``sentence-transformers`` is **not** installed (the optional ``[local-embed]``
+``sentence-transformers`` is **not** installed (a broken or partial
 extras group). In that state semantic search silently 503s with
 ``in-process embedder not initialised`` and retrieval recall collapses to
 0%. This module makes that failure mode LOUD:
@@ -72,7 +72,7 @@ def _validate_backend_dependency(backend_name: str) -> None:
         except ImportError as exc:
             raise EmbedderError(
                 "EMBEDDER_BACKEND=local requires the 'sentence-transformers' "
-                "package (uv sync --group local-embed)."
+                "package (uv sync)."
             ) from exc
     elif backend_name == "sagemaker":
         endpoint = (
@@ -154,7 +154,7 @@ def probe_embedder() -> dict[str, Any]:
         # attributes; the ``sentence_transformers`` import happens inside
         # ``_load_model`` on the first ``embed()`` call. A bare
         # ``get_embedder()`` therefore reports ``available=true`` even when
-        # the optional ``[local-embed]`` extras group is missing, which is
+        # the ``sentence_transformers`` package is missing, which is
         # exactly the silent-503 bug we are trying to surface.
         #
         # Probe the *real* dependency without paying the model-download
@@ -237,7 +237,7 @@ def emit_startup_warning(status: dict[str, Any] | None = None) -> None:
         f"last_error: {last_error}\n"
         "\n"
         "Fix:\n"
-        "  - For local dev:  uv sync --group local-embed\n"
+        "  - For local dev:  uv sync\n"
         "  - For SageMaker:  set AWS creds + EMBEDDER_BACKEND=sagemaker\n"
         "                    + SAGEMAKER_ENDPOINT_NAME=jina-code-v2-serverless\n"
         "  - For TEI:        start TEI sidecar + EMBEDDER_BACKEND=tei\n"
@@ -255,8 +255,7 @@ def emit_startup_warning(status: dict[str, Any] | None = None) -> None:
         last_error,
         extra={
             "action_required": (
-                "Install an embedder backend. For local dev run: "
-                "uv sync --group local-embed"
+                "Install an embedder backend. For local dev run: uv sync"
             ),
             "embedder_backend": backend,
         },

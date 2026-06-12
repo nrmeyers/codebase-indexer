@@ -1012,5 +1012,510 @@
       "connectivity"
     ],
     "k": 12
+  },
+  {
+    "id": "dsg-cis-001",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "Add a fused search endpoint combining BM25 lexical and semantic vector results with configurable weights",
+    "expected_facets": [
+      {
+        "name": "lexical",
+        "any": [
+          "bm25",
+          "tantivy"
+        ]
+      },
+      {
+        "name": "semantic",
+        "any": [
+          "array_cosine_distance",
+          "_embed_fn",
+          "semantic"
+        ]
+      },
+      {
+        "name": "fusion",
+        "any": [
+          "rrf",
+          "fuse",
+          "fusion"
+        ]
+      },
+      {
+        "name": "router",
+        "any": [
+          "search",
+          "router"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cis-002",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "Persist per-job embed-pass progress so a service restart resumes the embed phase instead of restarting it",
+    "expected_facets": [
+      {
+        "name": "job_store",
+        "any": [
+          "jobs_store",
+          "sweep_interrupted",
+          "worker_token"
+        ]
+      },
+      {
+        "name": "embed_pass",
+        "any": [
+          "embed_driver",
+          "embed"
+        ]
+      },
+      {
+        "name": "index_worker",
+        "any": [
+          "_blocking_index",
+          "index"
+        ]
+      },
+      {
+        "name": "watchdog",
+        "any": [
+          "heartbeat",
+          "staleness",
+          "watchdog"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cis-003",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "Add an endpoint returning an architecture overview for a repo built from semantic clusters and centrality",
+    "expected_facets": [
+      {
+        "name": "clusters",
+        "any": [
+          "neighbors",
+          "cluster",
+          "hdbscan"
+        ]
+      },
+      {
+        "name": "centrality",
+        "any": [
+          "pagerank",
+          "centrality"
+        ]
+      },
+      {
+        "name": "centroid",
+        "any": [
+          "centroid"
+        ]
+      },
+      {
+        "name": "repos_router",
+        "any": [
+          "repos",
+          "router"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cis-004",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "Delete a repo's S3 snapshots when the repo is removed from the index",
+    "expected_facets": [
+      {
+        "name": "s3",
+        "any": [
+          "s3_store",
+          "snapshot"
+        ]
+      },
+      {
+        "name": "removal",
+        "any": [
+          "delete",
+          "remove"
+        ]
+      },
+      {
+        "name": "slug",
+        "any": [
+          "slug"
+        ]
+      },
+      {
+        "name": "routes",
+        "any": [
+          "repos",
+          "admin"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cis-005",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "Stream embed-pass progress over the existing websocket alongside index progress events",
+    "expected_facets": [
+      {
+        "name": "websocket",
+        "any": [
+          "websocket",
+          "broadcast",
+          "/ws"
+        ]
+      },
+      {
+        "name": "embed",
+        "any": [
+          "embed"
+        ]
+      },
+      {
+        "name": "job_progress",
+        "any": [
+          "progress",
+          "job"
+        ]
+      },
+      {
+        "name": "events",
+        "any": [
+          "event"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cgr-001",
+    "repo": "code-graph-rag",
+    "intent": "design",
+    "q": "Re-ingest only changed files into the graph instead of a full re-parse",
+    "expected_facets": [
+      {
+        "name": "parsing",
+        "any": [
+          "parser_loader",
+          "language_spec",
+          "tree-sitter"
+        ]
+      },
+      {
+        "name": "ingest",
+        "any": [
+          "ingest"
+        ]
+      },
+      {
+        "name": "storage",
+        "any": [
+          "vector_store",
+          "duckdb"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cgr-002",
+    "repo": "code-graph-rag",
+    "intent": "design",
+    "q": "Recompute PageRank centrality incrementally after a partial graph update",
+    "expected_facets": [
+      {
+        "name": "pagerank",
+        "any": [
+          "compute_pagerank",
+          "pagerank"
+        ]
+      },
+      {
+        "name": "centrality_store",
+        "any": [
+          "upsert_pagerank",
+          "centrality"
+        ]
+      },
+      {
+        "name": "graph",
+        "any": [
+          "graph"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cgr-003",
+    "repo": "code-graph-rag",
+    "intent": "design",
+    "q": "Add a new embedding backend behind the embedder interface with batched inserts",
+    "expected_facets": [
+      {
+        "name": "embedder",
+        "any": [
+          "embed_query",
+          "Embedder",
+          "embedder"
+        ]
+      },
+      {
+        "name": "rows",
+        "any": [
+          "EmbeddingRow",
+          "vector_store"
+        ]
+      },
+      {
+        "name": "bulk",
+        "any": [
+          "bulk_insert_arrow",
+          "arrow",
+          "batch"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cgr-004",
+    "repo": "code-graph-rag",
+    "intent": "design",
+    "q": "Extend dependency parsing to cover an additional manifest format",
+    "expected_facets": [
+      {
+        "name": "dep_parser",
+        "any": [
+          "dependency_parser"
+        ]
+      },
+      {
+        "name": "existing_parsers",
+        "any": [
+          "PyProjectTomlParser",
+          "RequirementsTxtParser"
+        ]
+      },
+      {
+        "name": "loader",
+        "any": [
+          "parser_loader",
+          "language_spec"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-cgr-005",
+    "repo": "code-graph-rag",
+    "intent": "design",
+    "q": "Resolve standard library imports to canonical module paths during ingestion",
+    "expected_facets": [
+      {
+        "name": "stdlib",
+        "any": [
+          "StdlibExtractor",
+          "stdlib"
+        ]
+      },
+      {
+        "name": "module_path",
+        "any": [
+          "extract_module_path",
+          "module_path"
+        ]
+      },
+      {
+        "name": "ingest",
+        "any": [
+          "ingest",
+          "import"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-tf-001",
+    "repo": "TheForge",
+    "intent": "design",
+    "q": "Send escalation notifications when a gate sits unapproved past a deadline",
+    "expected_facets": [
+      {
+        "name": "gate",
+        "any": [
+          "gate-state-machine",
+          "gateTransition",
+          "GateState"
+        ]
+      },
+      {
+        "name": "notify",
+        "any": [
+          "notification-service",
+          "notification"
+        ]
+      },
+      {
+        "name": "approval",
+        "any": [
+          "approve",
+          "approver",
+          "reject"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-tf-002",
+    "repo": "TheForge",
+    "intent": "design",
+    "q": "Show code-indexer job progress in the activity feed in real time",
+    "expected_facets": [
+      {
+        "name": "indexer_client",
+        "any": [
+          "code-indexer-client"
+        ]
+      },
+      {
+        "name": "feed",
+        "any": [
+          "activity-feed",
+          "broadcastActivity"
+        ]
+      },
+      {
+        "name": "transport",
+        "any": [
+          "WebSocket"
+        ]
+      },
+      {
+        "name": "jobs",
+        "any": [
+          "job",
+          "progress"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-tf-003",
+    "repo": "TheForge",
+    "intent": "design",
+    "q": "Enforce AAD role checks on the skill execution API",
+    "expected_facets": [
+      {
+        "name": "aad",
+        "any": [
+          "aad-provider",
+          "AAD"
+        ]
+      },
+      {
+        "name": "auth",
+        "any": [
+          "jwt-validator",
+          "validateBearer",
+          "require-bearer"
+        ]
+      },
+      {
+        "name": "skill",
+        "any": [
+          "skill-api-client",
+          "skill"
+        ]
+      },
+      {
+        "name": "roles",
+        "any": [
+          "role"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-tf-004",
+    "repo": "TheForge",
+    "intent": "design",
+    "q": "Prioritize orchestrator prompt context using indexer centrality scores under the token cap",
+    "expected_facets": [
+      {
+        "name": "prompt",
+        "any": [
+          "orchestrator",
+          "composePrompt",
+          "prompt-assembly"
+        ]
+      },
+      {
+        "name": "indexer_client",
+        "any": [
+          "code-indexer-client"
+        ]
+      },
+      {
+        "name": "centrality",
+        "any": [
+          "centrality"
+        ]
+      }
+    ],
+    "k": 12
+  },
+  {
+    "id": "dsg-tf-005",
+    "repo": "TheForge",
+    "intent": "design",
+    "q": "Record governance compliance scores in the audit trail on every gate transition",
+    "expected_facets": [
+      {
+        "name": "compliance",
+        "any": [
+          "governance-compliance"
+        ]
+      },
+      {
+        "name": "audit",
+        "any": [
+          "audit-trail"
+        ]
+      },
+      {
+        "name": "gate",
+        "any": [
+          "gate-state-machine",
+          "gateTransition"
+        ]
+      },
+      {
+        "name": "scoring",
+        "any": [
+          "scoring",
+          "score"
+        ]
+      }
+    ],
+    "k": 12
   }
 ]

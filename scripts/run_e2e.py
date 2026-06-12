@@ -33,10 +33,19 @@ logging.basicConfig(
 log = logging.getLogger("e2e")
 
 # Repo path → service-side slug map. Override via --repo-paths if dirs differ.
+# Defaults probe common checkout locations under $HOME instead of hardcoding
+# a developer-specific prefix.
+def _default_repo_path(name: str) -> str:
+    home = Path.home()
+    for candidate in (home / name, home / "dev" / "claude" / name, home / "dev" / name):
+        if candidate.is_dir():
+            return str(candidate)
+    return str(home / name)
+
+
 _DEFAULT_REPO_PATHS = {
-    "TheForge": "/Users/zacharymatthews/TheForge",
-    "code-indexer-service": "/Users/zacharymatthews/code-indexer-service",
-    "code-graph-rag": "/Users/zacharymatthews/code-graph-rag",
+    name: _default_repo_path(name)
+    for name in ("TheForge", "code-indexer-service", "code-graph-rag")
 }
 
 
@@ -182,13 +191,33 @@ async def _run_queries(
     """Dispatch each query to the right endpoint, time it, capture top-k."""
     results: list[dict[str, Any]] = []
     out = (out_dir / "query_results.jsonl").open("w")
+
+    # Indexes are keyed by canonical slug ({org}__{repo}, derived from the git
+    # remote), not the checkout directory name. Resolve each query's repo name
+    # against the service's live repo list so e.g. "TheForge" maps to
+    # "navistone__TheForge".
+    slug_map: dict[str, str] = {}
+    try:
+        health = (await client.get(f"{base}/health", timeout=10.0)).json()
+        slugs = [r["name"] for r in health.get("repos", [])]
+        for name in {q["repo"] for q in queries}:
+            dir_name = Path(_DEFAULT_REPO_PATHS.get(name, name)).name
+            match = next((s for s in slugs if s == dir_name), None) or next(
+                (s for s in slugs if dir_name.lower() in s.lower()), None
+            )
+            slug_map[name] = match or dir_name
+    except Exception as e:  # noqa: BLE001 — fall back to dir names
+        log.warning("slug resolution via /health failed: %s", e)
+
     for q in queries:
         intent = q["intent"]
-        repo_slug = Path(_DEFAULT_REPO_PATHS.get(q["repo"], q["repo"])).name
+        repo_slug = slug_map.get(q["repo"]) or Path(
+            _DEFAULT_REPO_PATHS.get(q["repo"], q["repo"])
+        ).name
         url, params = _build_request(intent, q, repo_slug)
         t0 = time.monotonic()
         try:
-            if intent == "context_bundle":
+            if intent in ("context_bundle", "design"):
                 # /context-bundle expects `repo_path` (full filesystem path) not
                 # `repo`, and caps `depth` at 3 (per the route's pydantic model).
                 # The query's `k` is informational only — used for downstream
@@ -197,6 +226,10 @@ async def _run_queries(
                     f"{base}{url}",
                     json={
                         "repo_path": _DEFAULT_REPO_PATHS.get(q["repo"], q["repo"]),
+                        # Explicit slug — without it the service derives the
+                        # repo from the checkout dir name, which 503s when the
+                        # canonical slug is {org}__{repo}.
+                        "repo": repo_slug,
                         "task_description": q["q"],
                         "depth": min(q.get("k", 3), 3),
                     },
@@ -225,6 +258,7 @@ async def _run_queries(
             "ok": ok,
             "status_code": r.status_code if r is not None else None,
             "expected_topk_substrings": q.get("expected_topk_substrings", []),
+            "expected_facets": q.get("expected_facets", []),
             "expected_min_results": q.get("expected_min_results"),
             "result_count": len(top_k),
             "top_k": top_k,
@@ -248,17 +282,17 @@ def _build_request(intent: str, q: dict[str, Any], repo_slug: str) -> tuple[str,
         return "/search/semantic", params
     if intent == "structural":
         return "/search/structural", {
-            "cypher": q["q"],
+            "q": q["q"],
             "repo": repo_slug,
             "limit": str(q.get("k", 10)),
         }
     if intent == "symbol":
         return "/search/symbol", {
-            "q": q["q"],
+            "fqn": q["q"],
             "repo": repo_slug,
             "limit": str(q.get("k", 5)),
         }
-    if intent == "context_bundle":
+    if intent in ("context_bundle", "design"):
         return "/context-bundle", {}
     raise ValueError(f"unknown intent {intent!r}")
 
@@ -270,7 +304,7 @@ def _extract_top_k(intent: str, body: Any) -> list[dict[str, Any]]:
         # /context-bundle returns a flat list at `symbols` (strings) plus
         # `source_snippets` keyed by symbol; project to the grader's expected
         # shape `[{symbol: ..., snippet: ...}]` for substring matching.
-        if intent == "context_bundle" and isinstance(body.get("symbols"), list):
+        if intent in ("context_bundle", "design") and isinstance(body.get("symbols"), list):
             snips = body.get("source_snippets") or {}
             return [
                 {"symbol": s, "snippet": snips.get(s, "") if isinstance(snips, dict) else ""}
@@ -334,12 +368,21 @@ def _score_queries(query_results: list[dict[str, Any]]) -> dict[str, float | Non
 
 def _score_relevance(graded: list[dict[str, Any]]) -> dict[str, float]:
     semantic = [g for g in graded if g["intent"] == "semantic"]
-    if not semantic:
-        return {"top1_relevance_semantic": 0.0, "top5_relevance_semantic": 0.0}
-    return {
-        "top1_relevance_semantic": sum(1 for g in semantic if g.get("top1_relevant")) / len(semantic),
-        "top5_relevance_semantic": sum(1 for g in semantic if g.get("top5_relevant")) / len(semantic),
+    scores: dict[str, float] = {
+        "top1_relevance_semantic": 0.0,
+        "top5_relevance_semantic": 0.0,
     }
+    if semantic:
+        scores["top1_relevance_semantic"] = sum(1 for g in semantic if g.get("top1_relevant")) / len(semantic)
+        scores["top5_relevance_semantic"] = sum(1 for g in semantic if g.get("top5_relevant")) / len(semantic)
+
+    design = [g for g in graded if g["intent"] == "design"]
+    if design:
+        scores["design_facet_coverage"] = statistics.mean(
+            g.get("facet_coverage", 0.0) for g in design
+        )
+        scores["design_pass_rate"] = sum(1 for g in design if g.get("design_pass")) / len(design)
+    return scores
 
 
 def _score_lm_uptime(metrics_pre: str, metrics_post: str) -> dict[str, float]:

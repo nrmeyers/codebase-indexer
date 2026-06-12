@@ -1039,7 +1039,20 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     # so the vector_store shim resolves to the correct ``<slug>.duck`` file.
     # (Historical note: this used to read from ``<slug>.embeddings.npy``
     # before the DuckDB swap retired the numpy backend.)
-    repo_slug = Path(req.repo_path).resolve().name
+    # Canonical {org}__{repo} slug from the git remote — the dir basename
+    # alone misses indexes keyed by /index's slug derivation (BUC-1580) and
+    # 503s on repos indexed from a local checkout.
+    from ..services.slug import derive_slug
+
+    _resolved = Path(req.repo_path).resolve()
+    repo_slug = derive_slug(_resolved, _resolved.name)
+    # If the canonical slug has no index but the basename does (e.g. the
+    # checkout's remote changed after indexing), use the index that exists.
+    if (
+        not Path(settings.db_path_for_repo(repo_slug)).exists()
+        and Path(settings.db_path_for_repo(_resolved.name)).exists()
+    ):
+        repo_slug = _resolved.name
     _repo_db = settings.db_path_for_repo(repo_slug)
     try:
         from codebase_rag.config import settings as _cgr_settings  # type: ignore[import-untyped]

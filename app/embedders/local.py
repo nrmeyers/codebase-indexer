@@ -31,10 +31,9 @@ Two changes guard against the watchdog false-kill observed on 1654-file,
 
 Dependencies
 ------------
-Requires the ``sentence-transformers`` package, which is in the optional
-``[local-embed]`` extras group. If you set ``EMBEDDER_BACKEND=local``
-without installing the extra you'll see :class:`EmbedderError` with the
-exact pip command at startup.
+Requires the ``sentence-transformers`` package (a default dependency).
+If it is missing from the environment you'll see :class:`EmbedderError`
+with the exact pip command at startup.
 """
 from __future__ import annotations
 
@@ -137,8 +136,7 @@ class LocalEmbedder(EmbedderBackend):
         except ImportError as exc:
             raise EmbedderError(
                 "EMBEDDER_BACKEND=local requires the 'sentence-transformers' "
-                "package. Install it with: "
-                "uv pip install 'code-indexer-service[local-embed]' "
+                "package. Install it with: uv sync "
                 "(or: uv pip install 'sentence-transformers>=3.2')"
             ) from exc
 

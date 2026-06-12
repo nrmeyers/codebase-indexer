@@ -639,7 +639,7 @@ def _semantic_search_impl(
         # False at route entry), or it may be None because ``_sm_available``
         # was True (configured backend constructed but its model failed to
         # load at embed time — e.g. EMBEDDER_BACKEND=local without the
-        # [local-embed] extra).  Attempt a lazy load here before giving up
+        # sentence-transformers missing).  Attempt a lazy load here before giving up
         # so that a partially-available configured backend doesn't
         # permanently suppress the torch fallback.
         global _embed_fn, _embed_unavailable  # noqa: PLW0603
@@ -656,14 +656,14 @@ def _semantic_search_impl(
         # All embedding providers failed or are unavailable.  Surface a
         # clear, actionable 503 rather than a bare RuntimeError so callers
         # see "503 Semantic search unavailable" instead of a generic 500.
-        # Common cause: EMBEDDER_BACKEND=local without the [local-embed]
+        # Common cause: EMBEDDER_BACKEND=local without sentence-transformers
         # extra installed.  Install with:
-        #   uv sync --group local-embed
+        #   uv sync
         raise HTTPException(
             status_code=503,
             detail=(
                 "Semantic search unavailable: no embedding provider succeeded. "
-                "For local installs run: uv sync --group local-embed "
+                "For local installs run: uv sync "
                 "(installs sentence-transformers for EMBEDDER_BACKEND=local). "
                 "Check server logs for the exact initialisation error."
             ),

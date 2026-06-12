@@ -227,7 +227,7 @@ def _probe_embedder() -> EmbedderStatus:
     for SageMaker cold starts or block a long time waiting for HTTP).
 
     Backend construction or dep-validation failures (e.g.
-    ``EMBEDDER_BACKEND=local`` with the ``[local-embed]`` extras group
+    ``EMBEDDER_BACKEND=local`` with ``sentence-transformers``
     missing) are surfaced as ``available=false`` / ``configured=false``
     with the captured ``last_error``. /health stays 200 because the
     service can still serve cached searches and structural queries that

@@ -6,7 +6,7 @@ dispatch tests remain in ``test_embedders.py``.
 
 The "produces 768-dim vector" test pulls a real sentence-transformers
 model from the HuggingFace cache. It is skipped when the optional
-``[local-embed]`` extra isn't installed — keeps CI green on slim
+``sentence-transformers`` package isn't installed — keeps CI green on slim
 installs.
 """
 from __future__ import annotations

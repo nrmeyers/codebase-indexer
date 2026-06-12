@@ -48,9 +48,9 @@ code-indexer callers myproject.parser.process_file
 
 > **STOP — semantic search needs an embedder backend.**
 >
-> The default `EMBEDDER_BACKEND=local` requires the optional
-> `[local-embed]` extras group. If you skip the install, the indexer will
-> boot but every `/search/semantic` call returns 503 with
+> The default `EMBEDDER_BACKEND=local` ships with the default install
+> (`uv sync` includes sentence-transformers). If the embedder is missing,
+> the indexer will boot but every `/search/semantic` call returns 503 with
 > `in-process embedder not initialised`, and `GET /health` will show
 > `embedder.available: false` (look for the loud startup banner).
 >
@@ -58,7 +58,7 @@ code-indexer callers myproject.parser.process_file
 >
 > ```bash
 > # 1. Local dev (recommended for new contributors)
-> uv sync --group local-embed
+> uv sync
 >
  # 2. Navistone production (AWS SageMaker Serverless Inference — E5)
 > uv sync && export AWS_PROFILE=... EMBEDDER_BACKEND=sagemaker \
@@ -400,8 +400,7 @@ uv sync --extra byo              # installs openai>=1.0 for the openai backend
 ```bash
 git clone https://github.com/navistone/code-indexer-service.git
 cd code-indexer-service
-uv sync                          # installs all deps incl. code-graph-rag path dep
-uv sync --group local-embed      # add sentence-transformers for the local backend
+uv sync                          # installs everything incl. the vendored engine + local embedder
 uv run uvicorn app.main:app --reload --port 8000
 uv run pytest tests/ -v          # 51+ tests
 uv run ruff check .              # lint
