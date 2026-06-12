@@ -94,8 +94,8 @@
       "code-graph-rag.codebase_rag.parsers.function_ingest.FunctionIngestMixin._generate_anonymous_function_name"
     ],
     "code-graph-rag.codebase_rag.parsers.function_ingest.FunctionIngestMixin._try_unified_fqn_resolution": [
-      "code-graph-rag.codebase_rag.graph_updater.FunctionRegistryTrie.get",
-      "code-graph-rag.codebase_rag.parsers.cpp.utils.is_exported"
+      "code-graph-rag.codebase_rag.parsers.cpp.utils.is_exported",
+      "code-graph-rag.codebase_rag.graph_updater.FunctionRegistryTrie.get"
     ],
     "code-graph-rag.codebase_rag.parsers.handlers.cpp.CppHandler.extract_function_name": [
       "code-graph-rag.codebase_rag.parsers.cpp.utils.extract_function_name"

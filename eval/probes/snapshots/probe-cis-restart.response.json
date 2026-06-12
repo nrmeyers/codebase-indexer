@@ -74,9 +74,9 @@
       "code-indexer-service.app.services.jobs_store._require_conn"
     ],
     "code-indexer-service.app.services.lm_studio.chat_complete": [
+      "code-indexer-service.app.cli.client.IndexerClient.get",
       "code-indexer-service.app.services.lm_studio.base_url",
-      "code-indexer-service.app.services.lm_studio.rerank_model_hint",
-      "code-indexer-service.app.cli.client.IndexerClient.get"
+      "code-indexer-service.app.services.lm_studio.rerank_model_hint"
     ],
     "code-indexer-service.app.services.reranker._build_prompt": [
       "code-indexer-service.tests.test_watch_manager._FakeObserver.join",
@@ -109,8 +109,8 @@
       "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.services.watch_manager._run_partial_index": [
-      "code-indexer-service.app.services.jobs_store.mark_failed",
-      "code-indexer-service.app.cli.client.IndexerClient.get"
+      "code-indexer-service.app.cli.client.IndexerClient.get",
+      "code-indexer-service.app.services.jobs_store.mark_failed"
     ],
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.items": [
       "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.items"

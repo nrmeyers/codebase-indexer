@@ -5,10 +5,10 @@
       "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.cli.main.search": [
-      "code-indexer-service.app.cli.client.IndexerClient.get",
-      "code-indexer-service.app.cli.client.IndexerClient.semantic_search",
       "code-indexer-service.app.cli.main._client",
-      "code-indexer-service.app.cli.main._bail"
+      "code-indexer-service.app.cli.main._bail",
+      "code-indexer-service.app.cli.client.IndexerClient.get",
+      "code-indexer-service.app.cli.client.IndexerClient.semantic_search"
     ],
     "code-indexer-service.app.routers.index._delete_jobs_for_repo": [
       "code-indexer-service.app.services.jobs_store.delete_by_repo"
@@ -97,8 +97,8 @@
       "code-indexer-service.app.services.jobs_store._require_conn"
     ],
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.add": [
-      "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer",
-      "code-indexer-service.app.services.tantivy_index._load_tantivy"
+      "code-indexer-service.app.services.tantivy_index._load_tantivy",
+      "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer"
     ],
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get": [
       "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get"
