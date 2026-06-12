@@ -4,7 +4,7 @@ Covers three operator-visible scenarios:
 
 1. The configured backend constructs cleanly → ``available: true``.
 2. The configured backend raises ``ModuleNotFoundError`` (the optional
-   ``[local-embed]`` extras group is missing) → ``available: false``,
+   ``sentence-transformers`` package is missing) → ``available: false``,
    ``last_error`` is populated, the service still boots.
 3. LM Studio is configured with an embed model loaded → ``fallback_lm_studio:
    true``, independent of the primary backend's state.
@@ -103,7 +103,7 @@ def test_health_embedder_unavailable_when_module_missing(
     """``ModuleNotFoundError`` from sentence-transformers → service still boots.
 
     Mirrors the exact failure mode on a dev box where ``EMBEDDER_BACKEND=local``
-    is set but the optional ``[local-embed]`` extras group was not installed.
+    is set but the ``sentence-transformers`` package is not installed.
     The probe MUST capture the error, the service MUST stay alive, and
     ``available`` MUST be ``false``.
     """
@@ -227,6 +227,6 @@ def test_emit_startup_warning_loud_when_no_backend() -> None:
         embedder_availability.emit_startup_warning(status)
     out = buf.getvalue()
     assert "EMBEDDER UNAVAILABLE" in out
-    assert "uv sync --group local-embed" in out
+    assert "uv sync" in out
     assert "EMBEDDER_BACKEND=local" in out
     assert "sentence_transformers" in out

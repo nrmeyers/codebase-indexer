@@ -309,16 +309,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             vec = embed_text_sync("warmup")
             if vec is None:
                 # embed_text_sync swallows errors and returns None — the model
-                # likely failed to load (e.g. EMBEDDER_BACKEND=local without
-                # the [local-embed] extra).  Log at WARNING so operators see
-                # this immediately rather than discovering it on the first
-                # semantic search request.  Remediation:
-                #   uv sync --group local-embed   (sentence-transformers)
+                # likely failed to load (e.g. EMBEDDER_BACKEND=local with a
+                # broken sentence-transformers install).  Log at WARNING so
+                # operators see this immediately rather than discovering it on
+                # the first semantic search request.
                 _log.warning(
                     "Embedder startup prewarm: backend=%s returned None — "
                     "embedder may be misconfigured or missing required packages. "
                     "Semantic search will fail until this is resolved. "
-                    "For EMBEDDER_BACKEND=local: run 'uv sync --group local-embed'.",
+                    "For EMBEDDER_BACKEND=local: run 'uv sync'.",
                     backend.name,
                 )
             else:

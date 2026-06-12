@@ -65,6 +65,10 @@ dependencies = [
     "huggingface-hub[hf-xet]>=1.5.0,<2.0",
     # Plan F: CodeRankEmbed (nomic-ai/CodeRankEmbed) requires einops at model load time
     "einops>=0.7.0",
+    # Default `local` embedder backend runs sentence-transformers in-process.
+    # Promoted from the optional local-embed group so a plain install can
+    # embed out of the box (torch/transformers are already default deps).
+    "sentence-transformers>=3.2",
     "tree-sitter-javascript>=0.23.1",
     "tree-sitter-typescript>=0.23.2",
     "tree-sitter-c-sharp>=0.23.5",
@@ -123,14 +127,4 @@ dev = [
     # CLI tests mock HTTPX calls to the FastAPI service so they exercise
     # the Typer command surface without needing the daemon running.
     "respx>=0.21.1",
-]
-
-# BUC-1605: pluggable embedder backends. The `local` backend runs
-# sentence-transformers in-process — kept as an optional extra so the
-# default container install stays slim. Install with:
-#   uv pip install --group local-embed
-# or for editable installs:
-#   uv sync --group local-embed
-local-embed = [
-    "sentence-transformers>=3.2",
 ]

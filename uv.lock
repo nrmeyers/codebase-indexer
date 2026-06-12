@@ -476,6 +476,7 @@ dependencies = [
     { name = "real-ladybug" },
     { name = "rich" },
     { name = "scipy" },
+    { name = "sentence-transformers" },
     { name = "starlette" },
     { name = "tantivy" },
     { name = "toml" },
@@ -508,9 +509,6 @@ dev = [
     { name = "respx" },
     { name = "ruff" },
 ]
-local-embed = [
-    { name = "sentence-transformers" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -542,6 +540,7 @@ requires-dist = [
     { name = "real-ladybug", specifier = ">=0.15.3" },
     { name = "rich", specifier = ">=13.7.0" },
     { name = "scipy", specifier = ">=1.11" },
+    { name = "sentence-transformers", specifier = ">=3.2" },
     { name = "starlette", specifier = ">=1.0.1" },
     { name = "tantivy", specifier = ">=0.24.0" },
     { name = "toml", specifier = ">=0.10.2" },
@@ -570,7 +569,6 @@ dev = [
     { name = "respx", specifier = ">=0.21.1" },
     { name = "ruff", specifier = ">=0.15.11" },
 ]
-local-embed = [{ name = "sentence-transformers", specifier = ">=3.2" }]
 
 [[package]]
 name = "cohere"
