@@ -1,0 +1,10 @@
+{
+  "task_id": "dsg-cgr-005",
+  "repo": "code-graph-rag",
+  "spans": [
+    {"file_path": "codebase_rag/parsers/stdlib_extractor.py", "start_line": 132, "end_line": 215},
+    {"file_path": "codebase_rag/services/ladybug_ingestor.py", "start_line": 74, "end_line": 130},
+    {"file_path": "codebase_rag/graph_updater.py", "start_line": 370, "end_line": 430}
+  ],
+  "external_keywords": ["stdlib", "import resolution", "module path"]
+}

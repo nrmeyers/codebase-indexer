@@ -1,0 +1,11 @@
+{
+  "task_id": "dsg-tf-004",
+  "repo": "TheForge",
+  "spans": [
+    {"file_path": "src/services/orchestrator.ts", "start_line": 2024, "end_line": 2160},
+    {"file_path": "src/services/retrieval/prompt-assembly.ts", "start_line": 62, "end_line": 152},
+    {"file_path": "src/services/retrieval/prompt-assembly.ts", "start_line": 317, "end_line": 400},
+    {"file_path": "src/services/retrieval/code-indexer-client.ts", "start_line": 863, "end_line": 910}
+  ],
+  "external_keywords": ["centrality", "prompt assembly", "token budget"]
+}

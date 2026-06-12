@@ -1,0 +1,14 @@
+{
+  "task_id": "dsg-tf-002",
+  "repo": "TheForge",
+  "spans": [
+    {"file_path": "src/services/index-progress-poller.ts", "start_line": 1, "end_line": 110},
+    {"file_path": "src/services/index-progress-poller.ts", "start_line": 187, "end_line": 234},
+    {"file_path": "src/services/activity-feed.ts", "start_line": 36, "end_line": 110},
+    {"file_path": "src/services/activity-feed.ts", "start_line": 150, "end_line": 188},
+    {"file_path": "src/services/retrieval/code-indexer-client.ts", "start_line": 225, "end_line": 252},
+    {"file_path": "src/services/retrieval/code-indexer-client.ts", "start_line": 500, "end_line": 516},
+    {"file_path": "src/services/api-server/websocket.ts", "start_line": 1, "end_line": 60}
+  ],
+  "external_keywords": ["activity feed", "index progress", "websocket"]
+}

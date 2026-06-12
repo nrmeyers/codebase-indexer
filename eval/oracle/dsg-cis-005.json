@@ -1,0 +1,12 @@
+{
+  "task_id": "dsg-cis-005",
+  "repo": "code-indexer-service",
+  "spans": [
+    {"file_path": "app/routers/websocket.py", "start_line": 112, "end_line": 151},
+    {"file_path": "app/routers/websocket.py", "start_line": 154, "end_line": 219},
+    {"file_path": "app/routers/websocket.py", "start_line": 222, "end_line": 260},
+    {"file_path": "app/routers/index.py", "start_line": 96, "end_line": 130},
+    {"file_path": "app/scripts/embed_driver.py", "start_line": 817, "end_line": 915}
+  ],
+  "external_keywords": ["websocket", "progress", "broadcast"]
+}

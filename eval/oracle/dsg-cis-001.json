@@ -1,0 +1,11 @@
+{
+  "task_id": "dsg-cis-001",
+  "repo": "code-indexer-service",
+  "spans": [
+    {"file_path": "app/routers/search.py", "start_line": 542, "end_line": 600},
+    {"file_path": "app/routers/search.py", "start_line": 816, "end_line": 851},
+    {"file_path": "app/services/bm25_index.py", "start_line": 41, "end_line": 88},
+    {"file_path": "app/services/tantivy_index.py", "start_line": 251, "end_line": 303}
+  ],
+  "external_keywords": ["bm25", "semantic search", "fusion"]
+}

@@ -1,0 +1,11 @@
+{
+  "task_id": "dsg-cgr-004",
+  "repo": "code-graph-rag",
+  "spans": [
+    {"file_path": "codebase_rag/parsers/dependency_parser.py", "start_line": 28, "end_line": 100},
+    {"file_path": "codebase_rag/parsers/dependency_parser.py", "start_line": 247, "end_line": 297},
+    {"file_path": "codebase_rag/parser_loader.py", "start_line": 1, "end_line": 50},
+    {"file_path": "codebase_rag/language_spec.py", "start_line": 1, "end_line": 60}
+  ],
+  "external_keywords": ["manifest", "dependency parser", "requirements"]
+}

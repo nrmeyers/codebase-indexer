@@ -1,0 +1,11 @@
+{
+  "task_id": "dsg-cgr-002",
+  "repo": "code-graph-rag",
+  "_note": "facet substring upsert_pagerank does not exist at SHA 2224008; centrality facet covered via write_centrality/centrality.py.",
+  "spans": [
+    {"file_path": "codebase_rag/storage/centrality.py", "start_line": 1, "end_line": 69},
+    {"file_path": "codebase_rag/storage/vector_store.py", "start_line": 533, "end_line": 600},
+    {"file_path": "codebase_rag/graph_updater.py", "start_line": 370, "end_line": 430}
+  ],
+  "external_keywords": ["pagerank", "centrality"]
+}

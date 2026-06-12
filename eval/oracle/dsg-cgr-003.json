@@ -1,0 +1,12 @@
+{
+  "task_id": "dsg-cgr-003",
+  "repo": "code-graph-rag",
+  "spans": [
+    {"file_path": "codebase_rag/embedder.py", "start_line": 102, "end_line": 170},
+    {"file_path": "codebase_rag/embedder.py", "start_line": 320, "end_line": 387},
+    {"file_path": "codebase_rag/storage/vector_store.py", "start_line": 162, "end_line": 205},
+    {"file_path": "codebase_rag/storage/vector_store.py", "start_line": 305, "end_line": 340},
+    {"file_path": "codebase_rag/storage/vector_store_arrow.py", "start_line": 1, "end_line": 100}
+  ],
+  "external_keywords": ["embedder", "batch insert", "embedding backend"]
+}

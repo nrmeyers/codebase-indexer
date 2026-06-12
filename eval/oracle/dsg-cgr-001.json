@@ -1,0 +1,11 @@
+{
+  "task_id": "dsg-cgr-001",
+  "repo": "code-graph-rag",
+  "spans": [
+    {"file_path": "codebase_rag/graph_updater.py", "start_line": 370, "end_line": 470},
+    {"file_path": "codebase_rag/parser_loader.py", "start_line": 1, "end_line": 100},
+    {"file_path": "codebase_rag/services/ladybug_ingestor.py", "start_line": 74, "end_line": 165},
+    {"file_path": "codebase_rag/storage/vector_store.py", "start_line": 205, "end_line": 260}
+  ],
+  "external_keywords": ["incremental", "changed files", "reindex"]
+}
