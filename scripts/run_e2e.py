@@ -191,9 +191,29 @@ async def _run_queries(
     """Dispatch each query to the right endpoint, time it, capture top-k."""
     results: list[dict[str, Any]] = []
     out = (out_dir / "query_results.jsonl").open("w")
+
+    # Indexes are keyed by canonical slug ({org}__{repo}, derived from the git
+    # remote), not the checkout directory name. Resolve each query's repo name
+    # against the service's live repo list so e.g. "TheForge" maps to
+    # "navistone__TheForge".
+    slug_map: dict[str, str] = {}
+    try:
+        health = (await client.get(f"{base}/health", timeout=10.0)).json()
+        slugs = [r["name"] for r in health.get("repos", [])]
+        for name in {q["repo"] for q in queries}:
+            dir_name = Path(_DEFAULT_REPO_PATHS.get(name, name)).name
+            match = next((s for s in slugs if s == dir_name), None) or next(
+                (s for s in slugs if dir_name.lower() in s.lower()), None
+            )
+            slug_map[name] = match or dir_name
+    except Exception as e:  # noqa: BLE001 — fall back to dir names
+        log.warning("slug resolution via /health failed: %s", e)
+
     for q in queries:
         intent = q["intent"]
-        repo_slug = Path(_DEFAULT_REPO_PATHS.get(q["repo"], q["repo"])).name
+        repo_slug = slug_map.get(q["repo"]) or Path(
+            _DEFAULT_REPO_PATHS.get(q["repo"], q["repo"])
+        ).name
         url, params = _build_request(intent, q, repo_slug)
         t0 = time.monotonic()
         try:
@@ -206,6 +226,10 @@ async def _run_queries(
                     f"{base}{url}",
                     json={
                         "repo_path": _DEFAULT_REPO_PATHS.get(q["repo"], q["repo"]),
+                        # Explicit slug — without it the service derives the
+                        # repo from the checkout dir name, which 503s when the
+                        # canonical slug is {org}__{repo}.
+                        "repo": repo_slug,
                         "task_description": q["q"],
                         "depth": min(q.get("k", 3), 3),
                     },
@@ -258,13 +282,13 @@ def _build_request(intent: str, q: dict[str, Any], repo_slug: str) -> tuple[str,
         return "/search/semantic", params
     if intent == "structural":
         return "/search/structural", {
-            "cypher": q["q"],
+            "q": q["q"],
             "repo": repo_slug,
             "limit": str(q.get("k", 10)),
         }
     if intent == "symbol":
         return "/search/symbol", {
-            "q": q["q"],
+            "fqn": q["q"],
             "repo": repo_slug,
             "limit": str(q.get("k", 5)),
         }
