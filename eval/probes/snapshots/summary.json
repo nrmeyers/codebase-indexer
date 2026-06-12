@@ -4,15 +4,14 @@
     "repo": "TheForge",
     "q": "Find where incoming requests get authenticated",
     "ok": true,
-    "facet_coverage": 0.6667,
+    "facet_coverage": 1.0,
     "facets_covered": [
+      "session_jwt",
       "identity_provider",
       "service_token"
     ],
-    "facets_missed": [
-      "session_jwt"
-    ],
-    "result_count": 85
+    "facets_missed": [],
+    "result_count": 56
   },
   {
     "id": "probe-cis-collide",
@@ -25,7 +24,7 @@
       "conflict_response"
     ],
     "facets_missed": [],
-    "result_count": 22
+    "result_count": 45
   },
   {
     "id": "probe-cis-hang",
@@ -38,7 +37,7 @@
       "threshold"
     ],
     "facets_missed": [],
-    "result_count": 41
+    "result_count": 39
   },
   {
     "id": "probe-cis-restart",
@@ -51,7 +50,7 @@
       "worker_token"
     ],
     "facets_missed": [],
-    "result_count": 38
+    "result_count": 55
   },
   {
     "id": "probe-cgr-resolve",
@@ -65,7 +64,7 @@
       "call_ingest"
     ],
     "facets_missed": [],
-    "result_count": 50
+    "result_count": 58
   },
   {
     "id": "probe-cis-fuse",
@@ -79,6 +78,6 @@
       "semantic"
     ],
     "facets_missed": [],
-    "result_count": 15
+    "result_count": 24
   }
 ]

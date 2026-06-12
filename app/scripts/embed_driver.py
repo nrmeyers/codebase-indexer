@@ -1297,12 +1297,93 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
             int(_u.get("completion_tokens") or 0),
         )
 
+    # Deterministic File-surface fallback (Phase 1.2b without Manifest).
+    # When the Manifest/Haiku summarizer is unavailable (env unset, HTTP
+    # failure, or cost cap hit), build the embed text from what the file
+    # itself declares: its leading comment/docstring block (where authors
+    # state intent, auth models, deployment modes, gotchas) plus the names
+    # of the symbols it defines. No LLM, no cost, fully reproducible.
+    _defines_by_module: dict[str, list[str]] = {}
+    try:
+        _d_db = lb.Database(
+            repo_db_path, read_only=True,
+            buffer_pool_size=resolve_buffer_pool_size(),
+        )
+        _d_conn = lb.Connection(_d_db)
+        _d_res = _d_conn.execute(
+            "MATCH (m:Module)-[:DEFINES]->(f) "
+            "RETURN m.qualified_name AS mq, f.name AS fn"
+        )
+        _d_cols = _d_res.get_column_names()
+        while _d_res.has_next():
+            _r = dict(zip(_d_cols, _d_res.get_next()))
+            _mq = _r.get("mq") or ""
+            _fn = _r.get("fn") or ""
+            if not _mq or not _fn:
+                continue
+            if _fn.startswith(("anonymous_", "iife_arrow_")):
+                continue
+            _lst = _defines_by_module.setdefault(_mq, [])
+            if len(_lst) < 40:
+                _lst.append(_fn)
+        _d_conn.close()
+        del _d_conn, _d_db
+    except Exception as _exc:  # noqa: BLE001
+        print(f"WARN file_summary.defines_query_failed err={_exc}", flush=True)
+
+    def _leading_comment_block(_c: str, _cap: int = 30) -> list[str]:
+        """Return the file's leading comment/docstring lines (best-effort).
+
+        Stops at the first code line. Handles ``//``, ``#``, ``--`` line
+        comments and ``/* … */`` / triple-quote block comments well enough
+        for header extraction; mis-detection only costs embed-text quality,
+        never correctness.
+        """
+        _out: list[str] = []
+        _in_block = False
+        _block_end: tuple[str, ...] = ()
+        for _ln in _c.splitlines()[:200]:
+            _s = _ln.strip()
+            if _in_block:
+                _out.append(_ln)
+                if any(_e in _s for _e in _block_end):
+                    _in_block = False
+                if len(_out) >= _cap:
+                    break
+                continue
+            if not _s:
+                if _out:
+                    _out.append(_ln)
+                continue
+            if _s.startswith("/*"):
+                _out.append(_ln)
+                if "*/" not in _s[2:]:
+                    _in_block, _block_end = True, ("*/",)
+            elif _s.startswith(('"""', "'''")):
+                _q = _s[:3]
+                _out.append(_ln)
+                if not (_s.endswith(_q) and len(_s) > 3):
+                    _in_block, _block_end = True, (_q,)
+            elif _s.startswith(("//", "#", "--", "*")):
+                _out.append(_ln)
+            else:
+                break
+            if len(_out) >= _cap:
+                break
+        # Trim trailing blanks so the embed text stays dense.
+        while _out and not _out[-1].strip():
+            _out.pop()
+        return _out[:_cap]
+
     _file_emitted = 0
     _file_skipped_filtered = 0
     _file_skipped_unchanged = 0
     _file_skipped_nosum = 0
     _cumulative_cost_usd = 0.0
     _cost_aborted = False
+    _manifest_enabled = bool(os.environ.get("MANIFEST_URL")) and bool(
+        os.environ.get("MANIFEST_AGENT_KEY")
+    )
 
     for _row in _file_rows:
         _rel = _row.get("rel_path") or ""
@@ -1330,29 +1411,48 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
         if not _content.strip():
             continue
 
-        # Estimate cost upper bound BEFORE the call (verified pricing): a
-        # single Haiku summary at ~600 in + 180 out is ≈ $0.0012.  Cap the
-        # estimate at the worst plausible case to stay under-budget.
-        _est_cost = 600 * _HAIKU_IN_USD + 220 * _HAIKU_OUT_USD
-        if _cumulative_cost_usd + _est_cost > _FILE_SUMMARY_COST_CAP:
-            if not _cost_aborted:
-                print(
-                    f"WARN file_summary.cost_cap_exceeded "
-                    f"spent={_cumulative_cost_usd:.4f} "
-                    f"cap={_FILE_SUMMARY_COST_CAP} — aborting File-summary pass",
-                    flush=True,
-                )
-                _cost_aborted = True
-            break
+        _summary: str | None = None
+        _header_lines: list[str] = []
+        if _manifest_enabled and not _cost_aborted:
+            # Estimate cost upper bound BEFORE the call (verified pricing):
+            # a single Haiku summary at ~600 in + 180 out is ≈ $0.0012.
+            # Cap the estimate at the worst plausible case to stay
+            # under-budget. On cap, fall through to the deterministic
+            # surface (free) instead of aborting the whole pass.
+            _est_cost = 600 * _HAIKU_IN_USD + 220 * _HAIKU_OUT_USD
+            if _cumulative_cost_usd + _est_cost > _FILE_SUMMARY_COST_CAP:
+                if not _cost_aborted:
+                    print(
+                        f"WARN file_summary.cost_cap_exceeded "
+                        f"spent={_cumulative_cost_usd:.4f} "
+                        f"cap={_FILE_SUMMARY_COST_CAP} — falling back to "
+                        f"deterministic File surfaces",
+                        flush=True,
+                    )
+                    _cost_aborted = True
+            else:
+                _result = _summarize_file_via_manifest(_rel, _content)
+                if _result is not None:
+                    _summary, _in_tok, _out_tok = _result
+                    _cumulative_cost_usd += (
+                        _in_tok * _HAIKU_IN_USD + _out_tok * _HAIKU_OUT_USD
+                    )
 
-        _result = _summarize_file_via_manifest(_rel, _content)
-        if _result is None:
-            _file_skipped_nosum += 1
-            continue
-        _summary, _in_tok, _out_tok = _result
-        _cumulative_cost_usd += (
-            _in_tok * _HAIKU_IN_USD + _out_tok * _HAIKU_OUT_USD
-        )
+        if _summary is None:
+            # Deterministic File surface: leading comment block + defined
+            # symbol names. Skip only when BOTH are empty (nothing to say).
+            _header_lines = _leading_comment_block(_content)
+            _defined = _defines_by_module.get(_qname) or []
+            if not _header_lines and not _defined:
+                _file_skipped_nosum += 1
+                continue
+            _parts = []
+            if _defined:
+                _parts.append(f"# Defines: {', '.join(_defined)}")
+            if _header_lines:
+                _parts.append("# ---")
+                _parts.append("\n".join(_header_lines))
+            _summary = "\n".join(_parts)
 
         _embed_text = (
             f"# File: {_qname}\n"
@@ -1366,9 +1466,13 @@ RETURN m.qualified_name AS qualified_name, m.path AS rel_path
         if _existing_hashes.get(_summary_qname) == _content_hash:
             _file_skipped_unchanged += 1
             continue
+        # Record the header span so /context-bundle's summary hydration can
+        # show the file head; (1, N) rather than (0, 0) which hydrates the
+        # whole-file default.
+        _hdr_end = max(len(_header_lines), 1) if _header_lines else 0
         _batch_texts.append(_embed_text)
         _batch_meta.append(
-            (_summary_qname, _abs, 0, 0, "File", _content_hash)
+            (_summary_qname, _abs, 1 if _hdr_end else 0, _hdr_end, "File", _content_hash)
         )
         _file_emitted += 1
         if len(_batch_texts) >= _BATCH:
