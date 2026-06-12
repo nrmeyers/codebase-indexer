@@ -20,10 +20,10 @@
       "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.items"
     ],
     "code-indexer-service.app.routers.index.cancel_index": [
-      "code-indexer-service.app.cli.client.IndexerClient.get",
       "code-indexer-service.app.services.jobs_store.request_cancel",
       "code-indexer-service.app.services.jobs_store.get_job",
-      "code-indexer-service.app.services.jobs_store.mark_failed"
+      "code-indexer-service.app.services.jobs_store.mark_failed",
+      "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.routers.index.clear_jobs": [
       "code-indexer-service.app.services.jobs_store.clear_terminal",
@@ -39,9 +39,9 @@
       "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.routers.index.get_index_status": [
-      "code-indexer-service.app.cli.client.IndexerClient.get",
       "code-indexer-service.app.services.jobs_store.get_job",
-      "code-indexer-service.app.routers.index._parse_embed_progress"
+      "code-indexer-service.app.routers.index._parse_embed_progress",
+      "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.routers.index.start_index": [
       "code-indexer-service.app.metrics.record_dedupe_409",
@@ -57,9 +57,9 @@
       "code-indexer-service.app.services.jobs_store.record_event"
     ],
     "code-indexer-service.app.services.jobs_store.clear_terminal": [
-      "code-indexer-service.tests.test_watch_manager._FakeObserver.join",
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",
-      "code-indexer-service.app.services.jobs_store._require_conn"
+      "code-indexer-service.app.services.jobs_store._require_conn",
+      "code-indexer-service.tests.test_watch_manager._FakeObserver.join"
     ],
     "code-indexer-service.app.services.jobs_store.create_job": [
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",

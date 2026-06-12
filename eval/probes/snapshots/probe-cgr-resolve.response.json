@@ -110,10 +110,10 @@
       "code-graph-rag.codebase_rag.graph_updater.FunctionRegistryTrie.get"
     ],
     "code-graph-rag.codebase_rag.parsers.parallel_calls.process_calls_parallel": [
-      "code-graph-rag.codebase_rag.main.get_multiline_input.submit",
-      "code-graph-rag.codebase_rag.parsers.parallel_calls._build_worker_processor",
       "code-graph-rag.codebase_rag.parsers.call_processor.CallProcessor.process_calls_in_file",
-      "code-graph-rag.codebase_rag.parsers.parallel_calls.BufferedIngestor.replay_into"
+      "code-graph-rag.codebase_rag.parsers.parallel_calls.BufferedIngestor.replay_into",
+      "code-graph-rag.codebase_rag.main.get_multiline_input.submit",
+      "code-graph-rag.codebase_rag.parsers.parallel_calls._build_worker_processor"
     ],
     "code-graph-rag.codebase_rag.parsers.py.expression_analyzer.PythonExpressionAnalyzerMixin._infer_method_call_return_type": [
       "code-graph-rag.codebase_rag.parsers.py.expression_analyzer.PythonExpressionAnalyzerMixin._is_method_chain",
@@ -175,7 +175,7 @@
     "code-graph-rag.codebase_rag.parsers.parallel_calls.BufferedIngestor.ensure_relationship_batch": 0.4135,
     "code-graph-rag.codebase_rag.parsers.parallel_calls.BufferedIngestor.replay_into": 0.40395,
     "code-graph-rag.codebase_rag.parsers.parallel_calls._build_worker_processor": 0.8185,
-    "code-graph-rag.codebase_rag.parsers.parallel_calls.get_parse_parallelism": 0.8027251102,
+    "code-graph-rag.codebase_rag.parsers.parallel_calls.get_parse_parallelism": 0.8028054068,
     "code-graph-rag.codebase_rag.parsers.parallel_calls.process_calls_parallel": 0.8079,
     "code-graph-rag.codebase_rag.parsers.py.expression_analyzer.PythonExpressionAnalyzerMixin._infer_chained_call_return_type_fixed": 0.4136,
     "code-graph-rag.codebase_rag.parsers.py.expression_analyzer.PythonExpressionAnalyzerMixin._infer_method_call_return_type": 0.8272,

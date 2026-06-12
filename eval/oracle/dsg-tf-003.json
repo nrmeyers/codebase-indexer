@@ -1,12 +1,13 @@
 {
   "task_id": "dsg-tf-003",
   "repo": "TheForge",
-  "_note": "auth facet substrings (jwt-validator, validateBearer, require-bearer) do not exist in TheForge src/ at SHA 19f4513 — facet is miscalibrated; honest oracle ceiling is 0.75. Real auth surface is auth/session.ts + adapters/identity/*.",
+  "_note": "Facets recalibrated 2026-06-12: auth = verifySession/signSession/requireIdentity (src/services/auth/session.ts + routes/middleware.ts), roles = requireRole (routes/middleware.ts:129), aad = AAD/MSAL/ForgeMode (config.ts deploy mode + me.ts). Previous substrings (jwt-validator, validateBearer, require-bearer, aad-provider) never existed in TheForge src/.",
   "spans": [
     {"file_path": "src/services/auth/session.ts", "start_line": 1, "end_line": 60},
     {"file_path": "src/services/auth/session.ts", "start_line": 143, "end_line": 227},
+    {"file_path": "src/services/routes/middleware.ts", "start_line": 85, "end_line": 160},
     {"file_path": "src/adapters/identity/header-provider.ts", "start_line": 1, "end_line": 80},
-    {"file_path": "src/services/config.ts", "start_line": 10, "end_line": 40},
+    {"file_path": "src/services/config.ts", "start_line": 10, "end_line": 45},
     {"file_path": "src/services/routes/skillsmith.ts", "start_line": 1, "end_line": 100},
     {"file_path": "src/services/api-server/middleware.ts", "start_line": 43, "end_line": 120}
   ],
