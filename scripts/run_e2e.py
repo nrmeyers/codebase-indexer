@@ -287,8 +287,10 @@ def _build_request(intent: str, q: dict[str, Any], repo_slug: str) -> tuple[str,
             "limit": str(q.get("k", 10)),
         }
     if intent == "symbol":
-        return "/search/symbol", {
-            "fqn": q["q"],
+        # /search/symbol is strict FQN equality; queries.json carries short
+        # names, so route through lexical (BM25 over identifiers) instead.
+        return "/search/lexical", {
+            "q": q["q"],
             "repo": repo_slug,
             "limit": str(q.get("k", 5)),
         }

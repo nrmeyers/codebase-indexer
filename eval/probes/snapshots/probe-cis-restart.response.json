@@ -27,10 +27,10 @@
       "code-indexer-service.app.services.jobs_store.touch_heartbeat"
     ],
     "code-indexer-service.app.routers.index.cancel_index": [
+      "code-indexer-service.app.cli.client.IndexerClient.get",
       "code-indexer-service.app.services.jobs_store.request_cancel",
       "code-indexer-service.app.services.jobs_store.get_job",
-      "code-indexer-service.app.services.jobs_store.mark_failed",
-      "code-indexer-service.app.cli.client.IndexerClient.get"
+      "code-indexer-service.app.services.jobs_store.mark_failed"
     ],
     "code-indexer-service.app.routers.index.clear_jobs": [
       "code-indexer-service.app.services.jobs_store.clear_terminal",

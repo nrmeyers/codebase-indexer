@@ -94,14 +94,14 @@
     "id": "tf-str-001",
     "repo": "TheForge",
     "intent": "structural",
-    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'validateBearer' RETURN f.qualified_name LIMIT 10",
+    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'verifySession' RETURN f.qualified_name LIMIT 10",
     "expected_min_results": 1
   },
   {
     "id": "tf-str-002",
     "repo": "TheForge",
     "intent": "structural",
-    "q": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'createErrorEnvelope' RETURN f.qualified_name, f.file_path LIMIT 20",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'createErrorEnvelope' RETURN f.qualified_name, mod.path LIMIT 20",
     "expected_min_results": 1
   },
   {
@@ -115,21 +115,21 @@
     "id": "tf-str-004",
     "repo": "TheForge",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'gate-state-machine' RETURN f.name, f.qualified_name LIMIT 20",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE mod.path CONTAINS 'gate-state-machine' RETURN f.name, f.qualified_name LIMIT 20",
     "expected_min_results": 1
   },
   {
     "id": "tf-str-005",
     "repo": "TheForge",
     "intent": "structural",
-    "q": "MATCH (c:Class)-[:HAS_METHOD]->(m:Function) WHERE c.file_path CONTAINS 'orchestrator' RETURN c.name, m.name LIMIT 15",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(c:Class)-[:DEFINES_METHOD]->(m:Method) WHERE mod.path CONTAINS 'orchestrator' RETURN c.name, m.name LIMIT 15",
     "expected_min_results": 0
   },
   {
     "id": "tf-str-006",
     "repo": "TheForge",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'api-server' RETURN f.name, f.line_start LIMIT 20",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE mod.path CONTAINS 'api-server' RETURN f.name, f.start_line LIMIT 20",
     "expected_min_results": 1
   },
   {
@@ -302,14 +302,14 @@
     "id": "ci-str-001",
     "repo": "code-indexer-service",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.name = 'setup_metrics' RETURN f.qualified_name, f.file_path",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE f.name = 'setup_metrics' RETURN f.qualified_name, mod.path",
     "expected_min_results": 1
   },
   {
     "id": "ci-str-002",
     "repo": "code-indexer-service",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.name = 'lifespan' RETURN f.qualified_name, f.file_path",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE f.name = 'lifespan' RETURN f.qualified_name, mod.path",
     "expected_min_results": 1
   },
   {
@@ -323,14 +323,14 @@
     "id": "ci-str-004",
     "repo": "code-indexer-service",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'reranker' RETURN f.name, f.line_start ORDER BY f.line_start LIMIT 15",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE mod.path CONTAINS 'reranker' RETURN f.name, f.start_line ORDER BY f.start_line LIMIT 15",
     "expected_min_results": 1
   },
   {
     "id": "ci-str-005",
     "repo": "code-indexer-service",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'context_bundle' RETURN f.name, f.line_start LIMIT 20",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE mod.path CONTAINS 'context_bundle' RETURN f.name, f.start_line LIMIT 20",
     "expected_min_results": 1
   },
   {
@@ -344,7 +344,7 @@
     "id": "ci-str-007",
     "repo": "code-indexer-service",
     "intent": "structural",
-    "q": "MATCH (m:Module) WHERE m.name CONTAINS 'services' RETURN m.name, m.file_path LIMIT 10",
+    "q": "MATCH (m:Module) WHERE m.name CONTAINS 'services' RETURN m.name, m.path LIMIT 10",
     "expected_min_results": 1
   },
   {
@@ -503,28 +503,28 @@
     "id": "cgr-str-001",
     "repo": "code-graph-rag",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.name = 'bulk_insert_arrow' RETURN f.qualified_name, f.file_path",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE f.name = 'bulk_insert_arrow' RETURN f.qualified_name, mod.path",
     "expected_min_results": 1
   },
   {
     "id": "cgr-str-002",
     "repo": "code-graph-rag",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.name = 'compute_pagerank' RETURN f.qualified_name, f.file_path",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE f.name = 'compute_pagerank' RETURN f.qualified_name, mod.path",
     "expected_min_results": 1
   },
   {
     "id": "cgr-str-003",
     "repo": "code-graph-rag",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.name = 'embed_query' RETURN f.qualified_name, f.file_path LIMIT 5",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE f.name = 'embed_query' RETURN f.qualified_name, mod.path LIMIT 5",
     "expected_min_results": 1
   },
   {
     "id": "cgr-str-004",
     "repo": "code-graph-rag",
     "intent": "structural",
-    "q": "MATCH (c:Class)-[:HAS_METHOD]->(m:Function) WHERE c.name CONTAINS 'Parser' RETURN c.name, m.name LIMIT 20",
+    "q": "MATCH (c:Class)-[:DEFINES_METHOD]->(m:Method) WHERE c.name CONTAINS 'Parser' RETURN c.name, m.name LIMIT 20",
     "expected_min_results": 1
   },
   {
@@ -538,14 +538,14 @@
     "id": "cgr-str-006",
     "repo": "code-graph-rag",
     "intent": "structural",
-    "q": "MATCH (f:Function) WHERE f.file_path CONTAINS 'centrality' RETURN f.name, f.line_start ORDER BY f.line_start LIMIT 10",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(f:Function) WHERE mod.path CONTAINS 'centrality' RETURN f.name, f.start_line ORDER BY f.start_line LIMIT 10",
     "expected_min_results": 1
   },
   {
     "id": "cgr-str-007",
     "repo": "code-graph-rag",
     "intent": "structural",
-    "q": "MATCH (c:Class) WHERE c.file_path CONTAINS 'dependency_parser' RETURN c.name, c.file_path LIMIT 15",
+    "q": "MATCH (mod:Module)-[:DEFINES]->(c:Class) WHERE mod.path CONTAINS 'dependency_parser' RETURN c.name, mod.path LIMIT 15",
     "expected_min_results": 1
   },
   {
@@ -1246,7 +1246,7 @@
       {
         "name": "centrality_store",
         "any": [
-          "upsert_pagerank",
+          "write_centrality",
           "centrality"
         ]
       },
@@ -1426,16 +1426,18 @@
       {
         "name": "aad",
         "any": [
-          "aad-provider",
-          "AAD"
+          "AAD",
+          "MSAL",
+          "getForgeMode",
+          "ForgeMode"
         ]
       },
       {
         "name": "auth",
         "any": [
-          "jwt-validator",
-          "validateBearer",
-          "require-bearer"
+          "verifySession",
+          "signSession",
+          "requireIdentity"
         ]
       },
       {
@@ -1448,6 +1450,7 @@
       {
         "name": "roles",
         "any": [
+          "requireRole",
           "role"
         ]
       }
