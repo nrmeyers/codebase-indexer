@@ -65,8 +65,52 @@ def _matches_any(text: str, needles: Iterable[str]) -> bool:
     return any(n and n.lower() in text_lc for n in needles)
 
 
+# Minimum fraction of facets a design bundle must cover to pass. Calibrate
+# after the first baseline run; 0.7 means "most components present" without
+# requiring every facet (some facets are intentionally hard).
+DESIGN_PASS_THRESHOLD = 0.7
+
+
+def _grade_design(record: dict[str, Any]) -> dict[str, Any]:
+    """Facet-coverage grading for design-intent queries.
+
+    A facet is `{"name": str, "any": [substr, ...]}` — covered when any of
+    its substrings appears anywhere in the bundle text. Coverage measures
+    whether the bundle contains ALL the components an agent needs to design
+    the feature, not whether any single hit matches (the lookup grader).
+    """
+    facets = record.get("expected_facets", []) or []
+    top_k = record.get("top_k", []) or []
+    bundle_text = " | ".join(_flatten_text(item) for item in top_k).lower()
+
+    covered: list[str] = []
+    missed: list[str] = []
+    for facet in facets:
+        name = facet.get("name", "?")
+        if any(n and n.lower() in bundle_text for n in facet.get("any", [])):
+            covered.append(name)
+        else:
+            missed.append(name)
+
+    coverage = len(covered) / len(facets) if facets else 0.0
+    design_pass = bool(facets) and coverage >= DESIGN_PASS_THRESHOLD
+    return {
+        **record,
+        "facet_coverage": round(coverage, 4),
+        "facets_covered": covered,
+        "facets_missed": missed,
+        "design_pass": design_pass,
+        # Back-compat with aggregate tooling that reads the boolean fields.
+        "top1_relevant": design_pass,
+        "top5_relevant": design_pass,
+        "topk_relevant": design_pass,
+    }
+
+
 def _grade(record: dict[str, Any]) -> dict[str, Any]:
     intent = record["intent"]
+    if intent == "design":
+        return _grade_design(record)
     needles = record.get("expected_topk_substrings", []) or []
     top_k = record.get("top_k", []) or []
     expected_min = record.get("expected_min_results")
