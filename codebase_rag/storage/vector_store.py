@@ -202,6 +202,33 @@ def _l2_normalise(vec: list[float]) -> list[float]:
     return [x / mag for x in vec]
 
 
+# Benign ALTER failure: another writer applied the migration between our
+# presence check and the ALTER. Anything else (syntax error, corrupt DB,
+# lock failure) must raise — a blanket suppress here once hid a broken
+# migration for years in a sibling project.
+_DUPLICATE_COLUMN_SUBSTRINGS = ("already exists", "duplicate column")
+
+
+def _add_column_if_missing(conn: Any, table: str, column: str, alter_ddl: str) -> None:
+    """Apply an ADD COLUMN migration, suppressing only duplicate-column errors."""
+    existing_cols = {
+        r[0]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = ?",
+            [table],
+        ).fetchall()
+    }
+    if column in existing_cols:
+        return
+    try:
+        conn.execute(alter_ddl)
+    except Exception as exc:
+        if any(s in str(exc).lower() for s in _DUPLICATE_COLUMN_SUBSTRINGS):
+            return
+        raise
+
+
 def open_or_create(path: str | Path) -> Any:
     """Open (or create) a ``.duck`` file and ensure the schema exists.
 
@@ -261,44 +288,24 @@ def open_or_create(path: str | Path) -> Any:
     # Phase 8 schema migration: add hnsw_active flag column idempotently.
     # DuckDB does not support ADD COLUMN IF NOT EXISTS, so we guard with a
     # presence check against information_schema.
-    try:
-        existing_cols = {
-            r[0]
-            for r in conn.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'repo_metadata'"
-            ).fetchall()
-        }
-        if "hnsw_active" not in existing_cols:
-            conn.execute(
-                "ALTER TABLE repo_metadata ADD COLUMN hnsw_active BOOLEAN DEFAULT FALSE"
-            )
-    except Exception:
-        # Non-fatal — hnsw_active is only consulted via _hnsw_active() which
-        # already falls back to False on any exception.
-        pass
+    _add_column_if_missing(
+        conn,
+        "repo_metadata",
+        "hnsw_active",
+        "ALTER TABLE repo_metadata ADD COLUMN hnsw_active BOOLEAN DEFAULT FALSE",
+    )
 
     # BUC-1518 C2 schema migration: add content_hash column to embeddings.
     # Drives incremental embedding — when re-indexing, the embed driver hashes
     # each symbol's source range and skips any symbol whose stored hash matches
     # (no SageMaker call, no recompute).  For typical commits touching a few
     # files, this skips 95-99% of the work.
-    try:
-        existing_emb_cols = {
-            r[0]
-            for r in conn.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'embeddings'"
-            ).fetchall()
-        }
-        if "content_hash" not in existing_emb_cols:
-            conn.execute(
-                "ALTER TABLE embeddings ADD COLUMN content_hash TEXT"
-            )
-    except Exception:
-        # Non-fatal — read_content_hashes() returns empty on any error so the
-        # caller falls back to "always re-embed" semantics (correct but slow).
-        pass
+    _add_column_if_missing(
+        conn,
+        "embeddings",
+        "content_hash",
+        "ALTER TABLE embeddings ADD COLUMN content_hash TEXT",
+    )
     return conn
 
 
