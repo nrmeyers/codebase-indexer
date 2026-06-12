@@ -46,13 +46,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-# Enable faulthandler so a hung subprocess automatically prints a full Python
-# traceback (all threads) to stderr every 60 seconds.  This makes hang
-# diagnosis possible without attaching py-spy: the parent captures stderr via
-# the log file redirect, so stuck-stack output lands in
-# /tmp/cis_embed_{job_id}.log automatically.
+# Enable faulthandler so a crash prints a full Python traceback to stderr
+# (captured in /tmp/cis_embed_{job_id}.log via the parent's redirect).
+#
+# Do NOT use dump_traceback_later(repeat=True) here: its watchdog thread walks
+# every thread's frame stack while they are running, and with torch encode +
+# lazy imports active that race segfaulted the driver reproducibly (exit -11
+# mid-dump, observed 2026-06-12 on all three baseline repos). Hang diagnosis
+# is still possible via the SIGALRM watchdog in _flush_pending and py-spy.
 faulthandler.enable()
-faulthandler.dump_traceback_later(60, repeat=True, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
