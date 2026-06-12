@@ -307,6 +307,7 @@ def _truncate_to_budget(
     call_graph: dict[str, list[str]],
     symbol_depth: dict[str, int],
     budget: int,
+    scores: dict[str, float] | None = None,
 ) -> tuple[set[str], dict[str, str], dict[str, list[str]], int]:
     """Drop symbols from deepest BFS hops first until the snippet token
     estimate fits inside ``budget``.
@@ -366,6 +367,29 @@ def _truncate_to_budget(
             kept.discard(s)
             removed = snippets.pop(s, "")
             current -= len(removed) // _CHARS_PER_TOKEN
+
+    # Refill. Layer-dropping is all-or-nothing per hop, which leaves a
+    # budget cliff: going one token over budget evicts an entire depth-1
+    # layer even when thousands of tokens of headroom remain afterwards.
+    # Re-admit dropped symbols — shallowest hop first, then highest
+    # relevance — while their snippets still fit in the remaining budget.
+    if current < budget:
+        ranked_scores = scores or {}
+        dropped = sorted(
+            all_symbols - kept,
+            key=lambda s: (
+                symbol_depth.get(s, 0),
+                -ranked_scores.get(s, 0.0),
+                s,
+            ),
+        )
+        for s in dropped:
+            snip = source_snippets.get(s, "")
+            cost = len(snip) // _CHARS_PER_TOKEN
+            if current + cost <= budget:
+                kept.add(s)
+                snippets[s] = snip
+                current += cost
 
     # Prune call_graph entries that reference dropped symbols.  Keep an
     # edge only when BOTH endpoints survived; otherwise the LLM would
@@ -518,6 +542,21 @@ _CONCEPTUAL_PATTERNS = (
     _re_intent.compile(r"\blist\s+(all\s+)?(the\s+)?(tools|modules|endpoints|routes|services|components|parsers|features)\b", _re_intent.IGNORECASE),
 )
 
+# Imperative feature-work phrasing — "Add X", "Extend Y", "Enforce Z on W".
+# These are *design* tasks: the caller is about to modify the subsystem the
+# query names, so the bundle should include the named modules' surface
+# (module-keyword boost) and any indexed summary chunks, not just the
+# tightest-matching function bodies. Anchored at the start of the query so
+# we don't fire on incidental verbs mid-sentence ("the gate must send…").
+_DESIGN_PATTERNS = (
+    _re_intent.compile(
+        r"^\s*(add|implement|extend|support|enforce|send|show|resolve|"
+        r"build|create|wire|integrate|expose|migrate|refactor|introduce|"
+        r"enable|update|allow)\b",
+        _re_intent.IGNORECASE,
+    ),
+)
+
 # Keyword triggers for how-to / tracing queries — these want entry-point
 # handlers (HTTP routes, CLI commands) included.
 _HOWTO_PATTERNS = (
@@ -545,6 +584,8 @@ def _classify_intent(task_description: str) -> str:
         return "howto"
     if any(p.search(task_description) for p in _CONCEPTUAL_PATTERNS):
         return "conceptual"
+    if any(p.search(task_description) for p in _DESIGN_PATTERNS):
+        return "design"
     return "symbol"
 
 
@@ -840,6 +881,13 @@ def _module_level_symbols(
         # whose path contains the keyword as a directory segment (e.g.
         # `codebase_rag.tools.semantic_search` — the file is
         # "semantic_search.py" but it sits in a `tools/` package).
+        # Over-fetch beyond ``limit`` — the fairness cap + co-occurrence
+        # ranking below do the real selection.  With LIMIT == limit, a
+        # single keyword whose modules enumerate first (e.g. "gate" →
+        # gate-state-machine + gate-policy) consumes every slot inside the
+        # query and rows from other matched modules (notification-service)
+        # never reach the ranking stage at all.
+        fetch_cap = int(limit) * 4
         backend_cypher = (
             "UNWIND $kws AS kw "
             "MATCH (m:Module) "
@@ -853,7 +901,7 @@ def _module_level_symbols(
             "  AND NOT m.qualified_name CONTAINS 'tests.' "
             "  AND NOT m.qualified_name CONTAINS '.web.' "
             "RETURN DISTINCT f.qualified_name AS qn "
-            f"LIMIT {int(limit)}"
+            f"LIMIT {fetch_cap}"
         )
         # Second pass picks up frontend + tests ONLY if the backend
         # query left slots unfilled.  Ensures we never hit LIMIT before
@@ -870,7 +918,7 @@ def _module_level_symbols(
             "  AND NOT m.qualified_name CONTAINS '.test' "
             "  AND NOT m.qualified_name CONTAINS 'tests.' "
             "RETURN DISTINCT f.qualified_name AS qn "
-            f"LIMIT {int(limit)}"
+            f"LIMIT {fetch_cap}"
         )
         backend_rows = _result_to_rows(
             conn.execute(backend_cypher, {"kws": keywords})  # type: ignore[attr-defined]
@@ -969,6 +1017,91 @@ def _entrypoint_symbols(conn: object, limit: int = 15) -> list[str]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Summary-chunk snippet hydration (Priority 2 — design-context gaps)
+# ---------------------------------------------------------------------------
+#
+# Hierarchical summary chunks (``{qname}::Class::summary``,
+# ``{module}::Module::summary``) live only in the DuckDB vector store — they
+# are not LadybugDB graph nodes, so ``fetch_sources_for_symbols`` returns an
+# empty snippet for them and the bundle carried only their label. The vector
+# store row records ``file_path``/``start_line``/``end_line``, which is enough
+# to hydrate a real snippet: the head of the span (class signature + docstring
+# + early members, or a package ``__init__``'s import/export surface) is the
+# high-signal part.
+
+_SUMMARY_QNAME_MARKER = "::summary"
+
+# Max lines of the span head included per summary snippet. Class spans can run
+# to hundreds of lines; the leading lines carry the signature, docstring, and
+# (for __init__.py modules) the import/__all__ surface, which is what a
+# design-task consumer needs from a *summary* chunk.
+_SUMMARY_SNIPPET_MAX_LINES = 40
+
+
+def _hydrate_summary_snippets(
+    repo_slug: str, qnames: list[str]
+) -> dict[str, str]:
+    """Build source snippets for summary-chunk qualified names.
+
+    Args:
+        repo_slug: Repo slug used to locate the per-repo ``.duck`` file.
+        qnames: Qualified names containing ``::summary`` to hydrate.
+
+    Returns:
+        ``{qname → snippet}`` for every qname whose vector-store row and
+        backing file could both be read. Missing rows/files are silently
+        skipped (best-effort — the bundle still carries the label).
+    """
+    if not qnames:
+        return {}
+    try:
+        import duckdb  # noqa: PLC0415
+
+        duck_path = settings.vec_db_path_for_repo(repo_slug)
+        if not Path(duck_path).exists():
+            return {}
+        con = duckdb.connect(duck_path, read_only=True)
+        try:
+            rows = con.execute(
+                "SELECT qualified_name, file_path, start_line, end_line "
+                "FROM embeddings WHERE qualified_name IN "
+                f"({','.join('?' * len(qnames))})",
+                qnames,
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return {}
+
+    out: dict[str, str] = {}
+    for qn, file_path, start, end in rows:
+        if not file_path:
+            continue
+        try:
+            text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        lines = text.splitlines()
+        start_i = max(int(start or 1) - 1, 0)
+        end_i = min(int(end or len(lines)), len(lines))
+        span = lines[start_i:end_i]
+        truncated = len(span) > _SUMMARY_SNIPPET_MAX_LINES
+        span = span[:_SUMMARY_SNIPPET_MAX_LINES]
+        if "::Module::" in qn:
+            kind = "Module"
+        elif "::File::" in qn:
+            kind = "File"
+        else:
+            kind = "Class"
+        header = f"# {kind} summary — {file_path}:{start}-{end}"
+        body = "\n".join(span)
+        if truncated:
+            body += "\n# … (span truncated)"
+        out[qn] = f"{header}\n{body}"
+    return out
+
+
 # Per-intent retrieval parameters — a single knob per intent that the
 # route handler reads to shape the bundle.  Changing these values tunes
 # the breadth/depth tradeoff without touching control flow.
@@ -981,6 +1114,11 @@ _INTENT_PARAMS: dict[str, dict[str, int]] = {
     # Like conceptual but also pulls in entry-point handlers so the
     # flow's starting points are always grounded.
     "howto":      {"k": 15, "depth": 3, "module_limit": 20, "entrypoint_limit": 10},
+    # Imperative feature work ("Add…", "Extend…"). Keeps symbol-intent
+    # seed/depth but adds a moderate module-keyword boost so the files the
+    # task names by topic (e.g. "notifications" → notification-service.ts)
+    # are present even when no single function embeds close to the query.
+    "design":     {"k": 12, "depth": 2, "module_limit": 15, "entrypoint_limit": 0},
 }
 
 
@@ -1232,17 +1370,41 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         # tail of weak semantic seeds. Exact-name asks rank highest among
         # boosts (the user typed the symbol), then module handlers, then
         # generic entry points.
+        #
+        # E5-family cosine scores are tightly compressed (the whole candidate
+        # pool typically spans ~0.78–0.87), so multiplicative bands off the
+        # top (``top * 0.90``) land BELOW nearly every semantic candidate and
+        # the module/entry-point boosts get sliced out of the seed window
+        # entirely. Anchor those bands to the MIDDLE of the semantic seed
+        # window instead: boosts displace the weak semantic tail, never the
+        # head. Clamped under the exact band so ordering between boost kinds
+        # is preserved.
+        mid_idx = (
+            min(max(effective_k // 2 - 1, 0), len(semantic_ranked) - 1)
+            if semantic_ranked else 0
+        )
+        mid_semantic = semantic_ranked[mid_idx][1] if semantic_ranked else 1.0
         _BOOST_BASE = {
             "exact": top_semantic * 0.98,
-            "module": top_semantic * 0.90,
-            "entrypoint": top_semantic * 0.85,
+            "module": min(top_semantic * 0.97, mid_semantic * 1.002),
+            "entrypoint": min(top_semantic * 0.96, mid_semantic * 1.001),
         }
-        for qn in exact_hits:
-            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), _BOOST_BASE["exact"])
-        for qn in module_hits:
-            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), _BOOST_BASE["module"])
-        for qn in entrypoint_hits:
-            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), _BOOST_BASE["entrypoint"])
+        # Within each boost class, decay by list position rather than scoring
+        # every hit identically. ``_module_level_symbols`` round-robins across
+        # source modules, so its head is one function per matched module —
+        # flat scores would hand the tie-break to the FQN sort and let a
+        # single keyword's modules (``gate-*``) alphabetically crowd out the
+        # others (``notification-service``) when the seed cap bites.
+        _POSITION_DECAY = 1e-4
+        for i, qn in enumerate(exact_hits):
+            s = _BOOST_BASE["exact"] * (1.0 - i * _POSITION_DECAY)
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), s)
+        for i, qn in enumerate(module_hits):
+            s = _BOOST_BASE["module"] * (1.0 - i * _POSITION_DECAY)
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), s)
+        for i, qn in enumerate(entrypoint_hits):
+            s = _BOOST_BASE["entrypoint"] * (1.0 - i * _POSITION_DECAY)
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), s)
 
         # Apply the test/script down-weight. Clamp the penalty to a sane
         # (0, 1] band; out-of-range config falls back to 0.4.
@@ -1262,7 +1424,50 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             max(effective_k, len(exact_hits) + len(module_hits) + len(entrypoint_hits)),
             effective_k * 2,
         )
-        seed_symbols = [qn for qn, _ in ranked][:seed_cap]
+        # Summary chunks augment, never displace. A topic with many matching
+        # file headers (parser-heavy queries match a dozen ``::File::summary``
+        # rows) floods the seed window with orientation text, evicting the
+        # implementation symbols the bundle exists to carry. Cap them DURING
+        # selection so the freed slots backfill with the next-ranked
+        # implementation candidates rather than shrinking the seed set.
+        _MAX_SUMMARY_SEEDS = 4
+
+        def _select_seeds(cands: list[str], cap_total: int) -> list[str]:
+            out: list[str] = []
+            n_summary = 0
+            for qn in cands:
+                if len(out) >= cap_total:
+                    break
+                if _SUMMARY_QNAME_MARKER in qn:
+                    if n_summary >= _MAX_SUMMARY_SEEDS:
+                        continue
+                    n_summary += 1
+                out.append(qn)
+            return out
+
+        seed_symbols = _select_seeds([qn for qn, _ in ranked], seed_cap)
+
+        # Guaranteed boost quota. Score bands alone cannot ensure module /
+        # entry-point hits survive the cap: E5 score distributions are often
+        # flat enough that 15+ semantic candidates sit above any band we can
+        # safely place, slicing every boost hit out. Reserve a fixed slice of
+        # the cap for the head of the boost lists (which ``_module_level_-
+        # symbols`` round-robins across source modules, so the head is one
+        # function per matched module — maximum breadth per slot).
+        # The quota is ADDITIVE up to the 2× hard cap: evicting ranked seeds
+        # to make room trades one facet for another (observed: the websocket
+        # seed covering a query's transport aspect dropped to admit module
+        # hits). Only when the hard cap leaves no headroom do guaranteed
+        # boosts displace the ranked tail.
+        boost_ordered = module_hits + entrypoint_hits
+        if boost_ordered:
+            quota = min(len(boost_ordered), max(seed_cap // 3, 6))
+            guaranteed = boost_ordered[:quota]
+            gset = set(guaranteed)
+            head = [qn for qn, _ in ranked if qn not in gset]
+            hard_cap = effective_k * 2
+            head_keep = min(seed_cap, max(hard_cap - quota, 1))
+            seed_symbols = _select_seeds(head, head_keep) + guaranteed
 
         # Optional listwise rerank of the merged seed set (disabled by default).
         # When RERANK_ENABLED=true, this runs BEFORE BFS expansion so the
@@ -1324,6 +1529,19 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     # 3. Fetch source snippets — sorted for deterministic output.
     source_snippets = _fetch_source_for_symbols(conn, sorted(all_symbols))
 
+    # 3b. Summary chunks (``::Class::summary`` / ``::Module::summary``) are
+    #     vector-store-only — the graph fetch above leaves them empty. Hydrate
+    #     their snippets from the duck row's file span so the bundle carries
+    #     the class/module surface, not just a label.
+    summary_qnames = [
+        s for s in all_symbols
+        if _SUMMARY_QNAME_MARKER in s and not source_snippets.get(s)
+    ]
+    if summary_qnames:
+        source_snippets.update(
+            _hydrate_summary_snippets(repo_slug, summary_qnames)
+        )
+
     # 4. Token-budget truncation — drop deepest-hop symbols first when
     #    the bundle would exceed ``_TOKEN_BUDGET``.  Seeds (depth 0) are
     #    always preserved; we shrink from the deepest hop inward,
@@ -1334,12 +1552,23 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     total_chars = sum(len(s) for s in source_snippets.values())
     total_tokens = total_chars // _CHARS_PER_TOKEN
     if total_tokens > _TOKEN_BUDGET and symbol_depth:
+        # Score the full pre-truncation set so the refill pass inside
+        # ``_truncate_to_budget`` re-admits the most relevant dropped
+        # symbols first (final response scores are recomputed on the
+        # survivor set below).
+        pre_scores = compute_symbol_scores(
+            all_symbols=all_symbols,
+            seed_scores=seed_scores,
+            call_graph=call_graph,
+            symbol_depth=symbol_depth,
+        )
         all_symbols, source_snippets, call_graph, total_tokens = _truncate_to_budget(
             all_symbols=all_symbols,
             source_snippets=source_snippets,
             call_graph=call_graph,
             symbol_depth=symbol_depth,
             budget=_TOKEN_BUDGET,
+            scores=pre_scores,
         )
 
     # 5. Relevance ordering (LE-182). Score every surviving symbol — seeds

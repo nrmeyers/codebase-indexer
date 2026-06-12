@@ -1,0 +1,12 @@
+{
+  "task_id": "dsg-cis-004",
+  "repo": "code-indexer-service",
+  "spans": [
+    {"file_path": "app/routers/index.py", "start_line": 3374, "end_line": 3456},
+    {"file_path": "app/routers/index.py", "start_line": 3159, "end_line": 3170},
+    {"file_path": "app/services/s3_store.py", "start_line": 662, "end_line": 702},
+    {"file_path": "app/routers/admin.py", "start_line": 99, "end_line": 146},
+    {"file_path": "app/services/slug.py", "start_line": 167, "end_line": 187}
+  ],
+  "external_keywords": ["s3", "delete repo", "snapshot"]
+}

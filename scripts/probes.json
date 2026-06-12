@@ -1,0 +1,71 @@
+[
+  {
+    "id": "probe-tf-auth",
+    "repo": "TheForge",
+    "intent": "design",
+    "q": "Find where incoming requests get authenticated",
+    "expected_facets": [
+      {"name": "session_jwt", "any": ["verifysession", "signsession", "sessionpayload", "readsessioncookie"]},
+      {"name": "identity_provider", "any": ["header-provider", "x-actor-id", "dev-bypass", "identity"]},
+      {"name": "service_token", "any": ["service-auth", "authheaders", "forge_service_auth_token", "x-forge-service-token"]}
+    ],
+    "k": 3
+  },
+  {
+    "id": "probe-cis-collide",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "How do we stop two indexing runs from clobbering each other?",
+    "expected_facets": [
+      {"name": "per_repo_lock", "any": ["_repo_locks", "repo_locks", "asyncio.lock"]},
+      {"name": "conflict_response", "any": ["409", "conflict"]}
+    ],
+    "k": 3
+  },
+  {
+    "id": "probe-cis-hang",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "What kills a stuck indexing job?",
+    "expected_facets": [
+      {"name": "watchdog", "any": ["heartbeat", "reconcil", "staleness"]},
+      {"name": "threshold", "any": ["job_staleness_threshold", "staleness_threshold"]}
+    ],
+    "k": 3
+  },
+  {
+    "id": "probe-cis-restart",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "What happens to half-finished work when the service restarts?",
+    "expected_facets": [
+      {"name": "orphan_sweep", "any": ["orphan", "interrupted", "sweep"]},
+      {"name": "worker_token", "any": ["worker_token", "worker token"]}
+    ],
+    "k": 3
+  },
+  {
+    "id": "probe-cgr-resolve",
+    "repo": "code-graph-rag",
+    "intent": "design",
+    "q": "When the code calls a function, how do we figure out which actual function it points to?",
+    "expected_facets": [
+      {"name": "resolver", "any": ["call_resolver", "resolve_call", "resolver"]},
+      {"name": "provenance", "any": ["resolved_via", "confidence"]},
+      {"name": "call_ingest", "any": ["call_processor", "calls"]}
+    ],
+    "k": 3
+  },
+  {
+    "id": "probe-cis-fuse",
+    "repo": "code-indexer-service",
+    "intent": "design",
+    "q": "How do keyword search results and meaning-based results get combined into one ranking?",
+    "expected_facets": [
+      {"name": "fusion", "any": ["rrf", "fused", "reciprocal"]},
+      {"name": "lexical", "any": ["bm25", "tantivy"]},
+      {"name": "semantic", "any": ["semantic", "cosine"]}
+    ],
+    "k": 3
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "task_id": "dsg-cis-002",
+  "repo": "code-indexer-service",
+  "spans": [
+    {"file_path": "app/services/jobs_store.py", "start_line": 433, "end_line": 486},
+    {"file_path": "app/services/jobs_store.py", "start_line": 946, "end_line": 972},
+    {"file_path": "app/routers/index.py", "start_line": 384, "end_line": 475},
+    {"file_path": "app/routers/index.py", "start_line": 1133, "end_line": 1160},
+    {"file_path": "app/routers/index.py", "start_line": 1642, "end_line": 1693},
+    {"file_path": "app/scripts/embed_driver.py", "start_line": 817, "end_line": 915}
+  ],
+  "external_keywords": ["embed progress", "resume", "job store", "restart"]
+}

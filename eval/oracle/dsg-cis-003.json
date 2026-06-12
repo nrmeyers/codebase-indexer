@@ -1,0 +1,11 @@
+{
+  "task_id": "dsg-cis-003",
+  "repo": "code-indexer-service",
+  "spans": [
+    {"file_path": "app/routers/repos.py", "start_line": 1106, "end_line": 1185},
+    {"file_path": "app/services/neighbors.py", "start_line": 369, "end_line": 437},
+    {"file_path": "app/services/pagerank.py", "start_line": 39, "end_line": 101},
+    {"file_path": "app/services/centroid.py", "start_line": 259, "end_line": 327}
+  ],
+  "external_keywords": ["cluster", "pagerank", "architecture overview"]
+}

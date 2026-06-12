@@ -1,0 +1,338 @@
+{
+  "call_graph": {
+    "TheForge.src.services.agent-session-store.createAgentSessionStore.delete": [
+      "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has",
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err",
+      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete"
+    ],
+    "TheForge.src.services.auth.session.getSecretKey": [
+      "TheForge.src.services.auth.session.importHmacKey",
+      "TheForge.src.services.auth.session.getRawSecret"
+    ],
+    "TheForge.src.services.auth.session.readSessionCookie": [
+      "TheForge.tests.unit.services.orchestrator-qname-disk-fallback.test.join"
+    ],
+    "TheForge.src.services.auth.session.verifySession": [
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err",
+      "TheForge.src.services.auth.session.getSecretKey"
+    ],
+    "TheForge.src.services.error-guidance.getErrorGuidance": [
+      "TheForge.tests.unit.utils.adapter-contract.test.call",
+      "TheForge.src.services.error-guidance.replaceContextPlaceholders",
+      "TheForge.src.services.result.map"
+    ],
+    "TheForge.src.services.errors.createErrorEnvelope": [
+      "TheForge.src.services.error-guidance.getErrorGuidance",
+      "TheForge.src.services.errors.generateTraceId"
+    ],
+    "TheForge.src.services.llm.model-router-client._get": [
+      "TheForge.tests.setup.json",
+      "TheForge.tests.utils.adapter-contract.stubFetchHttpError.text",
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.service-auth.authHeaders",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err"
+    ],
+    "TheForge.src.services.orchestration.tools.get-callees.handleGetCallees": [
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err",
+      "TheForge.src.services.result.map",
+      "TheForge.src.services.orchestration.tools.get-callees.parseInput",
+      "TheForge.src.services.retrieval.code-indexer-client.getCallees"
+    ],
+    "TheForge.src.services.orchestration.tools.get-callees.parseInput": [
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err"
+    ],
+    "TheForge.src.services.orchestration.tools.get-callers.handleGetCallers": [
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err",
+      "TheForge.src.services.result.map",
+      "TheForge.src.services.orchestration.tools.get-callers.parseInput",
+      "TheForge.src.services.retrieval.code-indexer-client.getCallers"
+    ],
+    "TheForge.src.services.orchestration.tools.get-callers.parseInput": [
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err"
+    ],
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.get": [
+      "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
+      "TheForge.src.services.info-validation.extractReferences.push",
+      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.isCacheEnabled",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.getCacheKey",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.get"
+    ],
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.set": [
+      "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has",
+      "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
+      "TheForge.src.services.info-validation.extractReferences.push",
+      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.isCacheEnabled",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.getCacheKey",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.set"
+    ],
+    "TheForge.src.services.rate-limiter.RateLimiter.getRemaining": [
+      "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.get"
+    ],
+    "TheForge.src.services.rate-limiter.RateLimiter.getResetTime": [
+      "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.get"
+    ],
+    "TheForge.src.services.rate-limiter.RateLimiter.isAllowed": [
+      "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
+      "TheForge.src.services.info-validation.extractReferences.push",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.set",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.get"
+    ],
+    "TheForge.src.services.result.map": [
+      "TheForge.tests.unit.services.spec-agent.test.makeLlm.fn",
+      "TheForge.src.services.result.Ok"
+    ],
+    "TheForge.src.services.retrieval.code-indexer-client._get": [
+      "TheForge.tests.setup.json",
+      "TheForge.tests.utils.adapter-contract.stubFetchHttpError.text",
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err",
+      "TheForge.src.services.orchestration.compose-and-execute.composeAbortSignals.abort",
+      "TheForge.src.services.retrieval.code-indexer-client._outboundHeaders"
+    ],
+    "TheForge.src.services.retrieval.code-indexer-client._outboundHeaders": [
+      "TheForge.src.services.service-auth.authHeaders"
+    ],
+    "TheForge.src.services.retrieval.code-indexer-client.getCallees": [
+      "TheForge.src.services.retrieval.code-indexer-client._get",
+      "TheForge.src.services.retrieval.kg-summary-cache.KgSummaryCache.set"
+    ],
+    "TheForge.src.services.retrieval.code-indexer-client.getCallers": [
+      "TheForge.src.services.retrieval.code-indexer-client._get",
+      "TheForge.src.services.retrieval.kg-summary-cache.KgSummaryCache.set"
+    ],
+    "TheForge.src.services.retrieval.kg-summary-cache.KgSummaryCache.set": [
+      "TheForge.src.services.retrieval.kg-summary-cache.summaryCacheKey"
+    ],
+    "TheForge.src.services.routes.graph.KgLruCache.get": [
+      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
+      "TheForge.src.services.routes.graph.KgLruCache.get",
+      "TheForge.src.services.routes.graph.KgLruCache.set"
+    ],
+    "TheForge.src.services.routes.graph.KgLruCache.set": [
+      "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has",
+      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
+      "TheForge.src.services.routes.graph.KgLruCache.set"
+    ],
+    "TheForge.src.services.routes.identity.resolveSessionExpiry": [
+      "TheForge.src.services.auth.session.verifySession",
+      "TheForge.src.services.auth.session.readSessionCookie"
+    ],
+    "TheForge.src.services.skillsmith-client._get": [
+      "TheForge.tests.setup.json",
+      "TheForge.tests.utils.adapter-contract.stubFetchHttpError.text",
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.service-auth.authHeaders",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err"
+    ],
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get": [
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err",
+      "TheForge.src.services.user-draft-store.draftKey",
+      "TheForge.src.services.user-draft-store.createUserDraftStore.get"
+    ],
+    "TheForge.src.services.util.ttl-cache.TtlMap.get": [
+      "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
+      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
+      "TheForge.src.services.util.ttl-cache.TtlMap.get"
+    ],
+    "TheForge.web.src.services.projects-client.get": [
+      "TheForge.web.src.services.decision-records-client.test.json"
+    ],
+    "TheForge.web.src.services.skillsmith-client._get": [
+      "TheForge.web.src.services.decision-records-client.test.json"
+    ]
+  },
+  "scores": {
+    "TheForge.src.adapters.identity.header-provider.headerTrustAllowed": 0.8081,
+    "TheForge.src.services.agent-session-store.createAgentSessionStore.delete": 0.39995,
+    "TheForge.src.services.auth.session.getRawSecret": 0.1012875,
+    "TheForge.src.services.auth.session.getSecretKey": 0.202575,
+    "TheForge.src.services.auth.session.importHmacKey": 0.8103,
+    "TheForge.src.services.auth.session.readSessionCookie": 0.40515,
+    "TheForge.src.services.auth.session.verifySession": 0.40515,
+    "TheForge.src.services.error-guidance.getErrorGuidance": 0.19915,
+    "TheForge.src.services.error-guidance.replaceContextPlaceholders": 0.099575,
+    "TheForge.src.services.errors.createErrorEnvelope": 0.3983,
+    "TheForge.src.services.errors.generateTraceId": 0.19915,
+    "TheForge.src.services.info-validation.extractReferences.push": 0.40795,
+    "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has": 0.203975,
+    "TheForge.src.services.linear-dispatch.createLinearDispatcher.now": 0.40795,
+    "TheForge.src.services.llm.model-router-client._get": 0.7966,
+    "TheForge.src.services.orchestration.compose-and-execute.composeAbortSignals.abort": 0.39645,
+    "TheForge.src.services.orchestration.manifest-client.extractCacheTokens": 0.8123,
+    "TheForge.src.services.orchestration.tools.get-callees.handleGetCallees": 0.7861,
+    "TheForge.src.services.orchestration.tools.get-callees.parseInput": 0.7902,
+    "TheForge.src.services.orchestration.tools.get-callers.handleGetCallers": 0.7975,
+    "TheForge.src.services.orchestration.tools.get-callers.parseInput": 0.7956,
+    "TheForge.src.services.orchestration.tools.get-callers::File::summary": 0.8013,
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.get": 0.7989,
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.getCacheKey": 0.39945,
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.isCacheEnabled": 0.39945,
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.set": 0.40795,
+    "TheForge.src.services.rate-limiter.RateLimiter.getRemaining": 0.81,
+    "TheForge.src.services.rate-limiter.RateLimiter.getResetTime": 0.8095,
+    "TheForge.src.services.rate-limiter.RateLimiter.isAllowed": 0.8159,
+    "TheForge.src.services.result.Err": 0.39875,
+    "TheForge.src.services.result.Ok": 0.39875,
+    "TheForge.src.services.result.map": 0.39875,
+    "TheForge.src.services.retrieval.code-indexer-client._get": 0.7929,
+    "TheForge.src.services.retrieval.code-indexer-client._outboundHeaders": 0.8127,
+    "TheForge.src.services.retrieval.code-indexer-client.getCallees": 0.39305,
+    "TheForge.src.services.retrieval.code-indexer-client.getCallers": 0.39875,
+    "TheForge.src.services.retrieval.kg-summary-cache.KgSummaryCache.set": 0.199375,
+    "TheForge.src.services.retrieval.kg-summary-cache.summaryCacheKey": 0.0996875,
+    "TheForge.src.services.routes.graph.KgLruCache.get": 0.7999,
+    "TheForge.src.services.routes.graph.KgLruCache.set": 0.39995,
+    "TheForge.src.services.routes.identity.resolveSessionExpiry": 0.8103,
+    "TheForge.src.services.routes.linear-webhook.verifySignature": 0.8166,
+    "TheForge.src.services.routes.linear-webhook::File::summary": 0.8102,
+    "TheForge.src.services.service-auth.authHeaders": 0.40635,
+    "TheForge.src.services.skillsmith-client._get": 0.786,
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get": 0.7857435768000001,
+    "TheForge.src.services.user-draft-store.draftKey": 0.39287178840000003,
+    "TheForge.src.services.util.ttl-cache.TtlMap.get": 0.7996,
+    "TheForge.tests.setup.json": 0.3983,
+    "TheForge.tests.unit.services.orchestrator-qname-disk-fallback.test.join": 0.202575,
+    "TheForge.tests.unit.services.spec-agent.test.makeLlm.fn": 0.199375,
+    "TheForge.tests.unit.utils.adapter-contract.test.call": 0.099575,
+    "TheForge.tests.utils.adapter-contract.stubFetchHttpError.text": 0.3983,
+    "TheForge.web.src.services.decision-records-client.test.json": 0.40105,
+    "TheForge.web.src.services.projects-client.get": 0.8021,
+    "TheForge.web.src.services.skillsmith-client._get": 0.7912
+  },
+  "source_snippets": {
+    "TheForge.src.adapters.identity.header-provider.headerTrustAllowed": "function headerTrustAllowed(): boolean {\n  if (process.env['NODE_ENV'] !== 'production') return true;\n  return process.env['FORGE_TRUST_PROXY_HEADERS'] === 'true';\n}",
+    "TheForge.src.services.agent-session-store.createAgentSessionStore.delete": "",
+    "TheForge.src.services.auth.session.getRawSecret": "function getRawSecret(): Uint8Array {\n  const fromEnv = process.env['FORGE_SESSION_SECRET'];\n  if (fromEnv && fromEnv.trim().length >= 32) {\n    return new TextEncoder().encode(fromEnv.trim());\n  }\n\n  if (process.env['NODE_ENV'] === 'production') {\n    throw new Error(\n      '[FORGE] FORGE_SESSION_SECRET must be set in production (min 32 chars). ' +\n      'Generate one with: openssl rand -hex 32',\n    );\n  }\n\n  // Dev fallback: auto-generate + persist so restarts keep cookies valid.\n  const secretPath = join(process.cwd(), '.forge', '.session-secret');\n  try {\n    const persisted = readFileSync(secretPath, 'utf8').trim();\n    if (persisted.length >= 32) {\n      return new TextEncoder().encode(persisted);\n    }\n  } catch {\n    // File doesn't exist yet \u2014 generate below.\n  }\n\n  // Generate a 64-char hex secret (256 bits of entropy).\n  const raw = Buffer.from(\n    Array.from({ length: 32 }, () => Math.floor(Math.random() * 256)),\n  ).toString('hex');\n\n  try {\n    mkdirSync(join(process.cwd(), '.forge'), { recursive: true });\n    writeFileSync(secretPath, raw, { mode: 0o600 });\n  } catch {\n    // If we can't persist (read-only FS), continue with in-memory secret.\n  }\n\n  return new TextEncoder().encode(raw);\n}",
+    "TheForge.src.services.auth.session.getSecretKey": "async function getSecretKey(): Promise<CryptoKey> {\n  if (_cryptoKey) return _cryptoKey;\n  if (_cryptoKeyPromise) return _cryptoKeyPromise;\n\n  // getRawSecret() throws synchronously in prod when env var is absent.\n  const raw = getRawSecret();\n  _cryptoKeyPromise = importHmacKey(raw).then((key) => {\n    _cryptoKey = key;\n    _cryptoKeyPromise = null;\n    return key;\n  });\n  return _cryptoKeyPromise;\n}",
+    "TheForge.src.services.auth.session.importHmacKey": "async function importHmacKey(raw: Uint8Array): Promise<CryptoKey> {\n  // Copy into a plain ArrayBuffer (not SharedArrayBuffer) \u2014 required by subtle.importKey\n  const buf = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;\n  return crypto.subtle.importKey(\n    'raw',\n    buf,\n    { name: 'HMAC', hash: 'SHA-256' },\n    false, // not extractable\n    ['sign', 'verify'],\n  );\n}",
+    "TheForge.src.services.auth.session.readSessionCookie": "export function readSessionCookie(req: Request): string | null {\n  // Express populates req.cookies only when cookie-parser is registered.\n  // Fall back to manual header parse so this module works even without it.\n  const cookieHeader = req.headers.cookie ?? '';\n  for (const part of cookieHeader.split(';')) {\n    const [rawName, ...rest] = part.trim().split('=');\n    if (rawName?.trim() === SESSION_COOKIE_NAME && rest.length > 0) {\n      return rest.join('=').trim();\n    }\n  }\n  return null;\n}",
+    "TheForge.src.services.auth.session.verifySession": "export async function verifySession(\n  token: string,\n): Promise<Result<SessionPayload, ErrorEnvelope>> {\n  try {\n    const key = await getSecretKey();\n    const { payload } = await jwtVerify(token, key, { algorithms: ['HS256'] });\n\n    const sub = payload.sub;\n    const email = payload['email'];\n    const role  = payload['role'];\n\n    if (\n      typeof sub   !== 'string' || !sub ||\n      typeof email !== 'string' || !email ||\n      typeof role  !== 'string' || !role\n    ) {\n      return Err(createErrorEnvelope('session_invalid', 'Session payload is missing required fields'));\n    }\n\n    return Ok({ sub, email, role });\n  } catch (err) {\n    const message = err instanceof Error ? err.message : String(err);\n    const isExpired = message.includes('expired') || message.includes('JWTExpired');\n    return Err(createErrorEnvelope(\n      isExpired ? 'session_expired' : 'session_invalid',\n      message,\n    ));\n  }\n}",
+    "TheForge.src.services.error-guidance.getErrorGuidance": "export function getErrorGuidance(\n  errorCode: string,\n  context: ErrorContext = {},\n): ErrorGuidance {\n  // Use Object.prototype.hasOwnProperty to avoid prototype pollution issues\n  const guidance = Object.prototype.hasOwnProperty.call(ERROR_GUIDANCE_CATALOG, errorCode)\n    ? ERROR_GUIDANCE_CATALOG[errorCode]\n    : undefined;\n  \n  if (!guidance) {\n    return {\n      suggestions: [\"Check the error message for details\", \"Run 'forge doctor' to diagnose common issues\"],\n      exampleCommands: [\"forge doctor\", \"forge --help\"],\n      documentationLinks: [\"https://github.com/navistone/engineering-agent-standards\"],\n    };\n  }\n\n  // Replace context placeholders in suggestions and commands\n  const suggestions = guidance.suggestions.map(s => replaceContextPlaceholders(s, context));\n  const exampleCommands = guidance.exampleCommands.map(c => replaceContextPlaceholders(c, context));\n\n  return {\n    suggestions,\n    exampleCommands,\n    documentationLinks: guidance.documentationLinks,\n  };\n}",
+    "TheForge.src.services.error-guidance.replaceContextPlaceholders": "function replaceContextPlaceholders(text: string, context: ErrorContext): string {\n  return text.replace(/\\{(\\w+)\\}/g, (match, key) => {\n    const value = context[key];\n    return value !== undefined ? String(value) : match;\n  });\n}",
+    "TheForge.src.services.errors.createErrorEnvelope": "export function createErrorEnvelope(\n  error: string,\n  message: string,\n  details?: Record<string, unknown>,\n): ErrorEnvelope {\n  // Extract context for error guidance from details\n  const context: Record<string, string | number | boolean | undefined> = {};\n  if (details) {\n    for (const [key, value] of Object.entries(details)) {\n      if (typeof value === \"string\" || typeof value === \"number\" || typeof value === \"boolean\") {\n        context[key] = value;\n      }\n    }\n  }\n\n  // Get error recovery guidance\n  const guidance = getErrorGuidance(error, context);\n\n  // Merge guidance into details\n  const enhancedDetails = {\n    ...details,\n    guidance: {\n      suggestions: guidance.suggestions,\n      exampleCommands: guidance.exampleCommands,\n      documentationLinks: guidance.documentationLinks,\n    },\n  };\n\n  // Derive a top-level `remediation` from the first guidance suggestion\n  // for codes the catalog knows about. Unknown codes get the generic\n  // \"Check the error message for details\" string which is not useful as a\n  // remediation hint -- only surface it when the catalog has a curated\n  // entry (i.e. guidance has more than just the generic fallback).\n  const isCuratedGuidance =\n    guidance.suggestions.length > 0 &&\n    guidance.suggestions[0] !== \"Check the error message for details\";\n  const remediation = isCuratedGuidance ? guidance.suggestions[0] : undefined;\n\n  return {\n    error,\n    message,\n    timestamp: new Date().toISOString(),\n    traceId: generateTraceId(),\n    ...(remediation !== undefined ? { remediation } : {}),\n    details: enhancedDetails,\n  };\n}",
+    "TheForge.src.services.errors.generateTraceId": "export function generateTraceId(): string {\n  return uuidv4();\n}",
+    "TheForge.src.services.info-validation.extractReferences.push": "",
+    "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has": "",
+    "TheForge.src.services.linear-dispatch.createLinearDispatcher.now": "",
+    "TheForge.src.services.llm.model-router-client._get": "async function _get<T>(path: string): Promise<Result<T, ErrorEnvelope>> {\n  try {\n    const res = await fetch(`${BASE_URL}${path}`, {\n      headers: { ...authHeaders() },\n    });\n    if (!res.ok) {\n      const text = await res.text().catch(() => res.statusText);\n      return Err(createErrorEnvelope('model_router_http_error', `${res.status} ${text}`));\n    }\n    return Ok((await res.json()) as T);\n  } catch (err) {\n    return Err(createErrorEnvelope('model_router_fetch_failed', err instanceof Error ? err.message : String(err)));\n  }\n}",
+    "TheForge.src.services.orchestration.compose-and-execute.composeAbortSignals.abort": "",
+    "TheForge.src.services.orchestration.manifest-client.extractCacheTokens": "function extractCacheTokens(usage: ManifestUsage): {\n  cacheReadTokens?: number;\n  cacheCreationTokens?: number;\n} {\n  const out: { cacheReadTokens?: number; cacheCreationTokens?: number } = {};\n  const read = usage.cache_read_tokens ?? usage.prompt_tokens_details?.cached_tokens;\n  if (typeof read === 'number') out.cacheReadTokens = read;\n  if (typeof usage.cache_creation_tokens === 'number') {\n    out.cacheCreationTokens = usage.cache_creation_tokens;\n  }\n  return out;\n}",
+    "TheForge.src.services.orchestration.tools.get-callees.handleGetCallees": "export async function handleGetCallees(rawInput: unknown): Promise<Result<ToolResult, ErrorEnvelope>> {\n  const parsed = parseInput(rawInput);\n  if (!parsed.ok) return Err(parsed.error);\n  const { symbol_qname, repo } = parsed.value;\n\n  const result = await getCallees(symbol_qname, repo);\n  if (!result.ok) return Err(result.error);\n\n  const callees = result.value.results.map((r) => ({\n    qname: r.qualified_name,\n    file_path: r.file_path,\n  }));\n  return Ok({\n    content: { callees },\n    summary: `get_callees(${symbol_qname}): ${callees.length} callee(s)`,\n  });\n}",
+    "TheForge.src.services.orchestration.tools.get-callees.parseInput": "function parseInput(raw: unknown): Result<GetCalleesInput, ErrorEnvelope> {\n  if (typeof raw !== 'object' || raw === null) {\n    return Err(createErrorEnvelope('tool_input_invalid', 'get_callees: input must be an object'));\n  }\n  const v = raw as Record<string, unknown>;\n  if (typeof v['symbol_qname'] !== 'string' || v['symbol_qname'].length === 0) {\n    return Err(createErrorEnvelope('tool_input_invalid', 'get_callees: symbol_qname must be a non-empty string'));\n  }\n  if (typeof v['repo'] !== 'string' || v['repo'].length === 0) {\n    return Err(createErrorEnvelope('tool_input_invalid', 'get_callees: repo must be a non-empty string'));\n  }\n  return Ok({ symbol_qname: v['symbol_qname'], repo: v['repo'] });\n}",
+    "TheForge.src.services.orchestration.tools.get-callers.handleGetCallers": "export async function handleGetCallers(rawInput: unknown): Promise<Result<ToolResult, ErrorEnvelope>> {\n  const parsed = parseInput(rawInput);\n  if (!parsed.ok) return Err(parsed.error);\n  const { symbol_qname, repo } = parsed.value;\n\n  const result = await getCallers(symbol_qname, repo);\n  if (!result.ok) return Err(result.error);\n\n  const callers = result.value.results.map((r) => ({\n    qname: r.qualified_name,\n    file_path: r.file_path,\n  }));\n  return Ok({\n    content: { callers },\n    summary: `get_callers(${symbol_qname}): ${callers.length} caller(s)`,\n  });\n}",
+    "TheForge.src.services.orchestration.tools.get-callers.parseInput": "function parseInput(raw: unknown): Result<GetCallersInput, ErrorEnvelope> {\n  if (typeof raw !== 'object' || raw === null) {\n    return Err(createErrorEnvelope('tool_input_invalid', 'get_callers: input must be an object'));\n  }\n  const v = raw as Record<string, unknown>;\n  if (typeof v['symbol_qname'] !== 'string' || v['symbol_qname'].length === 0) {\n    return Err(createErrorEnvelope('tool_input_invalid', 'get_callers: symbol_qname must be a non-empty string'));\n  }\n  if (typeof v['repo'] !== 'string' || v['repo'].length === 0) {\n    return Err(createErrorEnvelope('tool_input_invalid', 'get_callers: repo must be a non-empty string'));\n  }\n  return Ok({ symbol_qname: v['symbol_qname'], repo: v['repo'] });\n}",
+    "TheForge.src.services.orchestration.tools.get-callers::File::summary": "# File summary \u2014 /home/nmeyers/dev/claude/TheForge/src/services/orchestration/tools/get-callers.ts:1-5\n/**\n * @file get-callers.ts\n * @description `get_callers` tool handler \u2014 wraps the Code Indexer's\n * `/symbols/{fqn}/callers` graph endpoint.\n */",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.get": "  get(taskDescription: string, sddPhase: string, domainTags: string[]): SkillsmithCacheEntry | null {\n    if (!this.isCacheEnabled()) return null;\n\n    const key = this.getCacheKey(taskDescription, sddPhase, domainTags);\n    const entry = this.cache.get(key);\n    if (!entry) return null;\n\n    // Check TTL\n    if (Date.now() > entry.expires_at) {\n      this.cache.delete(key);\n      return null;\n    }\n\n    // Update access order (LRU)\n    const idx = this.accessOrder.indexOf(key);\n    if (idx !== -1) {\n      this.accessOrder.splice(idx, 1);\n    }\n    this.accessOrder.push(key);\n\n    return entry;\n  }",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.getCacheKey": "  private getCacheKey(taskDescription: string, sddPhase: string, domainTags: string[]): string {\n    const sortedTags = (domainTags ?? []).sort().join(',');\n    const input = `${taskDescription}|${sddPhase}|${sortedTags}`;\n    // Simple hash \u2014 we use SHA256 in the spec but a string key works fine for Node.js\n    return crypto.subtle ? `hash:${input}` : input;\n  }",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.isCacheEnabled": "  isCacheEnabled(): boolean {\n    return process.env['FORGE_SKILLSMITH_CACHE_DISABLED'] !== 'true';\n  }",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.set": "  set(\n    taskDescription: string,\n    sddPhase: string,\n    domainTags: string[],\n    value: Omit<SkillsmithCacheEntry, 'expires_at'>,\n  ): void {\n    if (!this.isCacheEnabled()) return;\n\n    const key = this.getCacheKey(taskDescription, sddPhase, domainTags);\n\n    // Evict oldest if at capacity\n    if (this.cache.size >= this.maxEntries && !this.cache.has(key)) {\n      const oldest = this.accessOrder.shift();\n      if (oldest) this.cache.delete(oldest);\n    }\n\n    const entry: SkillsmithCacheEntry = {\n      ...value,\n      expires_at: Date.now() + this.ttlMs,\n    };\n    this.cache.set(key, entry);\n    const idx = this.accessOrder.indexOf(key);\n    if (idx !== -1) {\n      this.accessOrder.splice(idx, 1);\n    }\n    this.accessOrder.push(key);\n  }",
+    "TheForge.src.services.rate-limiter.RateLimiter.getRemaining": "  getRemaining(identifier: string): number {\n    const now = Date.now();\n    const windowStart = now - this.config.windowMs;\n\n    const clientRequests = this.requests.get(identifier) || [];\n    const recentRequests = clientRequests.filter(req => req.timestamp > windowStart);\n\n    return Math.max(0, this.config.maxRequests - recentRequests.length);\n  }",
+    "TheForge.src.services.rate-limiter.RateLimiter.getResetTime": "  getResetTime(identifier: string): number {\n    const now = Date.now();\n    const windowStart = now - this.config.windowMs;\n\n    const clientRequests = this.requests.get(identifier) || [];\n    const recentRequests = clientRequests.filter(req => req.timestamp > windowStart);\n\n    if (recentRequests.length === 0) {\n      return 0;\n    }\n\n    // Time until oldest request expires\n    const oldestRequest = recentRequests[0];\n    if (!oldestRequest) {\n      return 0;\n    }\n    \n    const resetTime = oldestRequest.timestamp + this.config.windowMs - now;\n\n    return Math.max(0, resetTime);\n  }",
+    "TheForge.src.services.rate-limiter.RateLimiter.isAllowed": "  isAllowed(identifier: string): boolean {\n    const now = Date.now();\n    const windowStart = now - this.config.windowMs;\n\n    // Get existing requests for this identifier\n    let clientRequests = this.requests.get(identifier) || [];\n\n    // Remove requests outside the current window\n    clientRequests = clientRequests.filter(req => req.timestamp > windowStart);\n\n    // Check if limit is exceeded\n    if (clientRequests.length >= this.config.maxRequests) {\n      // Update the map with filtered requests\n      this.requests.set(identifier, clientRequests);\n      return false;\n    }\n\n    // Add new request\n    clientRequests.push({ timestamp: now, ip: identifier });\n    this.requests.set(identifier, clientRequests);\n\n    return true;\n  }",
+    "TheForge.src.services.result.Err": "export function Err<E>(error: E): Result<never, E> {\n  return { ok: false, error };\n}",
+    "TheForge.src.services.result.Ok": "export function Ok<T>(value: T): Result<T, never> {\n  return { ok: true, value };\n}",
+    "TheForge.src.services.result.map": "export function map<T, U, E>(\n  result: Result<T, E>,\n  fn: (value: T) => U,\n): Result<U, E> {\n  return result.ok ? Ok(fn(result.value)) : result;\n}",
+    "TheForge.src.services.retrieval.code-indexer-client._get": "async function _get<T>(path: string, opts?: _RequestOptions): Promise<Result<T, ErrorEnvelope>> {\n  const controller = opts?.timeoutMs !== undefined ? new AbortController() : null;\n  const timer = controller !== null && opts?.timeoutMs !== undefined\n    ? setTimeout(() => controller.abort(), opts.timeoutMs)\n    : null;\n  try {\n    const res = await fetch(`${BASE_URL}${path}`, {\n      headers: _outboundHeaders(opts?.bearerToken),\n      ...(controller !== null ? { signal: controller.signal } : {}),\n    });\n    if (!res.ok) {\n      // Best-effort error body; fall back to statusText if body read fails.\n      const text = await res.text().catch(() => res.statusText);\n      return Err(createErrorEnvelope('code_indexer_http_error', `${res.status} ${text}`));\n    }\n    return Ok((await res.json()) as T);\n  } catch (err) {\n    const message = err instanceof Error\n      ? (err.name === 'AbortError' ? 'request timed out' : err.message)\n      : String(err);\n    return Err(createErrorEnvelope('code_indexer_fetch_failed', message));\n  } finally {\n    if (timer !== null) clearTimeout(timer);\n  }\n}",
+    "TheForge.src.services.retrieval.code-indexer-client._outboundHeaders": "function _outboundHeaders(\n  userBearer: string | null | undefined,\n  extra?: Record<string, string>,\n): Record<string, string> {\n  const bearer = userBearer ?? _moduleBearerToken;\n  if (bearer) {\n    return { ...authHeaders(true), Authorization: `Bearer ${bearer}`, ...(extra ?? {}) };\n  }\n  return { ...authHeaders(), ...(extra ?? {}) };\n}",
+    "TheForge.src.services.retrieval.code-indexer-client.getCallees": "export async function getCallees(\n  fqn: string,\n  repo: string | null = null,\n): Promise<Result<CallSitesResponse, ErrorEnvelope>> {\n  const params = new URLSearchParams();\n  if (repo) params.set('repo', repo);\n  return _get<CallSitesResponse>(\n    `/symbols/${encodeURIComponent(fqn)}/callees${params.toString() ? `?${params}` : ''}`,\n  );\n}",
+    "TheForge.src.services.retrieval.code-indexer-client.getCallers": "export async function getCallers(\n  fqn: string,\n  repo: string | null = null,\n): Promise<Result<CallSitesResponse, ErrorEnvelope>> {\n  const params = new URLSearchParams();\n  if (repo) params.set('repo', repo);\n  return _get<CallSitesResponse>(\n    `/symbols/${encodeURIComponent(fqn)}/callers${params.toString() ? `?${params}` : ''}`,\n  );\n}",
+    "TheForge.src.services.retrieval.kg-summary-cache.KgSummaryCache.set": "  set(nodeId: string, source: string, payload: CachedSummary): void {\n    if (payload.summary.length === 0) return;\n    const key = summaryCacheKey(nodeId, source);\n    this.file.entries[key] = {\n      summary: payload.summary,\n      tags: [...payload.tags],\n      seen: this.file.next++,\n    };\n    this.dirty = true;\n  }",
+    "TheForge.src.services.retrieval.kg-summary-cache.summaryCacheKey": "export function summaryCacheKey(nodeId: string, source: string): string {\n  return createHash('sha256').update(`${nodeId}:${source}`).digest('hex');\n}",
+    "TheForge.src.services.routes.graph.KgLruCache.get": "  get(key: string): KgLruEntry | undefined {\n    const entry = this._cache.get(key);\n    if (entry === undefined) return undefined;\n    // Refresh recency: re-inserting moves the key to the tail (MRU position).\n    this._cache.delete(key);\n    this._cache.set(key, entry);\n    return entry;\n  }",
+    "TheForge.src.services.routes.graph.KgLruCache.set": "  set(key: string, entry: KgLruEntry): void {\n    if (this._cache.has(key)) this._cache.delete(key);\n    this._cache.set(key, entry);\n    // Evict the LRU (head) entry when over capacity.\n    while (this._cache.size > this._maxEntries) {\n      const oldest = this._cache.keys().next().value;\n      if (oldest === undefined) break;\n      this._cache.delete(oldest);\n    }\n  }",
+    "TheForge.src.services.routes.identity.resolveSessionExpiry": "async function resolveSessionExpiry(req: Request): Promise<string | null> {\n  const raw = readSessionCookie(req);\n  if (!raw) return null;\n  const verifyResult = await verifySession(raw);\n  if (!verifyResult.ok) return null;\n  // verifySession returns the payload; we re-decode to read `exp` since\n  // verifySession's surface doesn't currently expose iat/exp claims.\n  try {\n    const [, payloadB64] = raw.split('.');\n    if (!payloadB64) return null;\n    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');\n    const claims = JSON.parse(payloadJson) as { exp?: unknown };\n    if (typeof claims.exp !== 'number') return null;\n    return new Date(claims.exp * 1000).toISOString();\n  } catch {\n    return null;\n  }\n}",
+    "TheForge.src.services.routes.linear-webhook.verifySignature": "function verifySignature(\n  secret: string,\n  rawBody: Buffer,\n  header: string,\n): boolean {\n  const provided = header.startsWith('sha256=')\n    ? header.slice('sha256='.length)\n    : header;\n  if (provided.length === 0) return false;\n\n  const expected = crypto\n    .createHmac('sha256', secret)\n    .update(rawBody)\n    .digest('hex');\n\n  if (provided.length !== expected.length) return false;\n\n  let providedBuf: Buffer;\n  let expectedBuf: Buffer;\n  try {\n    providedBuf = Buffer.from(provided, 'hex');\n    expectedBuf = Buffer.from(expected, 'hex');\n  } catch {\n    return false;\n  }\n  if (providedBuf.length !== expectedBuf.length) return false;\n  return crypto.timingSafeEqual(providedBuf, expectedBuf);\n}",
+    "TheForge.src.services.routes.linear-webhook::File::summary": "# File summary \u2014 /home/nmeyers/dev/claude/TheForge/src/services/routes/linear-webhook.ts:1-23\n/**\n * @file linear-webhook.ts \u2014 BUC-1597 (Phase 3 A.2) Linear webhook receiver.\n *\n * Mounted at `/api/linear/webhook`. HMAC-SHA256 verifies the\n * `linear-signature` header against the raw request body using the shared\n * secret from `LINEAR_WEBHOOK_SECRET`. On a valid signature AND a ticket\n * that JUST transitioned into a \"Ready for Agent\" state, enqueues the\n * ticket onto the in-process `LinearDispatcher` (which then drains via\n * `setImmediate` so this handler never blocks Linear's retry budget).\n *\n * IMPORTANT: This route MUST receive the raw request body for HMAC\n * verification. Mount with `express.raw({ type: 'application/json' })`\n * BEFORE the global `express.json()` middleware \u2014 see api-server.ts.\n *\n * Audit events emitted (see audit-trail.ts for type definitions):\n *  - `linear.webhook.received`              every accepted delivery\n *  - `linear.webhook.dispatch_queued`       successful enqueue\n *  - `linear.webhook.dispatch_rejected`     401 + bad_signature\n *                                           200 + wrong_state\n *                                           200 + duplicate\n *\n * Validates: BUC-1597 \u2014 Linear webhook receiver behind LINEAR_WEBHOOK_SECRET.\n */",
+    "TheForge.src.services.service-auth.authHeaders": "export function authHeaders(useAlternate = false): Record<string, string> {\n  if (!TOKEN) return {};\n  if (useAlternate) {\n    return { 'X-Forge-Service-Token': TOKEN };\n  }\n  return { Authorization: `Bearer ${TOKEN}` };\n}",
+    "TheForge.src.services.skillsmith-client._get": "async function _get<T>(path: string): Promise<Result<T, ErrorEnvelope>> {\n  try {\n    const res = await fetch(`${BASE_URL}${path}`, {\n      headers: { ...authHeaders() },\n    });\n    if (!res.ok) {\n      const text = await res.text().catch(() => res.statusText);\n      return Err(createErrorEnvelope('skillsmith_http_error', `${res.status} ${text}`));\n    }\n    return Ok((await res.json()) as T);\n  } catch (err) {\n    return Err(createErrorEnvelope('skillsmith_fetch_failed', err instanceof Error ? err.message : String(err)));\n  }\n}",
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get": "",
+    "TheForge.src.services.user-draft-store.draftKey": "function draftKey(userId: string, taskId: string, artifactType: ArtifactType): string {\n  return `${userId}::${taskId}::${artifactType}`;\n}",
+    "TheForge.src.services.util.ttl-cache.TtlMap.get": "  get(key: string): V | undefined {\n    const entry = this.store.get(key);\n    if (!entry) return undefined;\n    if (entry.expiresAt <= Date.now()) {\n      this.store.delete(key);\n      return undefined;\n    }\n    return entry.value;\n  }",
+    "TheForge.tests.setup.json": "",
+    "TheForge.tests.unit.services.orchestrator-qname-disk-fallback.test.join": "",
+    "TheForge.tests.unit.services.spec-agent.test.makeLlm.fn": "",
+    "TheForge.tests.unit.utils.adapter-contract.test.call": "",
+    "TheForge.tests.utils.adapter-contract.stubFetchHttpError.text": "",
+    "TheForge.web.src.services.decision-records-client.test.json": "function json(body: unknown, status = 200): Response {\n  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });\n}",
+    "TheForge.web.src.services.projects-client.get": "  update: (id: string, data: { name?: string; description?: string }): Promise<{ id: string; name: string; description: string | null }> =>\n    send('PATCH', `/api/projects/${encodeURIComponent(id)}`, data),",
+    "TheForge.web.src.services.skillsmith-client._get": "async function _get<T>(path: string): Promise<Result<T>> {\n  try {\n    const res = await fetch(`${API}${path}`);\n    if (!res.ok) {\n      const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };\n      return { ok: false, error: body.error?.message ?? `Request failed: ${res.status}` };\n    }\n    return { ok: true, value: (await res.json()) as T };\n  } catch (err) {\n    return { ok: false, error: err instanceof Error ? err.message : String(err) };\n  }\n}"
+  },
+  "symbols": [
+    "TheForge.src.services.routes.linear-webhook.verifySignature",
+    "TheForge.src.services.rate-limiter.RateLimiter.isAllowed",
+    "TheForge.src.services.retrieval.code-indexer-client._outboundHeaders",
+    "TheForge.src.services.orchestration.manifest-client.extractCacheTokens",
+    "TheForge.src.services.auth.session.importHmacKey",
+    "TheForge.src.services.routes.identity.resolveSessionExpiry",
+    "TheForge.src.services.routes.linear-webhook::File::summary",
+    "TheForge.src.services.rate-limiter.RateLimiter.getRemaining",
+    "TheForge.src.services.rate-limiter.RateLimiter.getResetTime",
+    "TheForge.src.adapters.identity.header-provider.headerTrustAllowed",
+    "TheForge.web.src.services.projects-client.get",
+    "TheForge.src.services.orchestration.tools.get-callers::File::summary",
+    "TheForge.src.services.routes.graph.KgLruCache.get",
+    "TheForge.src.services.util.ttl-cache.TtlMap.get",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.get",
+    "TheForge.src.services.orchestration.tools.get-callers.handleGetCallers",
+    "TheForge.src.services.llm.model-router-client._get",
+    "TheForge.src.services.orchestration.tools.get-callers.parseInput",
+    "TheForge.src.services.retrieval.code-indexer-client._get",
+    "TheForge.web.src.services.skillsmith-client._get",
+    "TheForge.src.services.orchestration.tools.get-callees.parseInput",
+    "TheForge.src.services.orchestration.tools.get-callees.handleGetCallees",
+    "TheForge.src.services.skillsmith-client._get",
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get",
+    "TheForge.src.services.info-validation.extractReferences.push",
+    "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.set",
+    "TheForge.src.services.service-auth.authHeaders",
+    "TheForge.src.services.auth.session.readSessionCookie",
+    "TheForge.src.services.auth.session.verifySession",
+    "TheForge.web.src.services.decision-records-client.test.json",
+    "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
+    "TheForge.src.services.routes.graph.KgLruCache.set",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.getCacheKey",
+    "TheForge.src.services.orchestrator.SkillsmithLRUCache.isCacheEnabled",
+    "TheForge.src.services.result.Err",
+    "TheForge.src.services.result.Ok",
+    "TheForge.src.services.result.map",
+    "TheForge.src.services.retrieval.code-indexer-client.getCallers",
+    "TheForge.src.services.errors.createErrorEnvelope",
+    "TheForge.tests.setup.json",
+    "TheForge.tests.utils.adapter-contract.stubFetchHttpError.text",
+    "TheForge.src.services.orchestration.compose-and-execute.composeAbortSignals.abort",
+    "TheForge.src.services.retrieval.code-indexer-client.getCallees",
+    "TheForge.src.services.user-draft-store.draftKey",
+    "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has",
+    "TheForge.src.services.auth.session.getSecretKey",
+    "TheForge.tests.unit.services.orchestrator-qname-disk-fallback.test.join",
+    "TheForge.src.services.retrieval.kg-summary-cache.KgSummaryCache.set",
+    "TheForge.tests.unit.services.spec-agent.test.makeLlm.fn",
+    "TheForge.src.services.error-guidance.getErrorGuidance",
+    "TheForge.src.services.errors.generateTraceId",
+    "TheForge.src.services.auth.session.getRawSecret",
+    "TheForge.src.services.retrieval.kg-summary-cache.summaryCacheKey",
+    "TheForge.src.services.error-guidance.replaceContextPlaceholders",
+    "TheForge.tests.unit.utils.adapter-contract.test.call"
+  ],
+  "total_tokens": 5545
+}

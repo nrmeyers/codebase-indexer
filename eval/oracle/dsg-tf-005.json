@@ -1,0 +1,12 @@
+{
+  "task_id": "dsg-tf-005",
+  "repo": "TheForge",
+  "spans": [
+    {"file_path": "src/services/governance-compliance.ts", "start_line": 40, "end_line": 80},
+    {"file_path": "src/services/governance-compliance.ts", "start_line": 230, "end_line": 272},
+    {"file_path": "src/services/audit-trail.ts", "start_line": 302, "end_line": 342},
+    {"file_path": "src/services/gate-state-machine.ts", "start_line": 432, "end_line": 520},
+    {"file_path": "src/services/cleanup/types.ts", "start_line": 1030, "end_line": 1060}
+  ],
+  "external_keywords": ["compliance", "audit trail", "gate transition"]
+}

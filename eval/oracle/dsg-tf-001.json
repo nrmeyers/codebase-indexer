@@ -1,0 +1,12 @@
+{
+  "task_id": "dsg-tf-001",
+  "repo": "TheForge",
+  "spans": [
+    {"file_path": "src/services/gate-state-machine.ts", "start_line": 262, "end_line": 340},
+    {"file_path": "src/services/gate-state-machine.ts", "start_line": 432, "end_line": 520},
+    {"file_path": "src/services/notification-service.ts", "start_line": 35, "end_line": 120},
+    {"file_path": "src/services/notification-service.ts", "start_line": 121, "end_line": 185},
+    {"file_path": "src/services/audit-trail.ts", "start_line": 302, "end_line": 342}
+  ],
+  "external_keywords": ["gate approval", "notification", "deadline"]
+}
