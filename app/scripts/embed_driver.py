@@ -461,12 +461,19 @@ def resolve_batch_embedder() -> Any:
     if backend is not None:
         import asyncio
 
+        from app.embedders.prefixes import apply_prefix
+
         def _embed_via_backend(texts: list[str]) -> list[list[float]]:
             # Async batch ``embed`` run on a fresh loop — this driver is a
             # subprocess with no live asyncio context, so ``asyncio.run`` is
-            # safe (same pattern as ``embed_text_sync``). Raw text, no
-            # prefix — symmetric with ``_embed_query``.
-            return asyncio.run(backend.embed(list(texts)))
+            # safe (same pattern as ``embed_text_sync``). ``role="document"``
+            # applies the local model's document/passage prefix (e5
+            # ``passage: ``; CodeRankEmbed: none) — symmetric with the
+            # ``query`` prefix ``_embed_query`` applies; see
+            # app.embedders.prefixes. No-op for prod backends and symmetric
+            # models, so the prod ingest path is byte-for-byte unchanged.
+            prefixed = apply_prefix(backend, list(texts), role="document")
+            return asyncio.run(backend.embed(prefixed))
 
         print(f"embedder: configured backend '{backend.name}'", flush=True)
         return _embed_via_backend

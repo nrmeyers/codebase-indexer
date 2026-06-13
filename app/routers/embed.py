@@ -95,7 +95,13 @@ async def embed(req: EmbedRequest) -> EmbedResponse:
 
     t0 = time.time()
     try:
-        vectors = await backend.embed([req.text])
+        # This endpoint returns *query* vectors for TheForge, so apply the
+        # local model's query prefix — symmetric with the document prefix the
+        # index pass uses; see app.embedders.prefixes. No-op for prod backends
+        # and symmetric models.
+        from app.embedders.prefixes import apply_prefix
+
+        vectors = await backend.embed(apply_prefix(backend, [req.text], role="query"))
     except EmbedderError as exc:
         logger.warning("embed: backend %s call failed: %s", backend.name, exc)
         raise HTTPException(

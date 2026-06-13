@@ -633,13 +633,16 @@ def _semantic_search_impl(
     from ..services import lm_studio          # local import keeps cold-start cheap
 
     def _embed_query(text: str) -> list[float]:
-        # Configured embedder primary — no asymmetric prefix; E5 models
-        # handle it natively. ``embed_text_sync`` returns the *full*
-        # 768-dim vector (it unwraps the single-element async batch
-        # internally), so no ``[0]`` indexing here. Regression guard from
-        # BUC-1570: indexing the result with ``[0]`` sliced one float out
-        # of the 768-dim vector and crashed downstream in ``_l2_normalise``.
-        vec = embed_text_sync(text)
+        # Configured embedder primary. ``role="query"`` lets the local
+        # backend prepend the model's query prefix (e5 ``query: ``,
+        # CodeRankEmbed instruction) — symmetric with the ``document`` prefix
+        # the index pass applies; see app.embedders.prefixes. No-op for prod
+        # backends and symmetric models. ``embed_text_sync`` returns the
+        # *full* 768-dim vector (it unwraps the single-element async batch
+        # internally), so no ``[0]`` indexing here — regression guard from
+        # BUC-1570, where ``[0]`` sliced one float out of the 768-dim vector
+        # and crashed downstream in ``_l2_normalise``.
+        vec = embed_text_sync(text, role="query")
         if vec:
             return vec
 
