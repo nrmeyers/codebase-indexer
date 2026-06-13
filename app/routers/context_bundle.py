@@ -1137,6 +1137,8 @@ def _hydrate_summary_snippets(
             kind = "Module"
         elif "::File::" in qn:
             kind = "File"
+        elif ".md::" in qn:
+            kind = "Doc"
         else:
             kind = "Class"
         header = f"# {kind} summary — {file_path}:{start}-{end}"
@@ -1145,6 +1147,80 @@ def _hydrate_summary_snippets(
             body += "\n# … (span truncated)"
         out[qn] = f"{header}\n{body}"
     return out
+
+
+def _lexical_seed_hits(repo_slug: str, query: str, limit: int) -> list[dict]:
+    """Top Tantivy BM25 hits for the raw task description.
+
+    Some facets are reachable by NO other leg: signal that lives only in
+    comments (e.g. an auth provider documented as "AAD"/"MSAL" in a file
+    header) embeds too weakly to seed semantically, and by-reference
+    wiring (``router.use(requireIdentity)``) produces no CALLS edge for
+    the graph walk. BM25 over the lexical index is the only surface that
+    sees raw token matches in bodies and comments.
+
+    Best-effort: any failure (missing index, tantivy unavailable) returns
+    ``[]`` so the bundle degrades to the semantic + boost legs.
+
+    Args:
+        repo_slug: Canonical repo slug (locates ``<slug>.tantivy/``).
+        query: Free-text task description, passed verbatim to BM25.
+        limit: Target seed count; up to ``2 * limit`` candidates return
+            so the caller can filter noise and still fill its slots.
+
+    Returns:
+        Dicts with ``qn`` / ``file_path`` / ``start_line`` / ``end_line``
+        / ``kind`` in BM25 rank order — the span metadata lets the caller
+        hydrate snippets for hits that exist only in the lexical index
+        (markdown chunks have no graph node and may have no duck row).
+    """
+    if limit <= 0 or not query.strip():
+        return []
+    try:
+        from .search import lexical_search  # noqa: PLC0415
+
+        # Over-fetch heavily: the caller filters noise/test paths after us
+        # and slices to ``limit``, and the diversity caps below skip hits.
+        resp = lexical_search(q=query, repo=repo_slug, limit=min(limit * 8, 60))
+
+        # Diversity caps. Markdown chunks (term-rich prose) BM25-dominate
+        # code symbols, and section chunks of one doc arrive as a block —
+        # without caps a single ADR fills every slot. Markdown stays
+        # valuable (it IS design context) but must not crowd out code.
+        per_file_cap = 2
+        md_quota = max(1, limit // 2)
+
+        out: list[dict] = []
+        seen: set[str] = set()
+        per_file: dict[str, int] = {}
+        n_md = 0
+        for h in resp.results:
+            qn = h.symbol_qname
+            if not qn or qn in seen:
+                continue
+            if per_file.get(h.file_path, 0) >= per_file_cap:
+                continue
+            is_md = h.symbol_kind == "MarkdownDoc"
+            if is_md and n_md >= md_quota:
+                continue
+            seen.add(qn)
+            per_file[h.file_path] = per_file.get(h.file_path, 0) + 1
+            if is_md:
+                n_md += 1
+            out.append(
+                {
+                    "qn": qn,
+                    "file_path": h.file_path,
+                    "start_line": h.start_line,
+                    "end_line": h.end_line,
+                    "kind": h.symbol_kind,
+                }
+            )
+            if len(out) >= limit * 2:
+                break
+        return out
+    except Exception:
+        return []
 
 
 # Per-intent retrieval parameters — a single knob per intent that the
@@ -1166,7 +1242,10 @@ _INTENT_PARAMS: dict[str, dict[str, int]] = {
     # caller_cap: design tasks need *wiring* context (who mounts/calls the
     # seeded handlers — middleware, auth guards, registration) that a
     # callee-only walk can never reach.
-    "design":     {"k": 12, "depth": 2, "module_limit": 15, "entrypoint_limit": 0, "caller_cap": 3},
+    # lexical_limit: BM25 seed leg — catches comment-only and identifier
+    # signal (AAD/MSAL in headers, by-reference middleware) invisible to
+    # both the dense embedding and the CALLS graph.
+    "design":     {"k": 12, "depth": 2, "module_limit": 15, "entrypoint_limit": 0, "caller_cap": 3, "lexical_limit": 6},
 }
 
 
@@ -1201,6 +1280,10 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     # final response can be ordered by relevance and surface per-symbol
     # scores (LE-182). Keyed by the qualified names actually chosen as seeds.
     seed_scores: dict[str, float] = {}
+    # Span metadata for lexical-leg seeds — survives the ``try`` so the
+    # snippet-hydration step below can render markdown hits that exist
+    # only in the Tantivy index (no graph node, no duck row).
+    lexical_seed_meta: dict[str, dict] = {}
 
     # 0. Classify retrieval intent and apply per-intent k/depth overrides.
     # The caller can pin an intent explicitly (e.g. an agent that already
@@ -1384,6 +1467,22 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
                 if not _is_noise(qn)
             ]
 
+        # Lexical (BM25) seed leg — raw token matches over bodies AND
+        # comments. The only leg that reaches comment-only facets and
+        # by-reference wiring (no CALLS edge, weak embedding).
+        lexical_hits: list[str] = []
+        _lex_limit = int(intent_params.get("lexical_limit", 0))
+        if _lex_limit > 0:
+            for _lh in _lexical_seed_hits(
+                repo_slug, req.task_description, _lex_limit,
+            ):
+                if len(lexical_hits) >= _lex_limit:
+                    break
+                if _is_noise(_lh["qn"]) or _is_test_or_script_path(_lh["qn"]):
+                    continue
+                lexical_hits.append(_lh["qn"])
+                lexical_seed_meta[_lh["qn"]] = _lh
+
         # Score-based seed merge (LE-180). Previously this prepended the
         # lexical boosts (exact-name / module-keyword / entry-point) AHEAD of
         # the semantic seeds and capped by arrival order. For a query like
@@ -1434,6 +1533,9 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         mid_semantic = semantic_ranked[mid_idx][1] if semantic_ranked else 1.0
         _BOOST_BASE = {
             "exact": top_semantic * 0.98,
+            # BM25 over the verbatim query is more query-specific than the
+            # keyword module round-robin — band it between exact and module.
+            "lexical": min(top_semantic * 0.975, mid_semantic * 1.0025),
             "module": min(top_semantic * 0.97, mid_semantic * 1.002),
             "entrypoint": min(top_semantic * 0.96, mid_semantic * 1.001),
         }
@@ -1446,6 +1548,9 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         _POSITION_DECAY = 1e-4
         for i, qn in enumerate(exact_hits):
             s = _BOOST_BASE["exact"] * (1.0 - i * _POSITION_DECAY)
+            scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), s)
+        for i, qn in enumerate(lexical_hits):
+            s = _BOOST_BASE["lexical"] * (1.0 - i * _POSITION_DECAY)
             scored_seeds[qn] = max(scored_seeds.get(qn, 0.0), s)
         for i, qn in enumerate(module_hits):
             s = _BOOST_BASE["module"] * (1.0 - i * _POSITION_DECAY)
@@ -1469,7 +1574,11 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         # Cap at 2× effective_k so a wide module boost on a small repo doesn't
         # blow up the BFS frontier.
         seed_cap = min(
-            max(effective_k, len(exact_hits) + len(module_hits) + len(entrypoint_hits)),
+            max(
+                effective_k,
+                len(exact_hits) + len(lexical_hits)
+                + len(module_hits) + len(entrypoint_hits),
+            ),
             effective_k * 2,
         )
         # Summary chunks augment, never displace. A topic with many matching
@@ -1507,14 +1616,22 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         # seed covering a query's transport aspect dropped to admit module
         # hits). Only when the hard cap leaves no headroom do guaranteed
         # boosts displace the ranked tail.
+        # Lexical hits get their own (small) guaranteed slice ahead of the
+        # module/entry-point quota: the entire point of the BM25 leg is that
+        # these symbols carry NO competitive semantic score, so a band alone
+        # cannot keep them inside the cap. The slice is additive — it never
+        # shrinks the existing module/entry-point quota.
         boost_ordered = module_hits + entrypoint_hits
-        if boost_ordered:
+        if boost_ordered or lexical_hits:
             quota = min(len(boost_ordered), max(seed_cap // 3, 6))
-            guaranteed = boost_ordered[:quota]
+            _lex_set = set(lexical_hits)
+            guaranteed = lexical_hits + [
+                qn for qn in boost_ordered[:quota] if qn not in _lex_set
+            ]
             gset = set(guaranteed)
             head = [qn for qn, _ in ranked if qn not in gset]
             hard_cap = effective_k * 2
-            head_keep = min(seed_cap, max(hard_cap - quota, 1))
+            head_keep = min(seed_cap, max(hard_cap - len(guaranteed), 1))
             seed_symbols = _select_seeds(head, head_keep) + guaranteed
 
         # Optional listwise rerank of the merged seed set (disabled by default).
@@ -1578,18 +1695,46 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     # 3. Fetch source snippets — sorted for deterministic output.
     source_snippets = _fetch_source_for_symbols(conn, sorted(all_symbols))
 
-    # 3b. Summary chunks (``::Class::summary`` / ``::Module::summary``) are
-    #     vector-store-only — the graph fetch above leaves them empty. Hydrate
-    #     their snippets from the duck row's file span so the bundle carries
-    #     the class/module surface, not just a label.
+    # 3b. Summary chunks (``::Class::summary`` / ``::Module::summary``) and
+    #     markdown doc chunks (``{slug}::{path}.md::{section}`` — lexical
+    #     seed leg) are vector-store-only — the graph fetch above leaves
+    #     them empty. Hydrate their snippets from the duck row's file span
+    #     so the bundle carries the text, not just a label.
     summary_qnames = [
         s for s in all_symbols
-        if _SUMMARY_QNAME_MARKER in s and not source_snippets.get(s)
+        if (_SUMMARY_QNAME_MARKER in s or ".md::" in s)
+        and not source_snippets.get(s)
     ]
     if summary_qnames:
         source_snippets.update(
             _hydrate_summary_snippets(repo_slug, summary_qnames)
         )
+
+    # 3c. Lexical-leg seeds that STILL have no snippet (markdown chunks
+    #     live only in the Tantivy index — no graph node, and repos
+    #     indexed before the markdown embed pass have no duck row either)
+    #     hydrate straight from the span metadata Tantivy stored.
+    for _qn, _meta in lexical_seed_meta.items():
+        if _qn not in all_symbols or source_snippets.get(_qn):
+            continue
+        _fp = _meta.get("file_path") or ""
+        if not _fp:
+            continue
+        _p = Path(_fp)
+        if not _p.is_absolute():
+            _p = Path(req.repo_path) / _p
+        try:
+            _lines = _p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        _sl = max(int(_meta.get("start_line") or 1), 1)
+        _el = min(int(_meta.get("end_line") or len(_lines)), len(_lines))
+        _span = _lines[_sl - 1 : _el]
+        _truncated = len(_span) > _SUMMARY_SNIPPET_MAX_LINES
+        _body = "\n".join(_span[:_SUMMARY_SNIPPET_MAX_LINES])
+        if _truncated:
+            _body += "\n# … (span truncated)"
+        source_snippets[_qn] = f"# Doc — {_fp}:{_sl}-{_el}\n{_body}"
 
     # 4. Token-budget truncation — drop deepest-hop symbols first when
     #    the bundle would exceed ``_TOKEN_BUDGET``.  Seeds (depth 0) are

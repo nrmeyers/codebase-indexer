@@ -25,10 +25,43 @@ from pathlib import Path
 from typing import Any
 
 
+# Leading comment block: parsers anchor a symbol's span at its declaration
+# line, cutting off the docblock ABOVE it (JSDoc, line-comment runs,
+# decorators). Those blocks carry the design intent ("callers should mount
+# requireIdentity first…") that retrieval consumers need, so snippets walk
+# upward over a contiguous comment/decorator run — bounded, never across a
+# blank-line gap to unrelated code.
+_LEADING_COMMENT_PREFIXES = ("//", "/*", "*", "#", '"""', "'''", "@")
+_LEADING_COMMENT_MAX_LINES = 30
+
+
+def _extend_to_leading_comment(lines: list[str], start: int) -> int:
+    """Return the 0-indexed start extended over a contiguous leading
+    comment/decorator block (bounded by ``_LEADING_COMMENT_MAX_LINES``)."""
+    i = start - 1
+    taken = 0
+    while i >= 0 and taken < _LEADING_COMMENT_MAX_LINES:
+        stripped = lines[i].strip()
+        if not stripped:
+            break
+        if not (
+            stripped.startswith(_LEADING_COMMENT_PREFIXES)
+            or stripped.endswith("*/")
+        ):
+            break
+        i -= 1
+        taken += 1
+    return i + 1
+
+
 def fetch_source(
     file_path: str, line_start: int | None, line_end: int | None
 ) -> str:
     """Read a source slice from disk between 1-indexed start/end lines.
+
+    The start extends upward over a contiguous leading comment/decorator
+    block (see ``_extend_to_leading_comment``) so docblocks above the
+    declaration line are part of the snippet.
 
     Args:
         file_path: Absolute path to the file.  Must exist on disk; this
@@ -51,6 +84,7 @@ def fetch_source(
         # 1-indexed → 0-indexed slice start; default line 1 when unset.
         start = max(0, (line_start or 1) - 1)
         end = line_end or (start + 1)
+        start = _extend_to_leading_comment(lines, start)
         return "\n".join(lines[start:end])
     except Exception:
         # Swallow — caller is expected to use whatever it can get.

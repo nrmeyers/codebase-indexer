@@ -1542,76 +1542,25 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     # -------------------------------------------------------------------
     # Phase 1.1 — Tantivy BM25 lexical index (best-effort)
     # -------------------------------------------------------------------
-    # After the parse pass commits LadybugDB we read the symbol metadata
-    # back out and mirror it into a per-repo Tantivy index.  Failures here
-    # are NON-FATAL — the lexical arm is additive; semantic + structural
-    # search still work fine without it.  See OPTIMIZATION_ROADMAP §1.1.
+    # After the parse pass commits LadybugDB we rebuild the per-repo
+    # Tantivy index from the graph + source text (qname + docstring +
+    # source span per symbol, plus file-header docs — see
+    # ``rebuild_lexical_index``). Failures here are NON-FATAL — the
+    # lexical arm is additive; semantic + structural search still work
+    # fine without it.  See OPTIMIZATION_ROADMAP §1.1.
+    # NOTE: this WIPES the index dir; the markdown mirror pass must stay
+    # sequenced after it (it is — see ``_index_markdown_corpus`` below).
     _phase_tantivy_start = time.monotonic()
     try:
-        from ..services.tantivy_index import TantivyIndex  # noqa: PLC0415
+        from ..services.tantivy_index import rebuild_lexical_index  # noqa: PLC0415
         from ..config import slugify_repo  # noqa: PLC0415
-        import real_ladybug as _lb_t  # type: ignore[import-untyped]  # noqa: PLC0415
-        from ..services.ladybug_buffer_pool import resolve_buffer_pool_size  # noqa: PLC0415
 
-        _t_db = _lb_t.Database(
-            repo_db_path, read_only=True, buffer_pool_size=resolve_buffer_pool_size()
+        # BUC-1580: ``repo_name`` is already canonical; pass through
+        # ``slugify_repo`` for the filesystem-safe charset guarantee.
+        _added = rebuild_lexical_index(
+            repo_db_path, repo, slugify_repo(repo_name), settings.LADYBUG_DB_DIR
         )
-        _t_conn = _lb_t.Connection(_t_db)
-        try:
-            _cypher = (
-                "MATCH (m:Module)-[:DEFINES]->(n:Function) "
-                "RETURN n.qualified_name AS qn, n.start_line AS sl, "
-                "n.end_line AS el, m.path AS p, n.docstring AS doc, "
-                "'Function' AS kind "
-                "UNION ALL "
-                "MATCH (m:Module)-[:DEFINES]->(:Class)-[:DEFINES_METHOD]->(n:Method) "
-                "RETURN n.qualified_name AS qn, n.start_line AS sl, "
-                "n.end_line AS el, m.path AS p, n.docstring AS doc, "
-                "'Method' AS kind"
-            )
-            _res = _t_conn.execute(_cypher)
-            _cols = _res.get_column_names()
-            # BUC-1580: ``repo_name`` is already canonical; pass through
-            # ``slugify_repo`` for the filesystem-safe charset guarantee.
-            _slug = slugify_repo(repo_name)
-            _t_idx = TantivyIndex(settings.LADYBUG_DB_DIR, _slug)
-            _added = 0
-            try:
-                while _res.has_next():
-                    _row = dict(zip(_cols, _res.get_next()))
-                    _qn = _row.get("qn") or ""
-                    if not _qn:
-                        continue
-                    # ``content`` is the BM25 corpus body — qname tokens +
-                    # docstring give the ranker enough signal without
-                    # paying the cost of full source I/O at index time.
-                    _content_parts = [_qn]
-                    _doc = _row.get("doc")
-                    if isinstance(_doc, str) and _doc:
-                        _content_parts.append(_doc)
-                    _t_idx.add(
-                        symbol_qname=str(_qn),
-                        file_path=str(_row.get("p") or ""),
-                        symbol_kind=str(_row.get("kind") or "Function"),
-                        content=" ".join(_content_parts),
-                        start_line=int(_row.get("sl") or 0),
-                        end_line=int(_row.get("el") or 0),
-                        repo=_slug,
-                    )
-                    _added += 1
-                _t_idx.commit()
-            finally:
-                _t_idx.close()
-            logger.info("tantivy.indexed repo=%s symbols=%d", repo_name, _added)
-        finally:
-            try:
-                _t_conn.close()
-            except Exception:
-                pass
-            try:
-                _t_db.close()
-            except Exception:
-                pass
+        logger.info("tantivy.indexed repo=%s docs=%d", repo_name, _added)
     except Exception as _exc:
         logger.warning("tantivy.index_pass_failed (non-fatal): %s", _exc)
     _metrics.record_index_phase("tantivy", time.monotonic() - _phase_tantivy_start)
