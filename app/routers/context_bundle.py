@@ -1403,23 +1403,17 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             rerank=bool(req.rerank),
         )
         # Adapt the SemanticResult list to the {qualified_name, score} shape
-        # the existing de-noise + ranking code consumes. Symbol-card hits
-        # ({qn}::Symbol::card) are folded into their PARENT here — a card is
-        # a vote for the real symbol, never a result of its own — merging by
-        # max score so the parent's body seeds/expands/emits, not the card.
-        _seed_best: dict[str, float] = {}
-        for r in _sem_resp.results:
-            qn = _card_parent(r.symbol)
-            sc = float(r.score)
-            if qn not in _seed_best or sc > _seed_best[qn]:
-                _seed_best[qn] = sc
-        seed_results = sorted(
-            (
-                {"qualified_name": qn, "score": sc}
-                for qn, sc in _seed_best.items()
-            ),
-            key=lambda d: -d["score"],
-        )
+        # the existing de-noise + ranking code consumes. ``_sem_resp.results``
+        # is already in final (fused/reranked) rank order — preserve it
+        # verbatim; re-sorting by the raw cosine ``.score`` would revert that
+        # ordering and change which symbols seed. Symbol-card hits are folded
+        # to their parent upstream in ``_semantic_search_impl``, so no card
+        # qname reaches here; ``_card_parent`` stays as defence-in-depth and
+        # is a no-op on real qnames.
+        seed_results = [
+            {"qualified_name": _card_parent(r.symbol), "score": r.score}
+            for r in _sem_resp.results
+        ]
         # Drop noise: test fixtures AND anonymous inline arrows/callbacks
         # (named `anonymous_LINE_COL` by the parser). Both have degenerate
         # embeddings that crowd real code out of the top-k window.
