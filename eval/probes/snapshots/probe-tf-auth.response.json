@@ -62,12 +62,12 @@
       "TheForge.src.services.result.Err"
     ],
     "TheForge.src.services.orchestrator.SkillsmithLRUCache.get": [
-      "TheForge.src.services.orchestrator.SkillsmithLRUCache.isCacheEnabled",
-      "TheForge.src.services.orchestrator.SkillsmithLRUCache.getCacheKey",
-      "TheForge.src.services.orchestrator.SkillsmithLRUCache.get",
       "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
       "TheForge.src.services.info-validation.extractReferences.push",
-      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete"
+      "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.isCacheEnabled",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.getCacheKey",
+      "TheForge.src.services.orchestrator.SkillsmithLRUCache.get"
     ],
     "TheForge.src.services.orchestrator.SkillsmithLRUCache.set": [
       "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has",
@@ -141,6 +141,13 @@
       "TheForge.src.services.result.Ok",
       "TheForge.src.services.result.Err"
     ],
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get": [
+      "TheForge.src.services.errors.createErrorEnvelope",
+      "TheForge.src.services.result.Ok",
+      "TheForge.src.services.result.Err",
+      "TheForge.src.services.user-draft-store.draftKey",
+      "TheForge.src.services.user-draft-store.createUserDraftStore.get"
+    ],
     "TheForge.src.services.util.ttl-cache.TtlMap.get": [
       "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
       "TheForge.src.services.agent-session-store.createAgentSessionStore.delete",
@@ -168,7 +175,6 @@
     "TheForge.src.services.info-validation.extractReferences.push": 0.40795,
     "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has": 0.203975,
     "TheForge.src.services.linear-dispatch.createLinearDispatcher.now": 0.40795,
-    "TheForge.src.services.linear.parseForgeMetadata.get": 0.7856649710000001,
     "TheForge.src.services.llm.model-router-client._get": 0.7966,
     "TheForge.src.services.orchestration.compose-and-execute.composeAbortSignals.abort": 0.39645,
     "TheForge.src.services.orchestration.manifest-client.extractCacheTokens": 0.8123,
@@ -200,6 +206,8 @@
     "TheForge.src.services.routes.linear-webhook::File::summary": 0.8102,
     "TheForge.src.services.service-auth.authHeaders": 0.40635,
     "TheForge.src.services.skillsmith-client._get": 0.786,
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get": 0.7857435768000001,
+    "TheForge.src.services.user-draft-store.draftKey": 0.39287178840000003,
     "TheForge.src.services.util.ttl-cache.TtlMap.get": 0.7996,
     "TheForge.tests.setup.json": 0.3983,
     "TheForge.tests.unit.services.orchestrator-qname-disk-fallback.test.join": 0.202575,
@@ -225,7 +233,6 @@
     "TheForge.src.services.info-validation.extractReferences.push": "",
     "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has": "",
     "TheForge.src.services.linear-dispatch.createLinearDispatcher.now": "",
-    "TheForge.src.services.linear.parseForgeMetadata.get": "",
     "TheForge.src.services.llm.model-router-client._get": "/**\n * Perform a GET against the Model Router and wrap the response.\n *\n * Error codes:\n * - `model_router_http_error`  \u2014 non-2xx upstream response\n * - `model_router_fetch_failed` \u2014 network-level failure\n */\nasync function _get<T>(path: string): Promise<Result<T, ErrorEnvelope>> {\n  try {\n    const res = await fetch(`${BASE_URL}${path}`, {\n      headers: { ...authHeaders() },\n    });\n    if (!res.ok) {\n      const text = await res.text().catch(() => res.statusText);\n      return Err(createErrorEnvelope('model_router_http_error', `${res.status} ${text}`));\n    }\n    return Ok((await res.json()) as T);\n  } catch (err) {\n    return Err(createErrorEnvelope('model_router_fetch_failed', err instanceof Error ? err.message : String(err)));\n  }\n}",
     "TheForge.src.services.orchestration.compose-and-execute.composeAbortSignals.abort": "",
     "TheForge.src.services.orchestration.manifest-client.extractCacheTokens": "/**\n * Phase 3.1 \u2014 pull Anthropic-style cache token counts from the\n * gateway usage object. Manifest 6.1.0 surfaces these as\n * `cache_read_tokens` / `cache_creation_tokens`; OpenAI-compat\n * upstreams use `prompt_tokens_details.cached_tokens`. Returns\n * `undefined` for absent fields so callers can omit them rather than\n * write `0` (which would falsely imply \"we measured zero\" rather than\n * \"we didn't measure\").\n */\nfunction extractCacheTokens(usage: ManifestUsage): {\n  cacheReadTokens?: number;\n  cacheCreationTokens?: number;\n} {\n  const out: { cacheReadTokens?: number; cacheCreationTokens?: number } = {};\n  const read = usage.cache_read_tokens ?? usage.prompt_tokens_details?.cached_tokens;\n  if (typeof read === 'number') out.cacheReadTokens = read;\n  if (typeof usage.cache_creation_tokens === 'number') {\n    out.cacheCreationTokens = usage.cache_creation_tokens;\n  }\n  return out;\n}",
@@ -257,6 +264,8 @@
     "TheForge.src.services.routes.linear-webhook::File::summary": "# File summary \u2014 /home/nmeyers/dev/claude/TheForge/src/services/routes/linear-webhook.ts:1-23\n/**\n * @file linear-webhook.ts \u2014 BUC-1597 (Phase 3 A.2) Linear webhook receiver.\n *\n * Mounted at `/api/linear/webhook`. HMAC-SHA256 verifies the\n * `linear-signature` header against the raw request body using the shared\n * secret from `LINEAR_WEBHOOK_SECRET`. On a valid signature AND a ticket\n * that JUST transitioned into a \"Ready for Agent\" state, enqueues the\n * ticket onto the in-process `LinearDispatcher` (which then drains via\n * `setImmediate` so this handler never blocks Linear's retry budget).\n *\n * IMPORTANT: This route MUST receive the raw request body for HMAC\n * verification. Mount with `express.raw({ type: 'application/json' })`\n * BEFORE the global `express.json()` middleware \u2014 see api-server.ts.\n *\n * Audit events emitted (see audit-trail.ts for type definitions):\n *  - `linear.webhook.received`              every accepted delivery\n *  - `linear.webhook.dispatch_queued`       successful enqueue\n *  - `linear.webhook.dispatch_rejected`     401 + bad_signature\n *                                           200 + wrong_state\n *                                           200 + duplicate\n *\n * Validates: BUC-1597 \u2014 Linear webhook receiver behind LINEAR_WEBHOOK_SECRET.\n */",
     "TheForge.src.services.service-auth.authHeaders": "/**\n * Returns the `Authorization` header record to include in every outbound\n * cross-service fetch request.\n *\n * - Dev mode: returns `{}` (empty) \u2014 services accept any request on localhost.\n * - Prod mode: returns `{ Authorization: 'Bearer <token>' }`.\n *\n * Also supports the alternate `X-Forge-Service-Token` header for upstream\n * proxies that reserve the `Authorization` header; pass `useAlternate: true`\n * to get that form instead.\n *\n * @param useAlternate When true, returns the alternate header instead of\n *   `Authorization`. Default: false.\n */\nexport function authHeaders(useAlternate = false): Record<string, string> {\n  if (!TOKEN) return {};\n  if (useAlternate) {\n    return { 'X-Forge-Service-Token': TOKEN };\n  }\n  return { Authorization: `Bearer ${TOKEN}` };\n}",
     "TheForge.src.services.skillsmith-client._get": "/**\n * Perform a GET against Skillsmith and wrap the response.\n *\n * Error codes:\n * - `skillsmith_http_error`   \u2014 non-2xx upstream response\n * - `skillsmith_fetch_failed` \u2014 network-level failure\n */\nasync function _get<T>(path: string): Promise<Result<T, ErrorEnvelope>> {\n  try {\n    const res = await fetch(`${BASE_URL}${path}`, {\n      headers: { ...authHeaders() },\n    });\n    if (!res.ok) {\n      const text = await res.text().catch(() => res.statusText);\n      return Err(createErrorEnvelope('skillsmith_http_error', `${res.status} ${text}`));\n    }\n    return Ok((await res.json()) as T);\n  } catch (err) {\n    return Err(createErrorEnvelope('skillsmith_fetch_failed', err instanceof Error ? err.message : String(err)));\n  }\n}",
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get": "",
+    "TheForge.src.services.user-draft-store.draftKey": "function draftKey(userId: string, taskId: string, artifactType: ArtifactType): string {\n  return `${userId}::${taskId}::${artifactType}`;\n}",
     "TheForge.src.services.util.ttl-cache.TtlMap.get": "  /** Lookup. Returns undefined on miss or TTL expiry (expired entry is dropped). */\n  get(key: string): V | undefined {\n    const entry = this.store.get(key);\n    if (!entry) return undefined;\n    if (entry.expiresAt <= Date.now()) {\n      this.store.delete(key);\n      return undefined;\n    }\n    return entry.value;\n  }",
     "TheForge.tests.setup.json": "",
     "TheForge.tests.unit.services.orchestrator-qname-disk-fallback.test.join": "",
@@ -291,7 +300,7 @@
     "TheForge.src.services.orchestration.tools.get-callees.parseInput",
     "TheForge.src.services.orchestration.tools.get-callees.handleGetCallees",
     "TheForge.src.services.skillsmith-client._get",
-    "TheForge.src.services.linear.parseForgeMetadata.get",
+    "TheForge.src.services.user-draft-store.createUserDraftStore.get",
     "TheForge.src.services.info-validation.extractReferences.push",
     "TheForge.src.services.linear-dispatch.createLinearDispatcher.now",
     "TheForge.src.services.orchestrator.SkillsmithLRUCache.set",
@@ -312,6 +321,7 @@
     "TheForge.tests.utils.adapter-contract.stubFetchHttpError.text",
     "TheForge.src.services.orchestration.compose-and-execute.composeAbortSignals.abort",
     "TheForge.src.services.retrieval.code-indexer-client.getCallees",
+    "TheForge.src.services.user-draft-store.draftKey",
     "TheForge.src.services.knowledge-graph-generator.classifyCategoryDeterministic.has",
     "TheForge.src.services.auth.session.getSecretKey",
     "TheForge.tests.unit.services.orchestrator-qname-disk-fallback.test.join",
@@ -324,5 +334,5 @@
     "TheForge.src.services.error-guidance.replaceContextPlaceholders",
     "TheForge.tests.unit.utils.adapter-contract.test.call"
   ],
-  "total_tokens": 7050
+  "total_tokens": 7085
 }

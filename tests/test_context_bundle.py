@@ -533,3 +533,98 @@ def test_context_bundle_lexical_seed_leg(tmp_path: Path) -> None:
 
     assert resp2.status_code == 200
     assert not lex_mock_sym.called
+
+
+def test_expand_call_graph_excludes_test_callees() -> None:
+    """exclude_test_callees drops test-path symbols from the OUTBOUND callee
+    walk (previously only inbound callers were filtered, so design bundles
+    flooded with tests.* symbols that carry no design signal)."""
+    from app.routers.context_bundle import _expand_call_graph
+
+    edges_out = {
+        "app.svc.run": [
+            "app.svc.helper",
+            "app.svc.helper.test",  # endswith .test → filtered
+            "tests.unit.svc.test.fake",  # .test. marker → filtered
+        ],
+    }
+
+    conn = MagicMock()
+
+    def _execute(query: str, params: dict[str, str]):  # type: ignore[no-untyped-def]
+        if "-[:CALLS]->(n" in query:  # inbound caller lookup — none here
+            return []
+        return [{"callee": c} for c in edges_out.get(params["qn"], [])]
+
+    conn.execute.side_effect = _execute
+    with patch(
+        "app.routers.context_bundle._result_to_rows", side_effect=lambda rows: rows
+    ):
+        kept, _, _ = _expand_call_graph(
+            conn, ["app.svc.run"], 1, exclude_test_callees=True
+        )
+    assert "app.svc.helper" in kept
+    assert "app.svc.helper.test" not in kept
+    assert "tests.unit.svc.test.fake" not in kept
+
+    # Default keeps the old behaviour (test callees pass through).
+    with patch(
+        "app.routers.context_bundle._result_to_rows", side_effect=lambda rows: rows
+    ):
+        kept0, _, _ = _expand_call_graph(conn, ["app.svc.run"], 1)
+    assert "tests.unit.svc.test.fake" in kept0
+
+
+def test_truncate_to_budget_charges_for_symbol_names() -> None:
+    """Empty-snippet symbols are not free riders: the refill pass must charge
+    each survivor for its qualified-name term, so a bundle of name-only
+    neighbours cannot balloon past the budget at zero cost."""
+    from app.routers.context_bundle import _CHARS_PER_TOKEN, _truncate_to_budget
+
+    seed = "app.svc.seed"
+    # 200 name-only neighbours (no snippet), each a long FQN.
+    neighbours = [f"app.pkg.module{i}.func_with_a_longish_name{i}" for i in range(200)]
+    all_symbols = {seed, *neighbours}
+    # Seed carries a real snippet; neighbours carry nothing.
+    source_snippets = {seed: "x" * 400}
+    source_snippets.update({n: "" for n in neighbours})
+    symbol_depth = {seed: 0}
+    symbol_depth.update({n: 1 for n in neighbours})
+
+    # Budget small enough that name terms alone matter.
+    budget = 100
+    kept, snippets, _, total = _truncate_to_budget(
+        all_symbols=all_symbols,
+        source_snippets=source_snippets,
+        call_graph={seed: neighbours},
+        symbol_depth=symbol_depth,
+        budget=budget,
+        scores={seed: 1.0, **{n: 0.5 for n in neighbours}},
+    )
+    # Name terms are charged → not all 200 name-only neighbours survive.
+    assert len(kept) < len(all_symbols)
+    # The actual cost accounting includes name length, so total reflects it.
+    name_cost = sum(len(s) for s in kept) // _CHARS_PER_TOKEN
+    assert total >= name_cost // 2  # sanity: names contribute to the estimate
+
+
+def test_classify_intent_imperative_feature_verbs() -> None:
+    """The design classifier fires on the imperative feature verbs used across
+    the benchmark (persist/delete/stream/record/re-ingest…), and design wins
+    over conceptual when an imperative leads (LE design-context gaps)."""
+    from app.routers.context_bundle import _classify_intent
+
+    design_queries = [
+        "Persist per-job embed-pass progress across restarts",
+        "Delete a repo's S3 snapshots when the repo is removed",
+        "Stream embed-pass progress over the websocket",
+        "Re-ingest only changed files into the graph",
+        "Record governance compliance scores in the audit trail",
+        "Recompute PageRank centrality incrementally",
+        "Add an endpoint returning an architecture overview for a repo",
+    ]
+    for q in design_queries:
+        assert _classify_intent(q) == "design", q
+
+    # Non-imperative architecture question stays conceptual.
+    assert _classify_intent("What is the architecture of the indexer?") == "conceptual"

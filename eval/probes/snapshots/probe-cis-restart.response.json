@@ -46,9 +46,9 @@
       "code-indexer-service.app.services.jobs_store._row_get"
     ],
     "code-indexer-service.app.services.jobs_store.clear_terminal": [
-      "code-indexer-service.tests.test_watch_manager._FakeObserver.join",
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",
-      "code-indexer-service.app.services.jobs_store._require_conn"
+      "code-indexer-service.app.services.jobs_store._require_conn",
+      "code-indexer-service.tests.test_watch_manager._FakeObserver.join"
     ],
     "code-indexer-service.app.services.jobs_store.find_active_for_repo": [
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",
@@ -85,29 +85,10 @@
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",
       "code-indexer-service.app.services.jobs_store._require_conn"
     ],
-    "code-indexer-service.app.services.lm_studio._env": [
-      "code-indexer-service.app.cli.client.IndexerClient.get"
-    ],
-    "code-indexer-service.app.services.lm_studio._log_backend_once": [
-      "code-indexer-service.app.services.lm_studio.base_url",
-      "code-indexer-service.app.services.lm_studio.rerank_model_hint"
-    ],
-    "code-indexer-service.app.services.lm_studio.base_url": [
-      "code-indexer-service.app.services.lm_studio._env"
-    ],
     "code-indexer-service.app.services.lm_studio.chat_complete": [
-      "code-indexer-service.app.cli.client.IndexerClient.get",
-      "code-indexer-service.app.services.lm_studio.request_timeout_s",
-      "code-indexer-service.app.services.lm_studio._post_json",
       "code-indexer-service.app.services.lm_studio.base_url",
       "code-indexer-service.app.services.lm_studio.rerank_model_hint",
-      "code-indexer-service.app.services.lm_studio._log_backend_once"
-    ],
-    "code-indexer-service.app.services.lm_studio.request_timeout_s": [
-      "code-indexer-service.app.services.lm_studio._env"
-    ],
-    "code-indexer-service.app.services.lm_studio.rerank_model_hint": [
-      "code-indexer-service.app.services.lm_studio._env"
+      "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.services.reranker._build_prompt": [
       "code-indexer-service.tests.test_watch_manager._FakeObserver.join",
@@ -132,7 +113,6 @@
       "code-indexer-service.app.services.lm_studio.chat_complete"
     ],
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.add": [
-      "code-indexer-service.app.services.tantivy_index._load_tantivy",
       "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer"
     ],
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.commit": [
@@ -152,9 +132,9 @@
       "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._key"
     ],
     "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute": [
+      "code-indexer-service.app.cli.main.search",
       "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get",
-      "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys",
-      "code-indexer-service.app.cli.main.search"
+      "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys"
     ]
   },
   "scores": {
@@ -186,12 +166,8 @@
     "code-indexer-service.app.services.jobs_store.request_cancel": 0.38825,
     "code-indexer-service.app.services.jobs_store.sweep_interrupted": 0.7904,
     "code-indexer-service.app.services.jobs_store.touch_heartbeat": 0.38935,
-    "code-indexer-service.app.services.lm_studio._env": 0.1912,
-    "code-indexer-service.app.services.lm_studio._log_backend_once": 0.1912,
-    "code-indexer-service.app.services.lm_studio._post_json": 0.1912,
     "code-indexer-service.app.services.lm_studio.base_url": 0.3824,
     "code-indexer-service.app.services.lm_studio.chat_complete": 0.3824,
-    "code-indexer-service.app.services.lm_studio.request_timeout_s": 0.1912,
     "code-indexer-service.app.services.lm_studio.rerank_model_hint": 0.3824,
     "code-indexer-service.app.services.reranker._build_prompt": 0.3824,
     "code-indexer-service.app.services.reranker._get_executor": 0.3824,
@@ -202,7 +178,6 @@
     "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer": 0.19405,
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.add": 0.3881,
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.commit": 0.7752,
-    "code-indexer-service.app.services.tantivy_index._load_tantivy": 0.19405,
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get": 0.1976,
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.items": 0.3881,
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys": 0.1976,
@@ -241,12 +216,8 @@
     "code-indexer-service.app.services.jobs_store.request_cancel": "def request_cancel(job_id: str) -> bool:\n    \"\"\"Set ``cancel_requested=1``. Returns True iff the row exists and was\n    in an active (non-terminal) state.\"\"\"\n    conn = _require_conn()\n    now = time.time()\n    with _lock:\n        cur = conn.execute(\n            \"\"\"\n            UPDATE jobs SET cancel_requested = 1, updated_at = ?\n            WHERE job_id = ? AND status IN ('queued','running')\n            \"\"\",\n            (now, job_id),\n        )\n        return cur.rowcount > 0",
     "code-indexer-service.app.services.jobs_store.sweep_interrupted": "def sweep_interrupted(worker_token: str) -> int:\n    \"\"\"Flag any active rows from a previous process as ``interrupted``.\n\n    Called from ``app/main.py``'s ``lifespan`` startup. A fresh\n    ``WORKER_TOKEN`` is generated per-process; rows whose stored\n    ``worker_token`` differs (or is NULL \u2014 pre-Phase-2 rows) are owned\n    by a now-dead process and must be retired before any new work\n    starts.\n    \"\"\"\n    conn = _require_conn()\n    now = time.time()\n    with _lock:\n        cur = conn.execute(\n            \"\"\"\n            UPDATE jobs SET\n              status = 'interrupted',\n              error = COALESCE(error, 'service restart'),\n              updated_at = ?,\n              finished_at = COALESCE(finished_at, ?)\n            WHERE status IN ('queued','running')\n              AND (worker_token IS NULL OR worker_token != ?)\n            \"\"\",\n            (now, now, worker_token),\n        )\n        return int(cur.rowcount)",
     "code-indexer-service.app.services.jobs_store.touch_heartbeat": "def touch_heartbeat(job_id: str) -> None:\n    \"\"\"Advance only the ``updated_at`` liveness clock of a running job.\n\n    Used by the writing-phase heartbeat (app.routers.index) to prove a job\n    that is blocked in a long, callback-silent K\u00f9zu bulk write is still alive,\n    WITHOUT mutating phase / progress_pct (which the real progress callback\n    owns). list_stale_running_jobs() keys staleness on ``updated_at``, so a\n    bare timestamp bump is sufficient to keep the reconciler from false-killing\n    a healthy slow write. No-op (and never raises) if the row is not currently\n    running \u2014 a terminal/absent job has no liveness clock to advance.\n    \"\"\"\n    conn = _require_conn()\n    with _lock:\n        conn.execute(\n            \"UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'running'\",\n            (time.time(), job_id),\n        )",
-    "code-indexer-service.app.services.lm_studio._env": "def _env(name: str, default: str = \"\") -> str:\n    return (os.environ.get(name) or default).strip()",
-    "code-indexer-service.app.services.lm_studio._log_backend_once": "@lru_cache(maxsize=1)\ndef _log_backend_once() -> None:\n    \"\"\"Emit a one-line backend summary the first time anyone asks.\"\"\"\n    if is_available():\n        logger.info(\n            \"LM Studio: %s \u2014 embed=%s rerank=%s\",\n            base_url(),\n            resolve_model(embed_model_hint()) or \"(none)\",\n            resolve_model(rerank_model_hint()) or \"(none)\",\n        )\n    else:\n        logger.info(\"LM Studio: disabled or unreachable \u2014 using in-process fallback\")",
-    "code-indexer-service.app.services.lm_studio._post_json": "def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:\n    \"\"\"POST ``payload`` as JSON, return the parsed JSON response.\n\n    Raises ``RuntimeError`` for any non-200, network failure, or parse error.\n    Callers should catch broadly and treat any exception as \"LM Studio is\n    not available, fall back\".\n    \"\"\"\n    body = json.dumps(payload).encode(\"utf-8\")\n    req = urllib.request.Request(\n        url,\n        data=body,\n        headers={\"Content-Type\": \"application/json\"},\n        method=\"POST\",\n    )\n    try:\n        with urllib.request.urlopen(req, timeout=timeout) as resp:\n            return json.loads(resp.read().decode(\"utf-8\"))\n    except urllib.error.HTTPError as exc:\n        # LM Studio returns a JSON body on 4xx/5xx that explains *why* the\n        # request was rejected (e.g. context-window overflow, unknown\n        # ``chat_template_kwargs``, malformed messages).  The default\n        # ``HTTPError`` repr drops that body, so callers see only \"HTTP 400:\n        # Bad Request\" and have nothing actionable to debug.  Surface up to\n        # the first 400 chars of the response body so the rerank-fallback\n        # log line is useful instead of opaque.\n        try:\n            err_body = exc.read().decode(\"utf-8\", errors=\"replace\")[:400]\n        except Exception:\n            err_body = \"\"\n        suffix = f\" \u2014 {err_body}\" if err_body else \"\"\n        raise RuntimeError(f\"LM Studio HTTP {exc.code}: {exc.reason}{suffix}\") from exc\n    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:\n        raise RuntimeError(f\"LM Studio request failed: {exc}\") from exc",
     "code-indexer-service.app.services.lm_studio.base_url": "def base_url() -> str:\n    \"\"\"Return the configured LM Studio base URL, or empty string when disabled.\n\n    Empty string is the canonical \"disabled\" signal \u2014 every other function\n    in this module short-circuits when ``base_url() == \"\"``.\n    \"\"\"\n    return _env(\"LM_STUDIO_URL\").rstrip(\"/\")",
     "code-indexer-service.app.services.lm_studio.chat_complete": "def chat_complete(\n    messages: list[dict[str, str]],\n    *,\n    model_hint: str | None = None,\n    max_tokens: int = 512,\n    temperature: float = 0.0,\n    chat_template_kwargs: dict[str, Any] | None = None,\n) -> str | None:\n    \"\"\"Send a chat-completion request, return the assistant message content.\n\n    Returns ``None`` on any failure.  Used by ``reranker.py`` for listwise\n    permutation generation; not exposed as a general-purpose chat API.\n\n    Args:\n        messages: OpenAI-format chat messages.\n        model_hint: Substring of a loaded LM Studio model id; falls back\n            to ``rerank_model_hint()`` when ``None``.\n        max_tokens: Token budget for the assistant's reply.  Be generous\n            for thinking-mode models (Qwen3, DeepSeek-R1) \u2014 the reasoning\n            channel consumes from the same budget as ``content``.\n        temperature: Sampling temperature.  ``0.0`` for deterministic\n            permutations.\n        chat_template_kwargs: Pass-through to LM Studio's chat-template\n            renderer.  Used to disable Qwen3's reasoning mode via\n            ``{\"enable_thinking\": False}`` \u2014 saves the 200-500 reasoning\n            tokens that would otherwise consume the budget.  Models that\n            don't recognise the kwarg ignore it harmlessly.\n    \"\"\"\n    _log_backend_once()\n    url = base_url()\n    if not url:\n        return None\n    model = resolve_model(model_hint or rerank_model_hint())\n    if not model:\n        return None\n    payload: dict[str, Any] = {\n        \"model\": model,\n        \"messages\": messages,\n        \"temperature\": temperature,\n        \"max_tokens\": max_tokens,\n        \"stream\": False,\n    }\n    if chat_template_kwargs:\n        payload[\"chat_template_kwargs\"] = chat_template_kwargs\n    try:\n        data = _post_json(f\"{url}/v1/chat/completions\", payload, request_timeout_s())\n        choices = data.get(\"choices\") or []\n        if not choices:\n            return None\n        msg = choices[0].get(\"message\") or {}\n        content = msg.get(\"content\")\n        # Thinking models (Qwen3, DeepSeek-R1, \u2026) emit a separate\n        # ``reasoning_content`` channel and ``content`` may be empty if the\n        # model spent its whole token budget reasoning.  Fall back to the\n        # reasoning channel so the bracketed permutation is still parseable\n        # downstream \u2014 the rerank parser is tolerant of surrounding prose.\n        if isinstance(content, str) and content.strip():\n            return content\n        reasoning = msg.get(\"reasoning_content\")\n        if isinstance(reasoning, str) and reasoning.strip():\n            return reasoning\n        return None\n    except Exception as exc:\n        logger.warning(\"LM Studio chat_complete failed (%s) \u2014 skipping rerank\", exc)\n        return None",
-    "code-indexer-service.app.services.lm_studio.request_timeout_s": "def request_timeout_s() -> float:\n    \"\"\"Total timeout for any single HTTP call to LM Studio.\"\"\"\n    try:\n        return max(1.0, float(_env(\"LM_STUDIO_TIMEOUT\", \"30\")))\n    except ValueError:\n        return 30.0",
     "code-indexer-service.app.services.lm_studio.rerank_model_hint": "def rerank_model_hint() -> str:\n    \"\"\"Substring hint used to pick the reranker model from /v1/models.\n\n    Defaults to ``\"CodeRankLLM\"`` (Nomic's Qwen2.5-Coder-7B fine-tune)\n    but the rerank prompt format works with any instruction-following\n    LLM \u2014 Qwen3, Llama 3, Mistral, etc.  Set this to whatever model id\n    you have loaded; the model only needs to follow the bracketed-\n    permutation output format the system prompt asks for.\n    \"\"\"\n    return _env(\"LM_STUDIO_RERANK_MODEL\", \"CodeRankLLM\")",
     "code-indexer-service.app.services.reranker._build_prompt": "def _build_prompt(query: str, candidates: list[Candidate]) -> str:\n    \"\"\"Render the listwise rerank prompt.\n\n    Each candidate gets a 1-indexed bracket label (matching the model's\n    expected output format), the qualified name as the salient identifier,\n    and a truncated snippet so the LLM has enough signal to rank without\n    blowing the context window.\n    \"\"\"\n    lines = [f\"Query: {query}\", \"\", \"Candidates:\"]\n    for i, c in enumerate(candidates, start=1):\n        qn = c.get(\"qualified_name\") or c.get(\"symbol\") or c.get(\"node_id\") or f\"candidate_{i}\"\n        snippet = c.get(\"source\") or c.get(\"snippet\") or \"\"\n        if isinstance(snippet, str) and len(snippet) > MAX_SNIPPET_CHARS:\n            snippet = snippet[:MAX_SNIPPET_CHARS] + \"\u2026\"\n        # Strip leading whitespace so multi-line snippets stay legible\n        # without bloating the prompt with redundant indentation.\n        snippet = \"\\n\".join(line.rstrip() for line in str(snippet).splitlines()).strip()\n        lines.append(f\"[{i}] {qn}\")\n        if snippet:\n            lines.append(snippet)\n        lines.append(\"\")\n    lines.append(\n        f\"Rank the {len(candidates)} candidates from most to least relevant. \"\n        \"Output only a permutation like [3] > [1] > [2].\"\n    )\n    return \"\\n\".join(lines)",
     "code-indexer-service.app.services.reranker._get_executor": "def _get_executor() -> concurrent.futures.ThreadPoolExecutor:\n    global _executor\n    if _executor is None:\n        _executor = concurrent.futures.ThreadPoolExecutor(\n            max_workers=1, thread_name_prefix=\"rerank\"\n        )\n    return _executor",
@@ -257,7 +228,6 @@
     "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer": "    def _ensure_writer(self) -> Any | None:\n        \"\"\"Lazily allocate the index writer (single-writer invariant).\n\n        Returns ``None`` when the index is unavailable (caller should no-op).\n        \"\"\"\n        if self._unavailable or self._index is None:\n            return None\n        if self._writer is None:\n            try:\n                # heap_size = 50 MiB \u2014 comfortable for repos up to ~100k docs;\n                # tantivy auto-flushes when this fills up.\n                self._writer = self._index.writer(50_000_000)\n            except Exception as exc:\n                logger.warning(\"tantivy.writer failed (%s) \u2014 disabled\", exc)\n                self._unavailable = True\n                return None\n        return self._writer",
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.add": "    def add(\n        self,\n        *,\n        symbol_qname: str,\n        file_path: str,\n        symbol_kind: str,\n        content: str,\n        start_line: int,\n        end_line: int,\n        repo: str,\n    ) -> bool:\n        \"\"\"Add a single symbol document to the index.\n\n        All fields are required; supply empty strings / 0 for unknown values\n        rather than ``None``.  Returns ``True`` on success, ``False`` when\n        the index is unavailable (best-effort contract \u2014 never raises).\n\n        The writer must be ``commit()``-ed for these docs to become visible\n        to searchers.\n        \"\"\"\n        if self._unavailable:\n            return False\n        tantivy = _load_tantivy()\n        if tantivy is None:\n            return False\n        with self._lock:\n            writer = self._ensure_writer()\n            if writer is None:\n                return False\n            try:\n                doc = tantivy.Document()\n                doc.add_text(\"symbol_qname\", symbol_qname or \"\")\n                doc.add_text(\"file_path\", file_path or \"\")\n                doc.add_text(\"symbol_kind\", symbol_kind or \"\")\n                doc.add_text(\"content\", content or \"\")\n                doc.add_unsigned(\"start_line\", int(start_line) if start_line else 0)\n                doc.add_unsigned(\"end_line\", int(end_line) if end_line else 0)\n                doc.add_text(\"repo\", repo or \"\")\n                writer.add_document(doc)\n                return True\n            except Exception as exc:\n                logger.debug(\"tantivy.add failed for %s: %s\", symbol_qname, exc)\n                return False",
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.commit": "    def commit(self) -> bool:\n        \"\"\"Flush pending writes and close the writer (so readers see them).\"\"\"\n        if self._unavailable or self._writer is None:\n            return False\n        with self._lock:\n            try:\n                self._writer.commit()\n                # Drop the writer so a future add() opens a fresh one;\n                # tantivy enforces single-writer-at-a-time.\n                self._writer = None\n                if self._index is not None:\n                    try:\n                        self._index.reload()\n                    except Exception:\n                        # reload() failure is non-fatal \u2014 readers can still\n                        # open a searcher, they just may miss the very latest\n                        # docs until a subsequent reload.\n                        pass\n                return True\n            except Exception as exc:\n                logger.warning(\"tantivy.commit failed: %s\", exc)\n                return False",
-    "code-indexer-service.app.services.tantivy_index._load_tantivy": "def _load_tantivy() -> Any | None:\n    \"\"\"Return the imported ``tantivy`` module or ``None`` once a load fails.\n\n    The first failure latches ``_tantivy_unavailable`` so subsequent calls\n    short-circuit without paying the import-error cost on every request.\n    \"\"\"\n    global _tantivy, _tantivy_unavailable  # noqa: PLW0603\n    if _tantivy_unavailable:\n        return None\n    if _tantivy is not None:\n        return _tantivy\n    try:\n        import tantivy  # type: ignore[import-not-found]\n    except ImportError as exc:\n        logger.warning(\"tantivy unavailable (%s) \u2014 lexical arm disabled\", exc)\n        _tantivy_unavailable = True\n        return None\n    _tantivy = tantivy\n    return tantivy",
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get": "    def get(\n        self, qualified_name: QualifiedName, default: NodeType | None = None\n    ) -> NodeType | None:\n        return self._entries.get(qualified_name, default)",
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.items": "    def items(self) -> ItemsView[QualifiedName, NodeType]:\n        return self._entries.items()",
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys": "    def keys(self) -> KeysView[QualifiedName]:\n        return self._entries.keys()",
@@ -315,12 +285,7 @@
     "code-indexer-service.app.cli.client.IndexerClient._wrap",
     "code-indexer-service.app.services.jobs_store._record_event_unlocked",
     "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer",
-    "code-indexer-service.app.services.tantivy_index._load_tantivy",
-    "code-indexer-service.app.metrics.is_enabled",
-    "code-indexer-service.app.services.lm_studio._env",
-    "code-indexer-service.app.services.lm_studio._log_backend_once",
-    "code-indexer-service.app.services.lm_studio._post_json",
-    "code-indexer-service.app.services.lm_studio.request_timeout_s"
+    "code-indexer-service.app.metrics.is_enabled"
   ],
-  "total_tokens": 11991
+  "total_tokens": 11988
 }
