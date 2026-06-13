@@ -5,11 +5,7 @@
       "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.cli.main.search": [
-      "code-indexer-service.app.cli.client.IndexerClient.get",
-      "code-indexer-service.app.cli.main._bail"
-    ],
-    "code-indexer-service.app.metrics.record_dedupe_409": [
-      "code-indexer-service.app.metrics.is_enabled"
+      "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.routers.index._delete_jobs_for_repo": [
       "code-indexer-service.app.services.jobs_store.delete_by_repo"
@@ -40,9 +36,9 @@
       "code-indexer-service.app.cli.client.IndexerClient.get"
     ],
     "code-indexer-service.app.routers.index.get_index_status": [
+      "code-indexer-service.app.cli.client.IndexerClient.get",
       "code-indexer-service.app.services.jobs_store.get_job",
-      "code-indexer-service.app.routers.index._parse_embed_progress",
-      "code-indexer-service.app.cli.client.IndexerClient.get"
+      "code-indexer-service.app.routers.index._parse_embed_progress"
     ],
     "code-indexer-service.app.routers.index.start_index": [
       "code-indexer-service.app.metrics.record_dedupe_409",
@@ -58,9 +54,9 @@
       "code-indexer-service.app.services.jobs_store.record_event"
     ],
     "code-indexer-service.app.services.jobs_store.clear_terminal": [
-      "code-indexer-service.tests.test_watch_manager._FakeObserver.join",
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",
-      "code-indexer-service.app.services.jobs_store._require_conn"
+      "code-indexer-service.app.services.jobs_store._require_conn",
+      "code-indexer-service.tests.test_watch_manager._FakeObserver.join"
     ],
     "code-indexer-service.app.services.jobs_store.create_job": [
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",
@@ -110,10 +106,6 @@
       "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute",
       "code-indexer-service.app.services.jobs_store._require_conn"
     ],
-    "code-indexer-service.app.services.tantivy_index.TantivyIndex.add": [
-      "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer",
-      "code-indexer-service.app.services.tantivy_index._load_tantivy"
-    ],
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get": [
       "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get"
     ],
@@ -124,7 +116,6 @@
       "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys"
     ],
     "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache.set": [
-      "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._flush",
       "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._key"
     ],
     "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute": [
@@ -136,9 +127,7 @@
   "scores": {
     "code-indexer-service.app.cli.client.IndexerClient._wrap": 0.2123,
     "code-indexer-service.app.cli.client.IndexerClient.get": 0.4246,
-    "code-indexer-service.app.cli.main._bail": 0.1039375,
     "code-indexer-service.app.cli.main.search": 0.207875,
-    "code-indexer-service.app.metrics.is_enabled": 0.20475,
     "code-indexer-service.app.metrics.record_dedupe_409": 0.4095,
     "code-indexer-service.app.routers.index._delete_jobs_for_repo": 0.8206,
     "code-indexer-service.app.routers.index._parse_embed_progress": 0.41475,
@@ -165,13 +154,10 @@
     "code-indexer-service.app.services.jobs_store.reconcile_active_for_repo": 0.41485,
     "code-indexer-service.app.services.jobs_store.record_event": 0.207875,
     "code-indexer-service.app.services.jobs_store.request_cancel": 0.4246,
-    "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer": 0.206975,
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.add": 0.41395,
-    "code-indexer-service.app.services.tantivy_index._load_tantivy": 0.206975,
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get": 0.207875,
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.items": 0.41395,
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys": 0.207875,
-    "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._flush": 0.206975,
     "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._key": 0.206975,
     "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache.set": 0.41395,
     "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute": 0.41575,
@@ -180,9 +166,7 @@
   "source_snippets": {
     "code-indexer-service.app.cli.client.IndexerClient._wrap": "    def _wrap(self, fn):  # type: ignore[no-untyped-def]\n        try:\n            return fn()\n        except httpx.ConnectError as exc:\n            raise ServiceUnavailable(\n                f\"Could not reach Code Indexer at {self.base_url}: {exc}\"\n            ) from exc",
     "code-indexer-service.app.cli.client.IndexerClient.get": "    def get(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:\n        \"\"\"Issue a GET request relative to :attr:`base_url`.\"\"\"\n        return self._wrap(lambda: self._client.get(path, params=params))",
-    "code-indexer-service.app.cli.main._bail": "def _bail(message: str, code: int = 1) -> \"typer.Exit\":\n    \"\"\"Print an error message in red and raise ``typer.Exit(code)``.\"\"\"\n    console.print(f\"[red]{message}[/red]\")\n    return typer.Exit(code)",
     "code-indexer-service.app.cli.main.search": "@app.command()\ndef search(\n    ctx: typer.Context,\n    query: Annotated[str, typer.Argument(help=\"Natural-language query.\")],\n    k: Annotated[int, typer.Option(\"-k\", \"--k\", help=\"Number of results.\")] = 10,\n    repo: Annotated[\n        str | None,\n        typer.Option(\"--repo\", help=\"Repo slug to scope to.\"),\n    ] = None,\n) -> None:\n    \"\"\"Semantic search via ``GET /search/semantic``.\"\"\"\n    with _client(ctx) as client:\n        try:\n            data = client.semantic_search(query, k=k, repo=repo)\n        except ServiceUnavailable as exc:\n            raise _bail(str(exc)) from exc\n    results = data.get(\"results\", []) if isinstance(data, dict) else []\n    if not results:\n        console.print(\"[yellow]No results.[/yellow]\")\n        return\n    table = Table(title=f\"semantic: {query}\")\n    table.add_column(\"score\", justify=\"right\")\n    table.add_column(\"qualified_name\")\n    table.add_column(\"file\")\n    table.add_column(\"line\", justify=\"right\")\n    for r in results:\n        if not isinstance(r, dict):\n            continue\n        score = r.get(\"score\")\n        score_str = f\"{score:.3f}\" if isinstance(score, (int, float)) else \"?\"\n        table.add_row(\n            score_str,\n            str(r.get(\"qualified_name\", \"?\")),\n            str(r.get(\"file_path\", \"\")),\n            str(r.get(\"line_number\", \"\")),\n        )\n    console.print(table)",
-    "code-indexer-service.app.metrics.is_enabled": "# ---------------------------------------------------------------------------\n# Public API \u2014 fail-soft no-ops when metrics are disabled.\n# ---------------------------------------------------------------------------\ndef is_enabled() -> bool:\n    return _initialised and _HAS_PROM",
     "code-indexer-service.app.metrics.record_dedupe_409": "def record_dedupe_409() -> None:\n    if not is_enabled():\n        return\n    _jobs_dedupe_409.inc()  # type: ignore[union-attr]",
     "code-indexer-service.app.routers.index._delete_jobs_for_repo": "        # Build the per-repo tantivy directory path.\n        db_dir = Path(settings.LADYBUG_DB_DIR)\n        slugged_repo = f\"{slugify_repo(repo)}.tantivy\"\n        tantivy_dir = db_dir / slugged_repo\n\n        if not tantivy_dir.exists():\n            return \"not found\"\n\n        # Safety guard: ensure the directory is scoped to the per-repo artifact root.\n        # Resolve to absolute paths to prevent path traversal.\n        try:\n            resolved_tantivy = tantivy_dir.resolve()\n            resolved_db_dir = db_dir.resolve()\n            if not str(resolved_tantivy).startswith(str(resolved_db_dir)):\n                msg = f\"Path traversal attempt blocked: {resolved_tantivy} not under {resolved_db_dir}\"",
     "code-indexer-service.app.routers.index._parse_embed_progress": "def _parse_embed_progress(job_id: str) -> tuple[int, int, int] | None:\n    \"\"\"Read the latest PROGRESS line from an embed subprocess log.\n\n    Returns ``(embedded, skipped_unchanged, filtered_out)`` from the most\n    recent ``PROGRESS embedded=N skipped=M filtered=K`` line, or None when\n    the log file does not exist or has no PROGRESS line yet.\n\n    The embed driver writes one PROGRESS line per concurrent flush\n    (BUC-1517 / BUC-1519).  Tailing the log gives the frontend live\n    visibility into the embed pass without changing the subprocess\n    contract.\n    \"\"\"\n    log_path = Path(f\"/tmp/cis_embed_{job_id}-embed.log\")\n    if not log_path.exists():\n        return None\n    try:\n        # Embed logs are tiny (one PROGRESS line every ~30s).  No need\n        # for a stat-then-seek tail; just read and reverse-scan.\n        with log_path.open() as fh:\n            lines = fh.readlines()\n    except OSError:\n        return None\n    for line in reversed(lines):\n        if line.startswith(\"PROGRESS \"):\n            parts = line.split()\n            try:\n                vals = {kv.split(\"=\")[0]: int(kv.split(\"=\")[1]) for kv in parts[1:]}\n                return (\n                    vals.get(\"embedded\", 0),\n                    vals.get(\"skipped\", 0),\n                    vals.get(\"filtered\", 0),\n                )\n            except (ValueError, IndexError):\n                return None\n    return None",
@@ -209,13 +193,10 @@
     "code-indexer-service.app.services.jobs_store.reconcile_active_for_repo": "def reconcile_active_for_repo(\n    repo_slug: str,\n    *,\n    no_progress_seconds: int = _DEFAULT_NO_PROGRESS_SEC,\n) -> int:\n    \"\"\"Reconcile orphaned active rows for a repo, releasing the per-repo lock.\n\n    LE-143 (follow-up): called on the reindex request path (and the periodic\n    sweep) so a stuck/orphaned job never permanently blocks reindex. A row is\n    marked ``failed`` when EITHER:\n        * its owning process is provably gone (``pid`` not alive), OR\n        * it has made no progress (``updated_at`` unchanged) for longer than\n          ``no_progress_seconds``.\n\n    A row that keeps advancing ``updated_at`` is never touched, so legitimate\n    long runs survive. Returns the number of rows reconciled.\n    \"\"\"\n    conn = _require_conn()\n    now = time.time()\n    rows = conn.execute(\n        \"\"\"\n        SELECT job_id, pid, updated_at, started_at\n        FROM jobs\n        WHERE repo_slug = ? AND status IN ('queued','running')\n        \"\"\",\n        (repo_slug,),\n    ).fetchall()\n    reconciled = 0\n    with _lock:\n        for row in rows:\n            jid = row[\"job_id\"]\n            pid = row[\"pid\"]\n            updated_at = float(row[\"updated_at\"] or 0)\n            no_progress = (now - updated_at) > max(1, no_progress_seconds)\n            dead = not _process_alive(pid)\n            if dead:\n                _expire_job_unlocked(\n                    conn, jid, \"orphaned \u2014 owning process is gone\"\n                )\n                reconciled += 1\n            elif no_progress:\n                _expire_job_unlocked(\n                    conn,\n                    jid,\n                    f\"orphaned \u2014 no progress for \"\n                    f\"{int(now - updated_at)}s (heartbeat reconcile)\",\n                )\n                reconciled += 1\n    if reconciled:\n        logger.warning(\n            \"reconcile_active_for_repo(%s): released %d orphaned lock(s)\",\n            repo_slug, reconciled,\n        )\n    return reconciled",
     "code-indexer-service.app.services.jobs_store.record_event": "def record_event(job_id: str, level: str, message: str) -> int:\n    \"\"\"Append a row to ``job_events``. Returns the new event id.\n\n    ``level`` is one of ``info`` | ``warn`` | ``error`` \u2014 other values are\n    rejected by the CHECK constraint at the DB level.\n    \"\"\"\n    conn = _require_conn()\n    now = int(time.time())\n    with _lock:\n        cur = conn.execute(\n            \"INSERT INTO job_events (job_id, ts, level, message) VALUES (?, ?, ?, ?)\",\n            (job_id, now, level, message),\n        )\n        return int(cur.lastrowid or 0)",
     "code-indexer-service.app.services.jobs_store.request_cancel": "def request_cancel(job_id: str) -> bool:\n    \"\"\"Set ``cancel_requested=1``. Returns True iff the row exists and was\n    in an active (non-terminal) state.\"\"\"\n    conn = _require_conn()\n    now = time.time()\n    with _lock:\n        cur = conn.execute(\n            \"\"\"\n            UPDATE jobs SET cancel_requested = 1, updated_at = ?\n            WHERE job_id = ? AND status IN ('queued','running')\n            \"\"\",\n            (now, job_id),\n        )\n        return cur.rowcount > 0",
-    "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer": "    def _ensure_writer(self) -> Any | None:\n        \"\"\"Lazily allocate the index writer (single-writer invariant).\n\n        Returns ``None`` when the index is unavailable (caller should no-op).\n        \"\"\"\n        if self._unavailable or self._index is None:\n            return None\n        if self._writer is None:\n            try:\n                # heap_size = 50 MiB \u2014 comfortable for repos up to ~100k docs;\n                # tantivy auto-flushes when this fills up.\n                self._writer = self._index.writer(50_000_000)\n            except Exception as exc:\n                logger.warning(\"tantivy.writer failed (%s) \u2014 disabled\", exc)\n                self._unavailable = True\n                return None\n        return self._writer",
     "code-indexer-service.app.services.tantivy_index.TantivyIndex.add": "    def add(\n        self,\n        *,\n        symbol_qname: str,\n        file_path: str,\n        symbol_kind: str,\n        content: str,\n        start_line: int,\n        end_line: int,\n        repo: str,\n    ) -> bool:\n        \"\"\"Add a single symbol document to the index.\n\n        All fields are required; supply empty strings / 0 for unknown values\n        rather than ``None``.  Returns ``True`` on success, ``False`` when\n        the index is unavailable (best-effort contract \u2014 never raises).\n\n        The writer must be ``commit()``-ed for these docs to become visible\n        to searchers.\n        \"\"\"\n        if self._unavailable:\n            return False\n        tantivy = _load_tantivy()\n        if tantivy is None:\n            return False\n        with self._lock:\n            writer = self._ensure_writer()\n            if writer is None:\n                return False\n            try:\n                doc = tantivy.Document()\n                doc.add_text(\"symbol_qname\", symbol_qname or \"\")\n                doc.add_text(\"file_path\", file_path or \"\")\n                doc.add_text(\"symbol_kind\", symbol_kind or \"\")\n                doc.add_text(\"content\", content or \"\")\n                doc.add_unsigned(\"start_line\", int(start_line) if start_line else 0)\n                doc.add_unsigned(\"end_line\", int(end_line) if end_line else 0)\n                doc.add_text(\"repo\", repo or \"\")\n                writer.add_document(doc)\n                return True\n            except Exception as exc:\n                logger.debug(\"tantivy.add failed for %s: %s\", symbol_qname, exc)\n                return False",
-    "code-indexer-service.app.services.tantivy_index._load_tantivy": "def _load_tantivy() -> Any | None:\n    \"\"\"Return the imported ``tantivy`` module or ``None`` once a load fails.\n\n    The first failure latches ``_tantivy_unavailable`` so subsequent calls\n    short-circuit without paying the import-error cost on every request.\n    \"\"\"\n    global _tantivy, _tantivy_unavailable  # noqa: PLW0603\n    if _tantivy_unavailable:\n        return None\n    if _tantivy is not None:\n        return _tantivy\n    try:\n        import tantivy  # type: ignore[import-not-found]\n    except ImportError as exc:\n        logger.warning(\"tantivy unavailable (%s) \u2014 lexical arm disabled\", exc)\n        _tantivy_unavailable = True\n        return None\n    _tantivy = tantivy\n    return tantivy",
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get": "    def get(\n        self, qualified_name: QualifiedName, default: NodeType | None = None\n    ) -> NodeType | None:\n        return self._entries.get(qualified_name, default)",
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.items": "    def items(self) -> ItemsView[QualifiedName, NodeType]:\n        return self._entries.items()",
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys": "    def keys(self) -> KeysView[QualifiedName]:\n        return self._entries.keys()",
-    "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._flush": "    def _flush(self) -> None:\n        try:\n            self._path.parent.mkdir(parents=True, exist_ok=True)\n            tmp = self._path.with_suffix(self._path.suffix + \".tmp\")\n            tmp.write_text(\n                json.dumps(self._data, separators=(\",\", \":\")), encoding=\"utf-8\"\n            )\n            tmp.replace(self._path)\n        except OSError as exc:  # pragma: no cover - disk IO best-effort\n            logger.warning(\n                \"contextual_prefix.cache.flush_failed path={} error={}\",\n                self._path,\n                exc,\n            )",
     "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._key": "    @staticmethod\n    def _key(file_hash: str, qualified_name: str) -> str:\n        return hashlib.sha256(\n            f\"{file_hash}:{qualified_name}\".encode()\n        ).hexdigest()",
     "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache.set": "    def set(self, file_hash: str, qualified_name: str, prefix: str) -> None:\n        with self._lock:\n            self._data[self._key(file_hash, qualified_name)] = prefix\n            self._flush()",
     "code-indexer-service.tests.test_search._ordering_paging_mock_conn.execute": "",
@@ -258,12 +239,7 @@
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.get",
     "code-indexer-service.codebase_rag.graph_updater.FunctionRegistryTrie.keys",
     "code-indexer-service.app.services.jobs_store._process_alive",
-    "code-indexer-service.app.services.tantivy_index.TantivyIndex._ensure_writer",
-    "code-indexer-service.app.services.tantivy_index._load_tantivy",
-    "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._flush",
-    "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._key",
-    "code-indexer-service.app.metrics.is_enabled",
-    "code-indexer-service.app.cli.main._bail"
+    "code-indexer-service.codebase_rag.services.contextual_prefix._PrefixCache._key"
   ],
-  "total_tokens": 11995
+  "total_tokens": 11952
 }

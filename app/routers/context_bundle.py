@@ -252,7 +252,12 @@ def _is_test_symbol(qname: str) -> bool:
 
 
 def _expand_call_graph(
-    conn: object, seed_symbols: list[str], depth: int, *, caller_cap: int = 0
+    conn: object,
+    seed_symbols: list[str],
+    depth: int,
+    *,
+    caller_cap: int = 0,
+    exclude_test_callees: bool = False,
 ) -> tuple[set[str], dict[str, list[str]], dict[str, int]]:
     """BFS over the CALLS graph up to ``depth`` hops from the seed symbols.
 
@@ -333,6 +338,8 @@ def _expand_call_graph(
                 # A broken symbol node should not abort the whole expansion.
                 continue
             callees = [r["callee"] for r in rows if r.get("callee")]
+            if exclude_test_callees:
+                callees = [c for c in callees if not _is_test_symbol(c)]
             if callees:
                 call_graph[sym] = callees
             for c in callees:
@@ -385,16 +392,24 @@ def _truncate_to_budget(
     kept = set(all_symbols)
     snippets = dict(source_snippets)
 
+    # A symbol's prompt cost is its snippet PLUS its qualified name (the
+    # name appears in ``symbols`` and again in call-graph edges). Without
+    # the name term, empty-snippet symbols are free riders: the refill
+    # pass below re-admits ALL of them at cost 0, and design bundles
+    # ballooned to ~250 symbols of which ~210 were name-only noise.
+    def _cost(sym: str, snip: str) -> int:
+        return (len(snip) + len(sym)) // _CHARS_PER_TOKEN + 1
+
     # Drop deepest layers until under budget or only seeds remain.
     max_depth = max(symbol_depth.get(s, 0) for s in kept)
-    current = sum(len(snippets.get(s, "")) for s in kept) // _CHARS_PER_TOKEN
+    current = sum(_cost(s, snippets.get(s, "")) for s in kept)
 
     while current > budget and max_depth > 0:
         layer = {s for s in kept if symbol_depth.get(s, 0) == max_depth}
         kept -= layer
         for s in layer:
             snippets.pop(s, None)
-        current = sum(len(snippets.get(s, "")) for s in kept) // _CHARS_PER_TOKEN
+        current = sum(_cost(s, snippets.get(s, "")) for s in kept)
         max_depth -= 1
 
     # If seeds alone still bust the budget, drop trailing seeds.  Seeds
@@ -411,7 +426,7 @@ def _truncate_to_budget(
                 break
             kept.discard(s)
             removed = snippets.pop(s, "")
-            current -= len(removed) // _CHARS_PER_TOKEN
+            current -= _cost(s, removed)
 
     # Refill. Layer-dropping is all-or-nothing per hop, which leaves a
     # budget cliff: going one token over budget evicts an entire depth-1
@@ -430,7 +445,7 @@ def _truncate_to_budget(
         )
         for s in dropped:
             snip = source_snippets.get(s, "")
-            cost = len(snip) // _CHARS_PER_TOKEN
+            cost = _cost(s, snip)
             if current + cost <= budget:
                 kept.add(s)
                 snippets[s] = snip
@@ -595,9 +610,10 @@ _CONCEPTUAL_PATTERNS = (
 # we don't fire on incidental verbs mid-sentence ("the gate must send…").
 _DESIGN_PATTERNS = (
     _re_intent.compile(
-        r"^\s*(add|implement|extend|support|enforce|send|show|resolve|"
-        r"build|create|wire|integrate|expose|migrate|refactor|introduce|"
-        r"enable|update|allow)\b",
+        r"^\s*(?:re-?)?(add|implement|extend|support|enforce|send|show|"
+        r"resolve|build|create|wire|integrate|expose|migrate|refactor|"
+        r"introduce|enable|update|allow|persist|delete|remove|stream|"
+        r"ingest|compute|prioriti[sz]e|record|replace|rename|cache|batch)\b",
         _re_intent.IGNORECASE,
     ),
 )
@@ -627,10 +643,14 @@ def _classify_intent(task_description: str) -> str:
     """
     if any(p.search(task_description) for p in _HOWTO_PATTERNS):
         return "howto"
-    if any(p.search(task_description) for p in _CONCEPTUAL_PATTERNS):
-        return "conceptual"
+    # Design before conceptual: design patterns are anchored at the start
+    # of the query (imperative verb), so they are the more specific signal.
+    # "Add an endpoint returning an architecture overview" is feature work
+    # that mentions architecture, not an architecture question.
     if any(p.search(task_description) for p in _DESIGN_PATTERNS):
         return "design"
+    if any(p.search(task_description) for p in _CONCEPTUAL_PATTERNS):
+        return "conceptual"
     return "symbol"
 
 
@@ -1226,7 +1246,7 @@ def _lexical_seed_hits(repo_slug: str, query: str, limit: int) -> list[dict]:
 # Per-intent retrieval parameters — a single knob per intent that the
 # route handler reads to shape the bundle.  Changing these values tunes
 # the breadth/depth tradeoff without touching control flow.
-_INTENT_PARAMS: dict[str, dict[str, int]] = {
+_INTENT_PARAMS: dict[str, dict[str, int | bool]] = {
     # Current default — deep call-graph walk off tight seeds.
     "symbol":     {"k": 12, "depth": 3, "module_limit": 0,  "entrypoint_limit": 0},
     # Wider seeds + full module inclusion; shallower expansion keeps
@@ -1245,7 +1265,15 @@ _INTENT_PARAMS: dict[str, dict[str, int]] = {
     # lexical_limit: BM25 seed leg — catches comment-only and identifier
     # signal (AAD/MSAL in headers, by-reference middleware) invisible to
     # both the dense embedding and the CALLS graph.
-    "design":     {"k": 12, "depth": 2, "module_limit": 15, "entrypoint_limit": 0, "caller_cap": 3, "lexical_limit": 6},
+    # snippet_cap_chars: design bundles are budget-saturated — one 11k-char
+    # snippet costs ~25% of the 12k-token budget and evicts the depth-2/3
+    # layer where cross-facet context lives (vector_store was reachable but
+    # always truncated out of dsg-cgr-001 bundles). Capping per-snippet size
+    # trades tail-of-function detail for layer survival.
+    # exclude_test_callees: the callee walk has no test filter (only inbound
+    # callers are filtered), so design bundles flooded with tests.* symbols
+    # that carry no design signal.
+    "design":     {"k": 12, "depth": 2, "module_limit": 15, "entrypoint_limit": 0, "caller_cap": 3, "lexical_limit": 6, "snippet_cap_chars": 2000, "exclude_test_callees": True},
 }
 
 
@@ -1690,6 +1718,9 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     all_symbols, call_graph, symbol_depth = _expand_call_graph(
         conn, seed_symbols, effective_depth,
         caller_cap=intent_params.get("caller_cap", 0),
+        exclude_test_callees=bool(
+            intent_params.get("exclude_test_callees", False)
+        ),
     )
 
     # 3. Fetch source snippets — sorted for deterministic output.
@@ -1735,6 +1766,23 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         if _truncated:
             _body += "\n# … (span truncated)"
         source_snippets[_qn] = f"# Doc — {_fp}:{_sl}-{_el}\n{_body}"
+
+    # 3d. Per-snippet cap (design intent). Budget-saturated bundles are a
+    #     zero-sum game: one whole-function snippet at 11k chars costs a
+    #     quarter of the token budget and evicts entire BFS layers. Clip
+    #     each snippet at a line boundary so breadth (layer survival)
+    #     wins over tail-of-function detail.
+    _snip_cap = int(intent_params.get("snippet_cap_chars", 0))
+    if _snip_cap > 0:
+        for _qn, _snip in source_snippets.items():
+            if len(_snip) <= _snip_cap:
+                continue
+            _cut = _snip.rfind("\n", 0, _snip_cap)
+            if _cut <= 0:
+                _cut = _snip_cap
+            source_snippets[_qn] = (
+                _snip[:_cut] + "\n# … (snippet capped)"
+            )
 
     # 4. Token-budget truncation — drop deepest-hop symbols first when
     #    the bundle would exceed ``_TOKEN_BUDGET``.  Seeds (depth 0) are
