@@ -445,3 +445,91 @@ def test_expand_call_graph_caller_expansion() -> None:
     ):
         all_symbols0, _, _ = _expand_call_graph(conn, ["app.routes.makeRouter"], 2)
     assert "app.mount.mountRoutes" not in all_symbols0
+
+
+def test_context_bundle_lexical_seed_leg(tmp_path: Path) -> None:
+    """Design-intent bundles include BM25 lexical hits as guaranteed seeds —
+    the leg that catches comment-only signal (no embedding, no CALLS edge)."""
+    src_file = tmp_path / "auth.py"
+    src_file.write_text("# AAD provider\ndef verify_session():\n    pass\n")
+
+    # Semantic returns plenty of unrelated-but-high-scoring symbols so the
+    # lexical hit cannot make the seed window on score alone.
+    seed = [
+        {"qualified_name": f"app.other.fn{i}", "score": 0.9 - i * 0.001}
+        for i in range(24)
+    ]
+    source_rows = [
+        {"qualified_name": s["qualified_name"], "start_line": 1, "end_line": 2, "path": str(src_file)}
+        for s in seed
+    ] + [
+        {"qualified_name": "app.auth.session.verify_session", "start_line": 1, "end_line": 3, "path": str(src_file)},
+    ]
+    conn = _mock_conn_with_calls({}, source_rows)
+
+    with (
+        patch(
+            "app.routers.search._semantic_search_impl",
+            return_value=_semantic_response(seed),
+        ),
+        patch("app.routers.context_bundle._get_conn", return_value=conn),
+        patch(
+            "app.routers.context_bundle._lexical_seed_hits",
+            return_value=[
+                {
+                    "qn": "app.auth.session.verify_session",
+                    "file_path": str(src_file),
+                    "start_line": 1,
+                    "end_line": 3,
+                    "kind": "Function",
+                }
+            ],
+        ) as lex_mock,
+    ):
+        resp = client.post(
+            "/context-bundle",
+            json={
+                "repo_path": str(tmp_path),
+                "task_description": "Add AAD role checks to the skill API",
+                "intent": "design",
+                "depth": 0,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert lex_mock.called
+    assert "app.auth.session.verify_session" in body["symbols"]
+
+    # symbol intent has no lexical leg — the helper must not be consulted.
+    with (
+        patch(
+            "app.routers.search._semantic_search_impl",
+            return_value=_semantic_response(seed),
+        ),
+        patch("app.routers.context_bundle._get_conn", return_value=conn),
+        patch(
+            "app.routers.context_bundle._lexical_seed_hits",
+            return_value=[
+                {
+                    "qn": "app.auth.session.verify_session",
+                    "file_path": str(src_file),
+                    "start_line": 1,
+                    "end_line": 3,
+                    "kind": "Function",
+                }
+            ],
+        ) as lex_mock_sym,
+    ):
+        resp2 = client.post(
+            "/context-bundle",
+            json={
+                "repo_path": str(tmp_path),
+                "task_description": "what does fn1 do",
+                "intent": "symbol",
+                "depth": 0,
+            },
+        )
+
+    assert resp2.status_code == 200
+    assert not lex_mock_sym.called

@@ -369,3 +369,170 @@ class TantivyIndex:
     def open_or_create(cls, repo_root: Path | str, repo_slug: str) -> "TantivyIndex":
         """Open / create the index for ``repo_slug`` rooted at ``repo_root``."""
         return cls(repo_root, repo_slug)
+
+
+# ---------------------------------------------------------------------------
+# Full rebuild from the symbol graph + source text
+# ---------------------------------------------------------------------------
+
+# Caps keep the index bounded on repos with giant generated files.
+_SYMBOL_SOURCE_CAP_CHARS = 6000
+_FILE_HEADER_MAX_LINES = 120
+_FILE_HEADER_CAP_CHARS = 6000
+
+
+def rebuild_lexical_index(
+    repo_db_path: str | Path,
+    repo_root: str | Path,
+    slug: str,
+    db_dir: str | Path,
+) -> int:
+    """Rebuild ``<db_dir>/<slug>.tantivy/`` from the LadybugDB graph + source.
+
+    Each Function/Method doc's ``content`` is qualified name + docstring +
+    the symbol's **source span** (comments included). BM25 must see raw
+    text, not just identifiers, to catch comment-only signal — e.g. an
+    auth provider documented as "AAD" in a comment is invisible to both
+    the dense embedding and the CALLS graph, and was previously invisible
+    to the lexical arm too (content used to be qname + docstring only).
+
+    One extra doc per Module carries the file-header region under
+    ``{module_qname}::File::summary`` so top-of-file prose is searchable;
+    the qname matches the embed driver's file-summary chunks, so the
+    context-bundle's existing summary hydration renders these hits.
+
+    Wipes any existing index dir first — this is a rebuild, not an append.
+    Callers that mirror additional corpora into the same index (markdown
+    pass) must run AFTER this. Best-effort: returns 0 and logs on any
+    environment failure rather than raising.
+
+    Args:
+        repo_db_path: Path to the per-repo LadybugDB ``.db`` file.
+        repo_root: Repo checkout root — resolves relative Module paths.
+        slug: Canonical repo slug (index dir name + ``repo`` field).
+        db_dir: Parent data dir holding ``<slug>.tantivy/``.
+
+    Returns:
+        Number of documents added.
+    """
+    import shutil
+
+    if _load_tantivy() is None:
+        return 0
+    try:
+        import real_ladybug as _lb  # type: ignore[import-untyped]
+        from .ladybug_buffer_pool import resolve_buffer_pool_size
+    except Exception as exc:  # pragma: no cover - env-specific
+        logger.warning("rebuild_lexical_index: ladybug unavailable: %s", exc)
+        return 0
+
+    root = Path(repo_root)
+    index_dir = _index_dir_for_repo(db_dir, slug)
+    try:
+        if index_dir.exists():
+            shutil.rmtree(index_dir)
+    except OSError as exc:
+        logger.warning("rebuild_lexical_index: wipe failed: %s", exc)
+
+    _line_cache: dict[str, list[str] | None] = {}
+
+    def _file_lines(rel_or_abs: str) -> list[str] | None:
+        if rel_or_abs in _line_cache:
+            return _line_cache[rel_or_abs]
+        p = Path(rel_or_abs)
+        if not p.is_absolute():
+            p = root / p
+        try:
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = None
+        _line_cache[rel_or_abs] = lines
+        return lines
+
+    added = 0
+    db = _lb.Database(
+        str(repo_db_path), read_only=True,
+        buffer_pool_size=resolve_buffer_pool_size(),
+    )
+    conn = _lb.Connection(db)
+    idx = TantivyIndex(db_dir, slug)
+    try:
+        # --- Function / Method docs: qname + docstring + source span ---
+        res = conn.execute(
+            "MATCH (m:Module)-[:DEFINES]->(n:Function) "
+            "RETURN n.qualified_name AS qn, n.start_line AS sl, "
+            "n.end_line AS el, m.path AS p, n.docstring AS doc, "
+            "'Function' AS kind "
+            "UNION ALL "
+            "MATCH (m:Module)-[:DEFINES]->(:Class)-[:DEFINES_METHOD]->(n:Method) "
+            "RETURN n.qualified_name AS qn, n.start_line AS sl, "
+            "n.end_line AS el, m.path AS p, n.docstring AS doc, "
+            "'Method' AS kind"
+        )
+        cols = res.get_column_names()
+        while res.has_next():
+            row = dict(zip(cols, res.get_next()))
+            qn = row.get("qn") or ""
+            if not qn:
+                continue
+            parts = [qn]
+            doc = row.get("doc")
+            if isinstance(doc, str) and doc:
+                parts.append(doc)
+            path = str(row.get("p") or "")
+            sl = int(row.get("sl") or 0)
+            el = int(row.get("el") or 0)
+            if path and sl > 0 and el >= sl:
+                lines = _file_lines(path)
+                if lines:
+                    src = "\n".join(lines[sl - 1 : el])
+                    parts.append(src[:_SYMBOL_SOURCE_CAP_CHARS])
+            if idx.add(
+                symbol_qname=str(qn),
+                file_path=path,
+                symbol_kind=str(row.get("kind") or "Function"),
+                content="\n".join(parts),
+                start_line=sl,
+                end_line=el,
+                repo=slug,
+            ):
+                added += 1
+
+        # --- File-header docs: top-of-file prose under ::File::summary ---
+        res = conn.execute(
+            "MATCH (m:Module) RETURN m.qualified_name AS qn, m.path AS p"
+        )
+        cols = res.get_column_names()
+        while res.has_next():
+            row = dict(zip(cols, res.get_next()))
+            qn = row.get("qn") or ""
+            path = str(row.get("p") or "")
+            if not qn or not path:
+                continue
+            lines = _file_lines(path)
+            if not lines:
+                continue
+            header = "\n".join(lines[:_FILE_HEADER_MAX_LINES])
+            if idx.add(
+                symbol_qname=f"{qn}::File::summary",
+                file_path=path,
+                symbol_kind="File",
+                content=f"{path}\n{header[:_FILE_HEADER_CAP_CHARS]}",
+                start_line=1,
+                end_line=min(len(lines), _FILE_HEADER_MAX_LINES),
+                repo=slug,
+            ):
+                added += 1
+
+        idx.commit()
+    finally:
+        idx.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            db.close()
+        except Exception:
+            pass
+    return added

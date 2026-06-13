@@ -187,3 +187,32 @@ def test_fetch_sources_for_symbols_logs_one_query_per_symbol() -> None:
     assert len(conn.executions) == 3
     seen_ids = {params["node_id"] for _q, params in conn.executions}
     assert seen_ids == {"one", "two", "three"}
+
+
+def test_fetch_source_includes_leading_comment_block(tmp_path) -> None:
+    """The snippet extends upward over a contiguous JSDoc/decorator block —
+    docblocks above the declaration carry intent retrieval must surface."""
+    f = tmp_path / "middleware.ts"
+    f.write_text(
+        "const x = 1;\n"
+        "\n"
+        "/**\n"
+        " * Hard gate: callers should mount `requireIdentity` first.\n"
+        " */\n"
+        "export function requireRole() {\n"
+        "  return true;\n"
+        "}\n"
+    )
+    out = source_fetch.fetch_source(str(f), 6, 8)
+    assert "requireIdentity" in out
+    assert out.startswith("/**")
+    # The blank line above the docblock stops the walk — unrelated code
+    # (`const x = 1;`) must not leak in.
+    assert "const x" not in out
+
+
+def test_fetch_source_no_comment_above_is_unchanged(tmp_path) -> None:
+    f = tmp_path / "plain.py"
+    f.write_text("a = 1\nb = 2\ndef fn():\n    return a\n")
+    out = source_fetch.fetch_source(str(f), 3, 4)
+    assert out == "def fn():\n    return a"
