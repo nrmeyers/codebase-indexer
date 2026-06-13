@@ -599,6 +599,19 @@ def semantic_search(
         )
 
 
+# Symbol-card marker (methodology §5). Defined locally — search.py must not
+# import from context_bundle (that module imports _semantic_search_impl from
+# here, so the dependency only goes one way).
+_SYMBOL_CARD_MARKER = "::Symbol::card"
+
+
+def _fold_card_qname(qn: str) -> str:
+    """Map a ``{qn}::Symbol::card`` proxy to its parent symbol, else identity."""
+    if _SYMBOL_CARD_MARKER in qn:
+        return qn.split(_SYMBOL_CARD_MARKER, 1)[0]
+    return qn
+
+
 def _semantic_search_impl(
     *,
     q: str,
@@ -911,17 +924,21 @@ def _semantic_search_impl(
     # qualified-name was detected and pinned, "semantic" otherwise) so HTTP
     # callers can see why a particular ranking was produced without
     # reverse-engineering the query string.
-    return SemanticSearchResponse(
-        results=[
-            SemanticResult(
-                symbol=r.qualified_name,
-                score=round(r.score, 4),
-                type="",
-            )
-            for r in filtered[:k]
-        ],
-        search_intent=search_intent,
-    )
+    # Fold symbol-card proxies ({qn}::Symbol::card) back to their parent
+    # symbol and de-duplicate, so a card hit surfaces the real symbol and
+    # the card qname is never emitted (methodology §5). ``filtered`` is in
+    # final rank order, so keeping the first occurrence preserves ranking.
+    _emitted: set[str] = set()
+    _results: list[SemanticResult] = []
+    for r in filtered:
+        _qn = _fold_card_qname(r.qualified_name)
+        if _qn in _emitted:
+            continue
+        _emitted.add(_qn)
+        _results.append(SemanticResult(symbol=_qn, score=round(r.score, 4), type=""))
+        if len(_results) >= k:
+            break
+    return SemanticSearchResponse(results=_results, search_intent=search_intent)
 
 
 # ---------------------------------------------------------------------------

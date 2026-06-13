@@ -1097,6 +1097,20 @@ def _entrypoint_symbols(conn: object, limit: int = 15) -> list[str]:
 
 _SUMMARY_QNAME_MARKER = "::summary"
 
+# Symbol-card marker (methodology §5). A ``{qn}::Symbol::card`` doc is a
+# never-emitted, task-vocabulary retrieval proxy for its PARENT ``{qn}``.
+# Unlike ``::summary`` chunks (which ARE emitted as design context), a card
+# hit is rewritten to its parent at seed time and the card qname never
+# appears in a bundle.
+_SYMBOL_CARD_MARKER = "::Symbol::card"
+
+
+def _card_parent(qn: str) -> str:
+    """Return the parent symbol qname for a card qname, else ``qn``."""
+    if _SYMBOL_CARD_MARKER in qn:
+        return qn.split(_SYMBOL_CARD_MARKER, 1)[0]
+    return qn
+
 # Max lines of the span head included per summary snippet. Class spans can run
 # to hundreds of lines; the leading lines carry the signature, docstring, and
 # (for __init__.py modules) the import/__all__ surface, which is what a
@@ -1389,11 +1403,23 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             rerank=bool(req.rerank),
         )
         # Adapt the SemanticResult list to the {qualified_name, score} shape
-        # the existing de-noise + ranking code consumes.
-        seed_results = [
-            {"qualified_name": r.symbol, "score": r.score}
-            for r in _sem_resp.results
-        ]
+        # the existing de-noise + ranking code consumes. Symbol-card hits
+        # ({qn}::Symbol::card) are folded into their PARENT here — a card is
+        # a vote for the real symbol, never a result of its own — merging by
+        # max score so the parent's body seeds/expands/emits, not the card.
+        _seed_best: dict[str, float] = {}
+        for r in _sem_resp.results:
+            qn = _card_parent(r.symbol)
+            sc = float(r.score)
+            if qn not in _seed_best or sc > _seed_best[qn]:
+                _seed_best[qn] = sc
+        seed_results = sorted(
+            (
+                {"qualified_name": qn, "score": sc}
+                for qn, sc in _seed_best.items()
+            ),
+            key=lambda d: -d["score"],
+        )
         # Drop noise: test fixtures AND anonymous inline arrows/callbacks
         # (named `anonymous_LINE_COL` by the parser). Both have degenerate
         # embeddings that crowd real code out of the top-k window.
