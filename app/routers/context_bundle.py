@@ -243,8 +243,16 @@ def _result_to_rows(result: object) -> list[dict]:
 # /search/semantic rerank path.
 
 
+_TEST_PATH_MARKERS = (".tests.", ".test.", ".spec.")
+
+
+def _is_test_symbol(qname: str) -> bool:
+    """True when a qualified name points into test code."""
+    return any(m in qname for m in _TEST_PATH_MARKERS) or qname.endswith(".test")
+
+
 def _expand_call_graph(
-    conn: object, seed_symbols: list[str], depth: int
+    conn: object, seed_symbols: list[str], depth: int, *, caller_cap: int = 0
 ) -> tuple[set[str], dict[str, list[str]], dict[str, int]]:
     """BFS over the CALLS graph up to ``depth`` hops from the seed symbols.
 
@@ -252,6 +260,12 @@ def _expand_call_graph(
         conn: An open LadybugDB connection.
         seed_symbols: Qualified names to start BFS from (seed set).
         depth: Maximum number of hops to traverse. 0 returns only seeds.
+        caller_cap: When > 0, also expand up to this many *inbound* callers
+            per seed (depth 1, test code excluded) and add them to the BFS
+            frontier so their callees are reachable on later hops. This
+            captures wiring context — e.g. the route-mounting function that
+            applies auth middleware around a seeded route handler — that a
+            callee-only walk can never reach.
 
     Returns:
         tuple:
@@ -266,6 +280,37 @@ def _expand_call_graph(
     all_symbols: set[str] = set(seed_symbols)
     symbol_depth: dict[str, int] = {s: 0 for s in seed_symbols}
     frontier: set[str] = set(seed_symbols)
+
+    # Inbound caller expansion: one hop *up* from each seed before the
+    # callee walk. Callers join the frontier at depth 1, so their own
+    # callees (the middleware / wiring siblings of the seed) land at
+    # depth 2 within the normal budgeted walk. Capped per seed — hot
+    # utilities can have hundreds of callers.
+    if caller_cap > 0 and depth > 0:
+        for sym in list(seed_symbols):
+            if _SUMMARY_QNAME_MARKER in sym:
+                continue  # summary chunks are not graph nodes
+            try:
+                rows = _result_to_rows(
+                    conn.execute(  # type: ignore[attr-defined]
+                        "MATCH (m)-[:CALLS]->(n {qualified_name: $qn}) "
+                        "RETURN m.qualified_name AS caller",
+                        {"qn": sym},
+                    )
+                )
+            except Exception:
+                continue
+            callers = [
+                r["caller"]
+                for r in rows
+                if r.get("caller") and not _is_test_symbol(r["caller"])
+            ][:caller_cap]
+            for c in callers:
+                call_graph.setdefault(c, []).append(sym)
+                if c not in all_symbols:
+                    all_symbols.add(c)
+                    symbol_depth[c] = 1
+                    frontier.add(c)
 
     # Standard BFS: expand one hop per iteration, tracking only newly-reached
     # symbols in next_frontier to avoid revisiting.
@@ -1118,7 +1163,10 @@ _INTENT_PARAMS: dict[str, dict[str, int]] = {
     # seed/depth but adds a moderate module-keyword boost so the files the
     # task names by topic (e.g. "notifications" → notification-service.ts)
     # are present even when no single function embeds close to the query.
-    "design":     {"k": 12, "depth": 2, "module_limit": 15, "entrypoint_limit": 0},
+    # caller_cap: design tasks need *wiring* context (who mounts/calls the
+    # seeded handlers — middleware, auth guards, registration) that a
+    # callee-only walk can never reach.
+    "design":     {"k": 12, "depth": 2, "module_limit": 15, "entrypoint_limit": 0, "caller_cap": 3},
 }
 
 
@@ -1524,6 +1572,7 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
     conn = _get_conn(repo_slug)
     all_symbols, call_graph, symbol_depth = _expand_call_graph(
         conn, seed_symbols, effective_depth,
+        caller_cap=intent_params.get("caller_cap", 0),
     )
 
     # 3. Fetch source snippets — sorted for deterministic output.

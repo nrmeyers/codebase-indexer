@@ -273,9 +273,9 @@ def test_context_bundle_seeds_implementation_over_scripts(tmp_path: Path) -> Non
     captured: dict[str, list[str]] = {}
     orig_expand = _cb._expand_call_graph
 
-    def _capture_expand(conn_, seed_symbols, depth):  # type: ignore[no-untyped-def]
+    def _capture_expand(conn_, seed_symbols, depth, **kwargs):  # type: ignore[no-untyped-def]
         captured["seeds"] = list(seed_symbols)
-        return orig_expand(conn_, seed_symbols, depth)
+        return orig_expand(conn_, seed_symbols, depth, **kwargs)
 
     with (
         patch(
@@ -396,3 +396,52 @@ def test_context_bundle_503_when_semantic_search_unavailable(tmp_path: Path) -> 
 
     assert resp.status_code == 503
     assert "unavailable" in resp.json()["detail"].lower()
+
+
+def test_expand_call_graph_caller_expansion() -> None:
+    """caller_cap > 0 pulls inbound callers (depth 1, tests excluded) into the
+    BFS frontier so their callees — the wiring siblings of the seed — are
+    reachable on later hops."""
+    from app.routers.context_bundle import _expand_call_graph
+
+    edges_out = {
+        "app.mount.mountRoutes": ["app.routes.makeRouter", "app.mw.requireRole"],
+    }
+    edges_in = {
+        "app.routes.makeRouter": [
+            "app.mount.mountRoutes",
+            "tests.unit.mount.test.makeApp",  # must be filtered
+        ],
+    }
+
+    conn = MagicMock()
+
+    def _execute(query: str, params: dict[str, str]):  # type: ignore[no-untyped-def]
+        qn = params["qn"]
+        if "-[:CALLS]->(n" in query:  # inbound caller lookup
+            return [{"caller": c} for c in edges_in.get(qn, [])]
+        return [{"callee": c} for c in edges_out.get(qn, [])]
+
+    conn.execute.side_effect = _execute
+    with patch(
+        "app.routers.context_bundle._result_to_rows", side_effect=lambda rows: rows
+    ):
+        all_symbols, call_graph, symbol_depth = _expand_call_graph(
+            conn, ["app.routes.makeRouter"], 2, caller_cap=3
+        )
+
+    assert "app.mount.mountRoutes" in all_symbols
+    assert symbol_depth["app.mount.mountRoutes"] == 1
+    # The caller's other callee (the middleware sibling) is reached.
+    assert "app.mw.requireRole" in all_symbols
+    # Test-file caller filtered out.
+    assert "tests.unit.mount.test.makeApp" not in all_symbols
+    # Edge direction recorded caller -> seed.
+    assert "app.routes.makeRouter" in call_graph["app.mount.mountRoutes"]
+
+    # caller_cap=0 (default) keeps the old callee-only behaviour.
+    with patch(
+        "app.routers.context_bundle._result_to_rows", side_effect=lambda rows: rows
+    ):
+        all_symbols0, _, _ = _expand_call_graph(conn, ["app.routes.makeRouter"], 2)
+    assert "app.mount.mountRoutes" not in all_symbols0
