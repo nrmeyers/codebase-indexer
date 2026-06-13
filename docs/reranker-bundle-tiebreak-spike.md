@@ -197,18 +197,44 @@ hot-path case for this model:
 
 **Decision: not shipped.** Implementation kept on branch
 `feat/bundle-reranker-spike` (unmerged; flag default off, fail-open — a
-no-op in production), `main` stays at 0.9778. The harness and integration
-are preserved so the **CodeRankLLM A/B** (the real open question — does a
-*code-specialized* reranker make the inference the general one cannot?) can
-reuse them when LM Studio or an equivalent CodeRankLLM endpoint is back.
-The general-ranking win (`run` 59→5) is real but not benchmark-visible
-(14/15 already at 1.00) and not worth a regression elsewhere.
+no-op in production), `main` stays at 0.9778.
+
+## The real conclusion: WRONG STAGE, not wrong for code-context
+
+It is tempting to read this as "code context needs its own (code-special)
+reranker." **The evidence does not support that** — and over-reading it
+that way would send us to stand up a heavier model for no reason. What the
+two failures actually show, taken together, is that **a relevance reranker
+is the wrong tool at the bundle-truncation stage**:
+
+- cgr-001: relevance was *uninformative* — the storage code the facet wants
+  scores ~0.03, because it genuinely isn't textually relevant to the query.
+- tf-003: relevance was *actively misleading* — it dropped `requireIdentity`,
+  which the **call graph had correctly rescued** (PR #6), in favour of a
+  higher-relevance but facet-irrelevant symbol.
+
+At the bundle-assembly stage the candidates are *graph neighbours*, related
+by structure (calls, mounts, caller-of), not by surface relevance. Graph
+structure is the load-bearing signal here; text relevance is weaker and
+sometimes fights it. **Keeper rule: do not rerank at the bundle tie-break.**
+
+This says nothing about the **search top-k stage**, where candidates are all
+already plausibly relevant to the query and a relevance scorer has a real
+job to do (that is exactly where the existing generative `reranker.py` /
+CodeRankLLM lives). Whether a cheap cross-encoder helps *there* is a
+separate, still-open question this spike did not touch. The harness +
+integration are preserved on the branch as a starting point for that
+search-stage work — **not** as a cgr-001 fix (which we've decided is
+benchmark debt; see the methodology doc's cross-tool note).
 
 ## Cross-tool note
 
-If this passes, both tripod tools converge on **qwen3-reranker-0.6b** as a
-shared scoring layer (AgentAlloy uses it for Stage-B fragment re-rank and
-is evaluating it for phase-intent classification). One reranker serving
-setup, one model to version — the operational consolidation the tripod
-wants, independent of the embedders differing (e5 here, qwen3-embedding in
-AgentAlloy).
+Both tripod tools independently arrived at the same boundary: **don't make
+the retriever manufacture intent the query doesn't contain.** Code-context
+reached it here (cgr-001's storage facet is missing query intent, not
+missing retrieval); AgentAlloy reached it via its SDD-workflow / blog-probe
+finding. Under-specified queries get resolved at the right layer — an
+explicit facet or clarification on this side, workflow interrogation on
+AgentAlloy's — never by the retriever guessing. A shared
+**qwen3-reranker-0.6b** scoring layer may still make sense for the tripod,
+but only at the search-top-k stage, never at bundle truncation.
