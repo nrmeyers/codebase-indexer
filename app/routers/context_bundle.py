@@ -29,6 +29,7 @@ from ..config import settings
 from ..services.source_fetch import (
     fetch_sources_for_symbols as _fetch_source_for_symbols,
 )
+from ..services import bundle_reranker
 
 router = APIRouter()
 
@@ -148,6 +149,17 @@ class ContextBundleRequest(BaseModel):
             "on the highest-signal symbols. Best-effort — falls back "
             "silently to the bi-encoder + boost order when LM Studio "
             "isn't running."
+        ),
+    )
+    rerank_bundle: bool | None = Field(
+        default=None,
+        description=(
+            "When true, re-score call-graph NEIGHBOURS with the "
+            "cross-encoder bundle reranker so reachable-but-mis-ranked "
+            "symbols survive truncation. Distinct from `rerank` (that's "
+            "the generative seed reranker). None defers to the "
+            "BUNDLE_RERANK_ENABLED server setting. Fail-open: identical "
+            "to today's output when disabled or the endpoint is down."
         ),
     )
 
@@ -360,6 +372,7 @@ def _truncate_to_budget(
     symbol_depth: dict[str, int],
     budget: int,
     scores: dict[str, float] | None = None,
+    depth_primary_refill: bool = True,
 ) -> tuple[set[str], dict[str, str], dict[str, list[str]], int]:
     """Drop symbols from deepest BFS hops first until the snippet token
     estimate fits inside ``budget``.
@@ -431,18 +444,21 @@ def _truncate_to_budget(
     # Refill. Layer-dropping is all-or-nothing per hop, which leaves a
     # budget cliff: going one token over budget evicts an entire depth-1
     # layer even when thousands of tokens of headroom remain afterwards.
-    # Re-admit dropped symbols — shallowest hop first, then highest
-    # relevance — while their snippets still fit in the remaining budget.
+    # Re-admit dropped symbols while their snippets still fit.
+    #   depth_primary_refill=True (default): shallowest hop first, then
+    #     relevance — preserves the "shallow context first" bias.
+    #   False (cross-encoder rerank active): relevance first, regardless of
+    #     hop. The reranker's premise is that joint query-document relevance
+    #     beats graph distance, so a high-relevance depth-2 symbol (e.g. the
+    #     storage code an incremental-reindex task touches) must be able to
+    #     jump ahead of a low-relevance depth-1 neighbour.
     if current < budget:
         ranked_scores = scores or {}
-        dropped = sorted(
-            all_symbols - kept,
-            key=lambda s: (
-                symbol_depth.get(s, 0),
-                -ranked_scores.get(s, 0.0),
-                s,
-            ),
-        )
+        if depth_primary_refill:
+            _key = lambda s: (symbol_depth.get(s, 0), -ranked_scores.get(s, 0.0), s)  # noqa: E731
+        else:
+            _key = lambda s: (-ranked_scores.get(s, 0.0), symbol_depth.get(s, 0), s)  # noqa: E731
+        dropped = sorted(all_symbols - kept, key=_key)
         for s in dropped:
             snip = source_snippets.get(s, "")
             cost = _cost(s, snip)
@@ -566,6 +582,39 @@ def order_symbols_by_score(
     test stability and reproducible bundles).
     """
     return sorted(symbols, key=lambda s: (-scores.get(s, 0.0), s))
+
+
+def _apply_neighbour_rerank(
+    scores: dict[str, float],
+    rerank_scores: dict[str, float],
+    symbol_depth: dict[str, int],
+) -> None:
+    """Rewrite NEIGHBOUR scores in place from cross-encoder relevance.
+
+    Maps each reranked neighbour's relevance ``r ∈ [0, 1]`` into the band
+    strictly below the lowest seed (``seed_floor * 0.99 * r``), so the
+    seed-precedence invariant ``compute_symbol_scores`` guarantees still
+    holds (every neighbour sorts below every seed) while the *ordering
+    within* the neighbour band follows the cross-encoder instead of the
+    flat-clamped bi-encoder decay. Seeds (depth 0) are never touched.
+    """
+    if not rerank_scores:
+        return
+    seed_scores = [scores[s] for s in scores if symbol_depth.get(s, 0) == 0]
+    seed_floor = min(seed_scores, default=0.01)
+    band_top = seed_floor * 0.99 if seed_floor > 0 else 0.0
+    if band_top <= 0:
+        return
+    # Scored neighbours are re-placed within the band by relevance; the
+    # ``0.05`` floor keeps an r=0 scored neighbour just above the band
+    # bottom (and above any un-scored neighbour the reranker never saw, so
+    # an unreachable/capped tail can't silently outrank reranked picks).
+    # Neighbours NOT in rerank_scores (beyond the candidate cap) keep their
+    # bi-encoder score untouched — the cap is a latency guard, not a drop.
+    for qn, r in rerank_scores.items():
+        if symbol_depth.get(qn, 0) >= 1 and qn in scores:
+            rr = max(0.0, min(1.0, float(r)))
+            scores[qn] = band_top * (0.05 + 0.95 * rr)
 
 
 # ---------------------------------------------------------------------------
@@ -1784,6 +1833,39 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
                 _snip[:_cut] + "\n# … (snippet capped)"
             )
 
+    # 3e. Cross-encoder neighbour rerank (flag-gated, fail-open). The
+    #     bi-encoder embeds the query in isolation, so it can't rank a
+    #     two-hop design inference ("re-ingest changed files → re-embed →
+    #     vector store"); reachable-but-mis-ranked neighbours then lose the
+    #     truncation budget race. Re-score the neighbours jointly with the
+    #     query and fold the result into the score map BEFORE truncation so
+    #     the refill prefers cross-encoder-relevant symbols. None → defer to
+    #     the server flag. See docs/reranker-bundle-tiebreak-spike.md.
+    rerank_scores: dict[str, float] = {}
+    _rb = req.rerank_bundle
+    _rb_on = settings.BUNDLE_RERANK_ENABLED if _rb is None else bool(_rb)
+    if _rb_on and any(d >= 1 for d in symbol_depth.values()):
+        # Candidate order favours symbols that can actually carry signal:
+        # snippeted first (name-only neighbours score ~0 and waste latency),
+        # then shallower hops, then qname for determinism. NOT by bi-encoder
+        # score — the whole point is to rescue LOW-ranked-but-reachable
+        # symbols, so a high-score-first cap would exclude exactly them.
+        _cands = sorted(
+            (qn for qn in all_symbols if symbol_depth.get(qn, 0) >= 1),
+            key=lambda s: (
+                0 if source_snippets.get(s) else 1,
+                symbol_depth.get(s, 99),
+                s,
+            ),
+        )[: settings.BUNDLE_RERANK_MAX_CANDIDATES]
+        _pairs = [
+            (qn, bundle_reranker.build_doc(qn, source_snippets.get(qn, "")))
+            for qn in _cands
+        ]
+        _rr = bundle_reranker.rerank_scores(req.task_description, _pairs)
+        if _rr:
+            rerank_scores = _rr
+
     # 4. Token-budget truncation — drop deepest-hop symbols first when
     #    the bundle would exceed ``_TOKEN_BUDGET``.  Seeds (depth 0) are
     #    always preserved; we shrink from the deepest hop inward,
@@ -1804,6 +1886,7 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             call_graph=call_graph,
             symbol_depth=symbol_depth,
         )
+        _apply_neighbour_rerank(pre_scores, rerank_scores, symbol_depth)
         all_symbols, source_snippets, call_graph, total_tokens = _truncate_to_budget(
             all_symbols=all_symbols,
             source_snippets=source_snippets,
@@ -1811,6 +1894,9 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             symbol_depth=symbol_depth,
             budget=_TOKEN_BUDGET,
             scores=pre_scores,
+            # When the cross-encoder has re-scored neighbours, let relevance
+            # (not hop distance) drive which dropped symbols refill.
+            depth_primary_refill=not bool(rerank_scores),
         )
 
     # 5. Relevance ordering (LE-182). Score every surviving symbol — seeds
@@ -1826,6 +1912,9 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         call_graph=call_graph,
         symbol_depth=symbol_depth,
     )
+    # Reuse the cross-encoder relevance (computed once above) so the emitted
+    # ordering matches the survivor selection truncation made.
+    _apply_neighbour_rerank(scores, rerank_scores, symbol_depth)
     ordered_symbols = order_symbols_by_score(all_symbols, scores)
 
     return ContextBundleResponse(

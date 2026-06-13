@@ -213,6 +213,27 @@ class Settings(BaseSettings):
     LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint (deprecated)
     LM_STUDIO_TIMEOUT: float = 30.0
 
+    # --- Bundle neighbour reranker (cross-encoder; see
+    #     docs/reranker-bundle-tiebreak-spike.md) ---
+    # Distinct from RERANK_ENABLED above (that gates the generative listwise
+    # CodeRankLLM on search top-k). This gates a cheap DETERMINISTIC
+    # cross-encoder (qwen3-reranker-0.6b) that re-scores /context-bundle
+    # call-graph NEIGHBOURS so reachable-but-mis-ranked symbols (e.g. the
+    # storage code for an incremental-reindex task) survive truncation.
+    # Off by default and FAIL-OPEN: when disabled or the endpoint is
+    # unreachable, bundles are byte-for-byte identical to today. The model
+    # is served via llama.cpp ``/completion`` (yes/no logprobs); the
+    # ``/v1/rerank`` endpoint is NOT used (broken for this GGUF).
+    BUNDLE_RERANK_ENABLED: bool = False
+    BUNDLE_RERANK_URL: str = "http://127.0.0.1:60001"
+    BUNDLE_RERANK_MODEL: str = "qwen3-reranker-0.6b"
+    BUNDLE_RERANK_DEADLINE_S: float = 8.0
+    # Cap neighbours re-scored per bundle (top-N by bi-encoder score). The
+    # mechanism rescues mid/low-ranked neighbours, so this must be generous
+    # enough to cover them; bounds worst-case hot-path latency.
+    BUNDLE_RERANK_MAX_CANDIDATES: int = 160
+    BUNDLE_RERANK_CONCURRENCY: int = 4
+
     # --- S3 snapshot / restore (BUC-1499) ---
     # When S3_INDEX_BUCKET is set the service pulls index files from S3 on
     # startup and pushes changed files back on clean shutdown.  This lets

@@ -161,6 +161,49 @@ retired (`LM_STUDIO_URL` empty); running it would need a 7B generative
 model stood up on the GPU-contended 3060 (qwen3-reranker + Ollama already
 there), so the cheap-vs-code-specialized question is deferred.
 
+## Integration result (2026-06-13) — DID NOT CLEAR THE GATE
+
+Built the full flag-gated integration (`app/services/bundle_reranker.py`,
+`BUNDLE_RERANK_*` config, `rerank_bundle` request flag, neighbour
+re-scoring folded into `compute_bundle_scores` + a relevance-primary
+refill mode in `_truncate_to_budget`). Ran the **full 15-task arms gate**
+with the reranker on (all neighbours scored, no cap/deadline cutoff):
+
+| | mean lift | dsg-cgr-001 | dsg-tf-003 |
+|---|---|---|---|
+| flag OFF (baseline) | **0.9778** | 0.67 | 1.00 |
+| flag ON | **0.9611** | 0.67 | **0.75** |
+
+**The only benchmark effect is a regression.** Two findings kill the
+hot-path case for this model:
+
+1. **cgr-001 not closed.** With the *real* bundle docs (qname + snippet),
+   every storage carrier scores barely above the noise floor —
+   `verify_stored_ids` 0.038, `_generate_semantic_embeddings` 0.020. The
+   spike's "rank 39 within 42 slots" was a knife-edge artifact of an
+   optimistic slot count; the real bundle has ~24 neighbour slots and 0.038
+   doesn't make the cut. The cross-encoder, *like the bi-encoder*, does not
+   judge the storage code relevant to "re-ingest only changed files." Two
+   independent models agreeing is strong evidence the **storage facet is
+   over-specified** relative to the query text — closing it needs a
+   mechanism that *manufactures* the missing sub-intent (query
+   decomposition), which is arguably gaming the benchmark.
+2. **tf-003 regressed 1.00 → 0.75.** Relevance-primary refill let the
+   reranker drop `requireIdentity` (the auth-facet symbol the PR #6 breadth
+   reduction had rescued) in favour of symbols it scored higher (e.g.
+   `GraphUpdater.run`, 0.81 — correctly rescued in the general sense, but
+   facet-irrelevant). The 0.6B general reranker's relevance ordering is
+   *worse* than the existing depth+breadth heuristics for these tasks.
+
+**Decision: not shipped.** Implementation kept on branch
+`feat/bundle-reranker-spike` (unmerged; flag default off, fail-open — a
+no-op in production), `main` stays at 0.9778. The harness and integration
+are preserved so the **CodeRankLLM A/B** (the real open question — does a
+*code-specialized* reranker make the inference the general one cannot?) can
+reuse them when LM Studio or an equivalent CodeRankLLM endpoint is back.
+The general-ranking win (`run` 59→5) is real but not benchmark-visible
+(14/15 already at 1.00) and not worth a regression elsewhere.
+
 ## Cross-tool note
 
 If this passes, both tripod tools converge on **qwen3-reranker-0.6b** as a
