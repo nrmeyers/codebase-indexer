@@ -235,3 +235,36 @@ Deep-dive artifacts in `~/dev/claude/agentalloy`: `eval/run_poc.py`
 (the staged design with measurement plan), `src/agentalloy/storage/
 card_index.py` (document expansion), `eval/judge.py` (LLM-judge
 validation of heuristic graders, Batches API).
+
+## 11. Cross-tool principle: don't make the retriever manufacture intent
+
+Both tools independently hit the same wall and drew the same line: **a
+retriever must not invent intent the query never expressed.**
+
+- **Code-context (this repo), 2026-06-13.** The `dsg-cgr-001` benchmark
+  task ("re-ingest only changed files") has a *storage* facet that wants
+  `vector_store`/`duckdb`. Two independent model architectures — the
+  e5-base-v2 bi-encoder and the qwen3-reranker-0.6b cross-encoder — both
+  score that storage code as irrelevant (~0.03) to the literal query. The
+  inference "re-ingesting implies re-embedding implies touching the vector
+  store" is real domain knowledge, but it isn't *in the query*. The only
+  retrieval mechanism that closes the facet (query decomposition that
+  synthesizes a storage sub-query) does so by manufacturing the missing
+  intent — gaming the benchmark, not improving retrieval. We **accepted it
+  as benchmark debt** rather than build that. See
+  `docs/reranker-bundle-tiebreak-spike.md`.
+- **AgentAlloy.** Reached the same conclusion from the SDD-workflow /
+  blog-probe finding: an under-specified knowledge query ("why don't we
+  retry POSTs?") has no anchor for the retriever to guess from, and
+  guessing produced *worse-than-nothing* composed context.
+
+The shared rule: **under-specified queries get resolved at the right
+layer, never by the retriever guessing.** On the code side that layer is an
+explicit facet / a clarification step; on the AgentAlloy side it is
+workflow interrogation. Generation is reserved for query *enrichment* with
+vocabulary the user implied (§6's "login/payments/retry"), not for
+inventing a concern the user never raised. A corollary from the same spike:
+relevance reranking belongs at the **search top-k** stage, where every
+candidate is already plausibly on-topic — **not** at bundle truncation,
+where the candidates are graph neighbours and structure, not surface
+relevance, is the load-bearing signal.
