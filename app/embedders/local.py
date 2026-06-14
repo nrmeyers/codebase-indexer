@@ -53,8 +53,13 @@ DEFAULT_MODEL = "intfloat/e5-base-v2"
 
 #: Number of texts passed to one ``model.encode()`` call.  Matches the
 #: embed driver's ``_BATCH`` so each outer flush triggers roughly one
-#: ``encode()`` call → one progress tick → one heartbeat bump.
-ENCODE_BATCH_SIZE = 32
+#: ``encode()`` call → one progress tick → one heartbeat bump.  Override via
+#: ``LOCAL_ENCODE_BATCH_SIZE``: long-context code models (CodeRankEmbed,
+#: jina-v2-base-code — 8K ctx) can OOM a small GPU at 32; drop to 8.
+try:
+    ENCODE_BATCH_SIZE = int(os.environ.get("LOCAL_ENCODE_BATCH_SIZE") or 32)
+except ValueError:
+    ENCODE_BATCH_SIZE = 32
 
 #: Maximum character length for a single embed input text.  e5-base-v2
 #: silently truncates at 512 BPE tokens (~2–4 chars each); feeding it a
@@ -113,6 +118,14 @@ class LocalEmbedder(EmbedderBackend):
                 self.dim = EMBEDDING_DIM
         else:
             self.dim = EMBEDDING_DIM
+        # Some code embedders (CodeRankEmbed, jina-v2-base-code) ship custom
+        # modeling code that sentence-transformers only loads with
+        # trust_remote_code=True — which executes code from the model repo.
+        # Off by default (the e5/bge defaults don't need it); opt in via env
+        # for vetted POC models only.
+        self._trust_remote_code = os.environ.get(
+            "LOCAL_TRUST_REMOTE_CODE", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._model: Any | None = None
         # threading.Lock — NOT asyncio.Lock.
         # This guard must work across concurrent asyncio.run() calls in
@@ -141,7 +154,9 @@ class LocalEmbedder(EmbedderBackend):
             ) from exc
 
         try:
-            return SentenceTransformer(self.model)
+            return SentenceTransformer(
+                self.model, trust_remote_code=self._trust_remote_code
+            )
         except Exception as exc:  # noqa: BLE001 — surface the original cause
             raise EmbedderError(
                 f"LocalEmbedder failed to load model {self.model!r}: {exc}"
