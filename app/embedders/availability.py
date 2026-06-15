@@ -101,6 +101,13 @@ def _validate_backend_dependency(backend_name: str) -> None:
             raise EmbedderError(
                 "EMBEDDER_BACKEND=tei requires the 'httpx' package."
             ) from exc
+    elif backend_name == "llama_server":
+        try:
+            import httpx  # noqa: F401 — import-only check
+        except ImportError as exc:
+            raise EmbedderError(
+                "EMBEDDER_BACKEND=llama_server requires the 'httpx' package."
+            ) from exc
 
 
 def _probe_lm_studio_fallback() -> bool:

@@ -55,7 +55,7 @@ from .base import EMBEDDING_DIM, EmbedderBackend, EmbedderError
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "local"
-VALID_BACKENDS = ("local", "sagemaker", "tei", "openai")
+VALID_BACKENDS = ("local", "sagemaker", "tei", "openai", "llama_server")
 
 
 def _resolve_backend_name() -> str:
@@ -107,6 +107,10 @@ def get_embedder() -> EmbedderBackend:
         from .openai import OpenAIEmbedder
 
         return OpenAIEmbedder.from_env()
+    if name == "llama_server":
+        from .llama_server import LlamaServerEmbedder
+
+        return LlamaServerEmbedder.from_env()
     # Unreachable — _resolve_backend_name normalises to a valid value.
     raise EmbedderError(f"Unknown EMBEDDER_BACKEND: {name!r}")
 

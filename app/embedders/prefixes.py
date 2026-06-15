@@ -9,10 +9,14 @@ side (``app/scripts/embed_driver.py``) and the query sides
 (``app/routers/search.py::_embed_query`` and ``POST /embed``) consult
 :func:`apply_prefix`, so they can never drift out of symmetry.
 
-Scope: prefixes are applied ONLY to the in-process ``local`` backend — the
-POC swap path (``EMBEDDER_BACKEND=local`` + ``LOCAL_EMBED_MODEL``). Prod
-backends (``sagemaker``/``tei``/``openai``) keep their existing raw-text
-behaviour so already-built indexes stay valid.
+Scope: prefixes are applied ONLY to POC swap-path backends — the in-process
+``local`` backend (``EMBEDDER_BACKEND=local`` + ``LOCAL_EMBED_MODEL``) and the
+``llama_server`` backend (``EMBEDDER_BACKEND=llama_server`` against a llama.cpp
+embedding endpoint). Prod backends (``sagemaker``/``tei``/``openai``) keep
+their existing raw-text behaviour so already-built indexes stay valid. The
+``llama_server`` backend exposes the HF tokenizer id via ``prefix_model``;
+when present, the registry keys off that instead of the GGUF filename in
+``model`` so a quantised checkpoint still maps to its HF model card.
 
 Prefix values are verified against each model card — NOT the vendored
 ``codebase_rag.constants`` values, which are stale for CodeRankEmbed: those
@@ -57,6 +61,12 @@ PREFIXES: dict[str, ModelPrefix] = {
         query="Represent this query for searching relevant code: ",
         document="",
     ),
+    # Nomic general text embedder: symmetric task-instruction prefixes
+    # (search_query / search_document) per huggingface.co/nomic-ai/nomic-embed-text-v1.5.
+    "nomic-ai/nomic-embed-text-v1.5": ModelPrefix(
+        query="search_query: ",
+        document="search_document: ",
+    ),
 }
 
 _NO_PREFIX = ModelPrefix(query="", document="")
@@ -89,9 +99,12 @@ def apply_prefix(
     Returns:
         A new prefixed list, or ``texts`` unchanged when no prefix applies.
     """
-    if not texts or getattr(backend, "name", None) != "local":
+    if not texts or getattr(backend, "name", None) not in ("local", "llama_server"):
         return texts
-    mp = for_model(getattr(backend, "model", ""))
+    # ``prefix_model`` lets a backend (e.g. ``llama_server``) advertise an
+    # HF model id distinct from its serving name (e.g. a ``.gguf`` filename).
+    model_id = getattr(backend, "prefix_model", None) or getattr(backend, "model", "")
+    mp = for_model(model_id)
     prefix = mp.query if role == "query" else mp.document
     if not prefix:
         return texts

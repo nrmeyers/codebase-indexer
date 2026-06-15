@@ -4,14 +4,15 @@
     "repo": "TheForge",
     "q": "Find where incoming requests get authenticated",
     "ok": true,
-    "facet_coverage": 1.0,
+    "facet_coverage": 0.6667,
     "facets_covered": [
-      "session_jwt",
       "identity_provider",
       "service_token"
     ],
-    "facets_missed": [],
-    "result_count": 56
+    "facets_missed": [
+      "session_jwt"
+    ],
+    "result_count": 49
   },
   {
     "id": "probe-cis-collide",
@@ -24,20 +25,21 @@
       "conflict_response"
     ],
     "facets_missed": [],
-    "result_count": 45
+    "result_count": 38
   },
   {
     "id": "probe-cis-hang",
     "repo": "code-indexer-service",
     "q": "What kills a stuck indexing job?",
     "ok": true,
-    "facet_coverage": 1.0,
+    "facet_coverage": 0.5,
     "facets_covered": [
-      "watchdog",
+      "watchdog"
+    ],
+    "facets_missed": [
       "threshold"
     ],
-    "facets_missed": [],
-    "result_count": 39
+    "result_count": 23
   },
   {
     "id": "probe-cis-restart",
@@ -50,7 +52,7 @@
       "worker_token"
     ],
     "facets_missed": [],
-    "result_count": 55
+    "result_count": 24
   },
   {
     "id": "probe-cgr-resolve",
@@ -64,7 +66,7 @@
       "call_ingest"
     ],
     "facets_missed": [],
-    "result_count": 58
+    "result_count": 37
   },
   {
     "id": "probe-cis-fuse",
@@ -78,6 +80,6 @@
       "semantic"
     ],
     "facets_missed": [],
-    "result_count": 24
+    "result_count": 28
   }
 ]
