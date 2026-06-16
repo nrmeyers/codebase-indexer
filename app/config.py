@@ -12,11 +12,18 @@ Key design decisions:
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+_LADYBUG_DB_PATH_DEFAULT = ".cgr/graph.db"
+_ladybug_db_path_warned = False
 
 
 def slugify_repo(name: str) -> str:
@@ -40,9 +47,14 @@ class Settings(BaseSettings):
     """Runtime settings loaded from environment / ``.env``.
 
     Attributes:
-        LADYBUG_DB_PATH: Filesystem path to the shared LadybugDB file. Must
-            point to the same file as code-graph-rag for indexed data to be
-            visible across services.
+        LADYBUG_DB_DIR: Directory holding the per-repo ``{slug}.db`` files.
+            Canonical storage location — read paths derive the target ``.db``
+            from this dir + the slug.
+        LADYBUG_DB_PATH: Deprecated — retained only so prod deploys that
+            still export ``LADYBUG_DB_PATH`` boot without error.  No read
+            path in this service consults it; the embedded code-graph-rag
+            ingestor still uses its own ``LADYBUG_DB_PATH`` field which is
+            assigned per-job at index time.
         LADYBUG_BATCH_SIZE: Batch size used by the underlying ingestor when
             flushing nodes/relationships. Larger batches = fewer round-trips
             but higher peak memory.
@@ -58,11 +70,32 @@ class Settings(BaseSettings):
     # Per-repo DB files live under ``LADYBUG_DB_DIR`` as ``{slug}.db``.  Each
     # indexed repository gets its own isolated graph so the LadybugDB Explorer
     # can open one index at a time, WAL corruption in one doesn't blast others,
-    # and re-indexing is a simple unlink.  ``LADYBUG_DB_PATH`` is retained as
-    # a fallback / legacy pointer for code paths that don't yet know a repo.
+    # and re-indexing is a simple unlink.
+    #
+    # ``LADYBUG_DB_PATH`` is the legacy single-file pointer; this service no
+    # longer reads it (all routers resolve via ``LADYBUG_DB_DIR``).  It stays
+    # declared so existing prod deploys that still export the env var don't
+    # crash on ``extra="forbid"``-style strictness elsewhere in the stack; a
+    # one-time warning fires when an overriding value is observed.
     LADYBUG_DB_DIR: str = ".cgr/repos"
-    LADYBUG_DB_PATH: str = ".cgr/graph.db"
+    LADYBUG_DB_PATH: str = _LADYBUG_DB_PATH_DEFAULT
     LADYBUG_BATCH_SIZE: int = 1000
+
+    @model_validator(mode="after")
+    def _warn_legacy_ladybug_db_path(self) -> "Settings":
+        global _ladybug_db_path_warned
+        if _ladybug_db_path_warned:
+            return self
+        env_value = os.environ.get("LADYBUG_DB_PATH")
+        if env_value and env_value != _LADYBUG_DB_PATH_DEFAULT:
+            _ladybug_db_path_warned = True
+            logger.warning(
+                "LADYBUG_DB_PATH is deprecated and no longer read by this "
+                "service; set LADYBUG_DB_DIR instead. This slot will be "
+                "removed in a future release. (observed value: %r)",
+                env_value,
+            )
+        return self
 
     def db_path_for_repo(self, repo_name: str) -> str:
         """Return the per-repo LadybugDB file path for ``repo_name``.

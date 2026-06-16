@@ -185,3 +185,33 @@ def derive_slug(local_path: Path, fallback_basename: str) -> str:
     if canonical:
         return canonical
     return slugify_repo(fallback_basename or "repo")
+
+
+def resolve_db_path(repo: Optional[str]) -> Optional[str]:
+    """Resolve the LadybugDB ``.db`` file path for a query.
+
+    Single source of truth for routing read-side endpoints to the right
+    per-repo ``.db`` file under :data:`Settings.LADYBUG_DB_DIR`.
+
+    Args:
+        repo: Optional repo slug.  When supplied, resolves to that repo's
+            canonical ``{slug}.db`` path under ``LADYBUG_DB_DIR`` (existence
+            not checked here — the caller decides 404 vs. open-and-fail).
+            When None, returns the first ``.db`` file present under
+            ``LADYBUG_DB_DIR``.
+
+    Returns:
+        Filesystem path, or None when no repo was supplied and no
+        ``.db`` files are present under ``LADYBUG_DB_DIR``.
+    """
+    from ..config import settings
+
+    if repo:
+        return settings.db_path_for_repo(repo)
+
+    db_dir = Path(settings.LADYBUG_DB_DIR)
+    if db_dir.is_dir():
+        dbs = sorted(db_dir.glob("*.db"))
+        if dbs:
+            return str(dbs[0])
+    return None
