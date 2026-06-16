@@ -206,21 +206,24 @@ def _get_conn(repo: str | None = None):  # type: ignore[override]
 
     Args:
         repo: Optional repo slug — when given, routes to that repo's
-            per-repo DB file.  Falls back to the first indexed DB on disk
-            or the legacy combined path.
+            per-repo DB file.  Falls back to the first indexed DB on disk.
 
     Returns:
         lb.Connection: A connection usable for Cypher queries.
+
+    Raises:
+        HTTPException: 404 when no per-repo DB is present and ``repo`` is
+            omitted — the caller must index a repo first.
     """
     from ..services.ladybug_pool import open_read_conn
+    from ..services.slug import resolve_db_path as _resolve_db_path
 
-    from pathlib import Path as _Path
-    if repo:
-        db_path = settings.db_path_for_repo(repo)
-    else:
-        db_dir = _Path(settings.LADYBUG_DB_DIR)
-        dbs = sorted(db_dir.glob("*.db")) if db_dir.is_dir() else []
-        db_path = str(dbs[0]) if dbs else settings.LADYBUG_DB_PATH
+    db_path = _resolve_db_path(repo)
+    if db_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No index found. Run /index first.",
+        )
 
     # BUC-1571: read-only — context-bundle is a pure read path, no need
     # to contend with the indexer's exclusive lock.

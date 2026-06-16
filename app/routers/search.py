@@ -155,17 +155,21 @@ def _resolve_db_path(repo: str | None) -> str:
     Args:
         repo: Optional repo slug.  When given, resolves to that repo's
             per-repo DB file.  When omitted, falls back to the first indexed
-            repo on disk, or the legacy combined ``LADYBUG_DB_PATH``.
+            repo on disk.
 
     Returns:
         str: Filesystem path to the DB the caller should open.
 
     Raises:
         HTTPException: 404 when ``repo`` is supplied but no matching DB
-            exists — signalling the caller to index that repo first.
+            exists, or when ``repo`` is omitted and no per-repo DB has been
+            indexed yet — signalling the caller to run /index first.
     """
+    from ..services.slug import resolve_db_path as _resolve
+
     if repo:
-        path = settings.db_path_for_repo(repo)
+        path = _resolve(repo)
+        assert path is not None  # repo supplied: _resolve always returns a str
         if not Path(path).exists():
             raise HTTPException(
                 status_code=404,
@@ -173,13 +177,13 @@ def _resolve_db_path(repo: str | None) -> str:
             )
         return path
 
-    # No repo specified — try the first indexed DB, else legacy combined file.
-    db_dir = Path(settings.LADYBUG_DB_DIR)
-    if db_dir.is_dir():
-        dbs = sorted(db_dir.glob("*.db"))
-        if dbs:
-            return str(dbs[0])
-    return settings.LADYBUG_DB_PATH
+    path = _resolve(None)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No index found. Run /index first.",
+        )
+    return path
 
 
 def _get_conn(repo: str | None = None):  # type: ignore[override]  # returns lb.Connection

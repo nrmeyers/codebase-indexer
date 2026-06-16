@@ -108,7 +108,7 @@ def explorer_info(
     if target is None:
         # Nothing indexed yet — return a still-useful launch command pointed
         # at the DB directory so the UI can render the "what to do next" copy.
-        fallback_path = settings.LADYBUG_DB_PATH
+        fallback_path = str(Path(settings.LADYBUG_DB_DIR) / "graph.db")
         return ExplorerInfoResponse(
             available=False,
             db_path=fallback_path,
