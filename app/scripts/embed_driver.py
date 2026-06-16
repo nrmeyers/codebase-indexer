@@ -47,6 +47,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from app.services.symbol_cards import SYMBOL_CARD_MARKER
+
 # Enable faulthandler so a crash prints a full Python traceback to stderr
 # (captured in /tmp/cis_embed_{job_id}.log via the parent's redirect).
 #
@@ -699,6 +701,7 @@ def main(argv: list[str] | None = None) -> int:
     from codebase_rag.storage.vector_store import (
         EmbeddingRow,
         bulk_insert,
+        delete_embeddings,
         open_or_create,
         read_content_hashes,
     )
@@ -1015,7 +1018,7 @@ RETURN n.qualified_name AS qualified_name,
     _cards_path = Path(repo_db_path).with_name(
         Path(repo_db_path).stem + ".cards.json"
     )
-    _cards: dict[str, str] = {}
+    _cards: dict[str, Any] = {}
     if _cards_path.exists():
         try:
             _cards = json.loads(_cards_path.read_text())
@@ -1027,49 +1030,76 @@ RETURN n.qualified_name AS qualified_name,
             )
             _cards = {}
     _card_emitted = 0
-    if _cards:
-        _span_by_qn = {
-            r["qualified_name"]: r for r in _rows if r.get("qualified_name")
-        }
-        for _cqn, _desc in _cards.items():
-            _r = _span_by_qn.get(_cqn)
-            if not _r or not _desc:
-                continue
-            _crel = _r.get("rel_path") or ""
-            if not _crel or should_skip_embed(_crel):
-                continue
-            _cstart = _r.get("start_line")
-            _cend = _r.get("end_line")
-            _cabs = _crel if Path(_crel).is_absolute() else (
-                str(Path(_root_path) / _crel) if _root_path else _crel
-            )
-            _card_qn = f"{_cqn}::Symbol::card"
-            _card_text = truncate_embed_input(str(_desc))
-            _card_hash = compute_content_hash(_card_text)
-            if _existing_hashes.get(_card_qn) == _card_hash:
-                continue
-            _batch_texts.append(_card_text)
-            _batch_meta.append((
-                _card_qn,
-                _cabs,
-                int(_cstart) if _cstart is not None else 0,
-                int(_cend) if _cend is not None else 0,
-                "SymbolCard",
-                _card_hash,
-            ))
-            _card_emitted += 1
-            if len(_batch_texts) >= _BATCH:
-                _pending_batches.append((_batch_texts, _batch_meta))
-                _batch_texts = []
-                _batch_meta = []
-                if len(_pending_batches) >= _CONCURRENCY:
-                    _flush_pending(_pool)
-        if _batch_texts:
+    _span_by_qn = {
+        r["qualified_name"]: r for r in _rows if r.get("qualified_name")
+    }
+    _desired_card_qns: set[str] = set()
+    for _cqn, _entry in _cards.items():
+        # Sidecar schema is {qn: {desc, src_hash}}; legacy entries were a bare
+        # str. Accept both so old sidecars keep loading until regenerated.
+        if isinstance(_entry, dict):
+            _desc = _entry.get("desc") or ""
+        else:
+            _desc = _entry or ""
+        _r = _span_by_qn.get(_cqn)
+        if not _r or not _desc:
+            continue
+        _crel = _r.get("rel_path") or ""
+        if not _crel or should_skip_embed(_crel):
+            continue
+        _cstart = _r.get("start_line")
+        _cend = _r.get("end_line")
+        _cabs = _crel if Path(_crel).is_absolute() else (
+            str(Path(_root_path) / _crel) if _root_path else _crel
+        )
+        _card_qn = f"{_cqn}{SYMBOL_CARD_MARKER}"
+        _desired_card_qns.add(_card_qn)
+        _card_text = truncate_embed_input(str(_desc))
+        _card_hash = compute_content_hash(_card_text)
+        if _existing_hashes.get(_card_qn) == _card_hash:
+            continue
+        _batch_texts.append(_card_text)
+        _batch_meta.append((
+            _card_qn,
+            _cabs,
+            int(_cstart) if _cstart is not None else 0,
+            int(_cend) if _cend is not None else 0,
+            "SymbolCard",
+            _card_hash,
+        ))
+        _card_emitted += 1
+        if len(_batch_texts) >= _BATCH:
             _pending_batches.append((_batch_texts, _batch_meta))
-        if _pending_batches:
-            _flush_pending(_pool)
-        _batch_texts = []
-        _batch_meta = []
+            _batch_texts = []
+            _batch_meta = []
+            if len(_pending_batches) >= _CONCURRENCY:
+                _flush_pending(_pool)
+    if _batch_texts:
+        _pending_batches.append((_batch_texts, _batch_meta))
+    if _pending_batches:
+        _flush_pending(_pool)
+    _batch_texts = []
+    _batch_meta = []
+
+    # Orphan-row pruning: any ``%::Symbol::card`` row in .duck whose parent
+    # disappeared (rename / delete / moved to a skipped path / removed from
+    # cards.json) is no longer wanted. Without this they linger forever and
+    # surface in semantic results with stale embeddings + stale file_path.
+    try:
+        _existing_card_qns = {
+            qn for qn in _existing_hashes
+            if qn.endswith(SYMBOL_CARD_MARKER)
+        }
+        _orphan_card_qns = _existing_card_qns - _desired_card_qns
+        if _orphan_card_qns:
+            _pruned = delete_embeddings(_vec_conn, _orphan_card_qns)
+            print(
+                f"symbol cards pruned: {_pruned} orphan rows",
+                flush=True,
+            )
+    except Exception as _exc:  # noqa: BLE001
+        _warn(f"symbol_cards.prune_failed reason={type(_exc).__name__}:{_exc}")
+
     print(f"symbol cards emitted: {_card_emitted}", flush=True)
 
     # ------------------------------------------------------------------
