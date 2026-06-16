@@ -1892,6 +1892,10 @@ class _EmbedJob:
     # BUC-1601 (Fix A) — count of source files the embed subprocess
     # tried to read off disk and failed.  Should be 0 on healthy runs.
     dropped_unreadable: int = 0
+    # LE-151b — symbols that failed embedding (transient SageMaker /
+    # llama-server failures that survived retries). Lifted from the
+    # driver's EMBED_FAILED sentinel.
+    failed_count: int = 0
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -2032,12 +2036,15 @@ def _blocking_embed(job: _EmbedJob) -> None:
                 if line.startswith("Embedded"):
                     try:
                         parts = line.split()
-                        # Format: "Embedded {N} (skipped {M} unchanged, filtered {K})"
+                        # Format: "Embedded {N} (skipped {M} unchanged, filtered {K}, failed {L})"
+                        # (the trailing ", failed L)" is LE-151b; pre-LE-151b
+                        # drivers emit "filtered K)" — strip both trailing
+                        # punctuation so either format parses cleanly.
                         job.embedded_count = int(parts[1])
-                        # parts[3] = "{M}", parts[6] = "{K}" — "filtered K)"
-                        # so strip the trailing ')'.
                         job.skipped_unchanged = int(parts[3])
-                        job.skipped_filtered = int(parts[6].rstrip(")"))
+                        job.skipped_filtered = int(parts[6].rstrip(",)"))
+                        if len(parts) > 8:
+                            job.failed_count = int(parts[8].rstrip(")"))
                     except (IndexError, ValueError):
                         # Best-effort — don't fail the job over a log
                         # parse glitch; live PROGRESS values still fall
@@ -2049,6 +2056,21 @@ def _blocking_embed(job: _EmbedJob) -> None:
                     # passes ever each get their own (Phase 2), the latest
                     # is the most relevant.
                     reconcile_line = line.rstrip("\n")
+                elif line.startswith("EMBED_FAILED "):
+                    # LE-151b — lift the partial counts so the parent
+                    # surfaces ``embedded_count`` / ``failed_count`` in
+                    # /index/.../diff_metrics even on a failed pass.
+                    for tok in line.split():
+                        if tok.startswith("embedded="):
+                            try:
+                                job.embedded_count = int(tok.split("=", 1)[1])
+                            except (IndexError, ValueError):
+                                pass
+                        elif tok.startswith("failed="):
+                            try:
+                                job.failed_count = int(tok.split("=", 1)[1])
+                            except (IndexError, ValueError):
+                                pass
     except Exception:
         pass
 

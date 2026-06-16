@@ -23,13 +23,14 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-#: e5-base-v2 native output dimension and the dim of the on-disk DuckDB
-#: ``FLOAT[768]`` schema. Backends that produce this dim (``local`` with the
-#: default model, ``sagemaker``, ``tei``) are drop-in compatible with an
-#: existing index. Backends that produce a different dim (``openai``
-#: ``text-embedding-3-small`` = 1536, ``text-embedding-3-large`` = 3072,
-#: ``local`` with a non-default ``LOCAL_EMBED_MODEL``) require a fresh
-#: index — see ``docs/EMBEDDERS.md`` for the migration recipe.
+#: 768-dim — the shared schema dim of the on-disk DuckDB ``FLOAT[768]``
+#: index. Both e5-base-v2 and nomic-embed-text-v1.5 land here, so the
+#: ``local``, ``sagemaker``, ``tei``, and ``llama_server`` backends are
+#: drop-in compatible with an existing index. Backends that produce a
+#: different dim (``openai`` ``text-embedding-3-small`` = 1536,
+#: ``text-embedding-3-large`` = 3072, ``local`` with a non-default
+#: ``LOCAL_EMBED_MODEL``) require a fresh index — see ``docs/EMBEDDERS.md``
+#: for the migration recipe.
 EMBEDDING_DIM = 768
 
 
@@ -57,11 +58,13 @@ class EmbedderBackend(Protocol):
 
     Attributes:
         name: Stable identifier of the backend (``"local"``, ``"sagemaker"``,
-            ``"tei"``, or ``"openai"``). Surfaced in /health responses and
-            logs.
-        model: Name of the underlying model. The three default backends
-            serve ``intfloat/e5-base-v2``; the ``openai`` backend serves
-            ``text-embedding-3-small`` or ``text-embedding-3-large``.
+            ``"tei"``, ``"openai"``, or ``"llama_server"``). Surfaced in
+            /health responses and logs.
+        model: Name of the underlying model. The 768-dim backends serve
+            either ``intfloat/e5-base-v2`` (sagemaker, tei) or
+            ``nomic-ai/nomic-embed-text-v1.5`` (local default, llama_server);
+            both land at the shared 768 schema dim. The ``openai`` backend
+            serves ``text-embedding-3-small`` or ``text-embedding-3-large``.
         dim: Output vector dimensionality. Exposed so downstream vector-
             index sizing matches across backends — callers MUST verify this
             equals their DuckDB / pgvector schema's declared dim before

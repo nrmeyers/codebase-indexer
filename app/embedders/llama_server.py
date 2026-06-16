@@ -110,28 +110,15 @@ class LlamaServerEmbedder(EmbedderBackend):
 
     @classmethod
     def from_env(cls) -> "LlamaServerEmbedder":
-        base_url = (os.environ.get("LLAMA_SERVER_URL") or DEFAULT_URL).strip()
-        model = (os.environ.get("LLAMA_SERVER_MODEL") or DEFAULT_MODEL).strip()
-        tok = (os.environ.get("LLAMA_SERVER_TOKENIZER") or DEFAULT_TOKENIZER).strip()
-        try:
-            max_tokens = int(os.environ.get("LLAMA_SERVER_MAX_TOKENS") or DEFAULT_MAX_TOKENS)
-        except (TypeError, ValueError):
-            max_tokens = DEFAULT_MAX_TOKENS
-        try:
-            timeout_ms = int(os.environ.get("LLAMA_SERVER_TIMEOUT_MS") or DEFAULT_TIMEOUT_MS)
-        except (TypeError, ValueError):
-            timeout_ms = DEFAULT_TIMEOUT_MS
-        try:
-            batch_size = int(os.environ.get("LLAMA_SERVER_BATCH_SIZE") or DEFAULT_BATCH_SIZE)
-        except (TypeError, ValueError):
-            batch_size = DEFAULT_BATCH_SIZE
+        from ._env_utils import env_int
+
         return cls(
-            base_url=base_url,
-            model=model,
-            tokenizer_id=tok,
-            max_tokens=max_tokens,
-            timeout_ms=timeout_ms,
-            batch_size=batch_size,
+            base_url=(os.environ.get("LLAMA_SERVER_URL") or DEFAULT_URL).strip(),
+            model=(os.environ.get("LLAMA_SERVER_MODEL") or DEFAULT_MODEL).strip(),
+            tokenizer_id=(os.environ.get("LLAMA_SERVER_TOKENIZER") or DEFAULT_TOKENIZER).strip(),
+            max_tokens=env_int("LLAMA_SERVER_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+            timeout_ms=env_int("LLAMA_SERVER_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
+            batch_size=env_int("LLAMA_SERVER_BATCH_SIZE", DEFAULT_BATCH_SIZE),
         )
 
     def _get_tokenizer(self) -> Any:
@@ -190,30 +177,36 @@ class LlamaServerEmbedder(EmbedderBackend):
             out.append(t)
         return out
 
-    async def aclose(self) -> None:
-        # No-op: clients are per-call now (see __init__ comment).
-        return None
+    async def _embed_one(
+        self, client: httpx.AsyncClient, text: str, *, batch_index: int
+    ) -> list[float]:
+        """Per-string fallback when a batch request returns 5xx.
 
-    async def _embed_one(self, client: httpx.AsyncClient, text: str) -> list[float]:
-        """Per-string fallback when a batch request returns 5xx."""
+        ``batch_index`` is folded into every error message so a partial
+        batch failure points at the exact offending input rather than
+        collapsing into an opaque "single embed failed" message.
+        """
         payload: dict[str, Any] = {"model": self.model, "input": text}
         try:
             resp = await client.post("/v1/embeddings", json=payload)
         except httpx.HTTPError as exc:
             raise EmbedderError(
-                f"LlamaServerEmbedder POST /v1/embeddings failed (single): "
+                f"LlamaServerEmbedder POST /v1/embeddings failed "
+                f"(single, batch_index={batch_index}): "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         if resp.status_code != 200:
             raise EmbedderError(
-                f"LlamaServerEmbedder HTTP {resp.status_code} (single): "
+                f"LlamaServerEmbedder HTTP {resp.status_code} "
+                f"(single, batch_index={batch_index}): "
                 f"{resp.text[:400]}"
             )
         try:
             body = resp.json()
         except ValueError as exc:
             raise EmbedderError(
-                f"LlamaServerEmbedder: malformed JSON (single): {exc}"
+                f"LlamaServerEmbedder: malformed JSON "
+                f"(single, batch_index={batch_index}): {exc}"
             ) from exc
         return self._extract_vectors(body, expected=1)[0]
 
@@ -268,8 +261,8 @@ class LlamaServerEmbedder(EmbedderBackend):
                 len(chunk),
             )
             out: list[list[float]] = []
-            for t in chunk:
-                out.append(await self._embed_one(client, t))
+            for i, t in enumerate(chunk):
+                out.append(await self._embed_one(client, t, batch_index=i))
             return out
 
         if resp.status_code != 200:

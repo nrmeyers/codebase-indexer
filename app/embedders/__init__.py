@@ -1,37 +1,43 @@
 """Pluggable embedder backends for the Code Indexer service.
 
-Four interchangeable backends sit behind a single ``EmbedderBackend``
+Five interchangeable backends sit behind a single ``EmbedderBackend``
 protocol so the indexer can run anywhere from a laptop (no AWS, no
 model download) to a GPU box (TEI) to Navistone's production AWS
 account (SageMaker):
 
-    local       sentence-transformers in-process. Zero external deps.
-                Default for standalone installs. 768-dim (e5-base-v2;
-                local backend retains E5 until a Jina HF artifact ships).
-    sagemaker   Navistone's AWS SageMaker Serverless Inference endpoint
-                (jina-code-v2-serverless, us-east-1; was forge-e5-embed-v2,
-                swapped 2026-05-26 LE-129). 768-dim. Default for the
-                Navistone production deploy.
-    tei         Hugging Face Text-Embeddings-Inference HTTP sidecar
-                (http://localhost:8080). 768-dim. For GPU-batched
-                embedding without AWS or local CPU load.
-    openai      OpenAI ``/v1/embeddings``. 1536-dim (3-small, default) or
-                3072-dim (3-large). Cheapest "bring your own" path — no
-                local model download, no AWS account. Requires
-                ``OPENAI_API_KEY``.
+    local         sentence-transformers in-process. Zero external deps.
+                  Default for standalone installs. 768-dim
+                  (nomic-ai/nomic-embed-text-v1.5 since the 768-POC chose
+                  it over e5-base-v2: +3.9pp recall@10).
+    sagemaker     Navistone's AWS SageMaker Serverless Inference endpoint
+                  (jina-code-v2-serverless, us-east-1; was forge-e5-embed-v2,
+                  swapped 2026-05-26 LE-129). 768-dim. Default for the
+                  Navistone production deploy.
+    tei           Hugging Face Text-Embeddings-Inference HTTP sidecar
+                  (http://localhost:8080). 768-dim. For GPU-batched
+                  embedding without AWS or local CPU load.
+    openai        OpenAI ``/v1/embeddings``. 1536-dim (3-small, default) or
+                  3072-dim (3-large). Cheapest "bring your own" path — no
+                  local model download, no AWS account. Requires
+                  ``OPENAI_API_KEY``.
+    llama_server  ``llama.cpp`` ``llama-server`` HTTP sidecar (OpenAI-shape
+                  ``/v1/embeddings``). 768-dim. Used by the 768 POC harness
+                  to serve ``nomic-embed-text-v1.5.Q8_0.gguf`` without a
+                  Python-side model load.
 
 Selection
 ---------
 The backend is chosen by the ``EMBEDDER_BACKEND`` env var (case-insensitive,
-values ``local`` | ``sagemaker`` | ``tei``; default ``local``). Use
-``get_embedder()`` for the module-level singleton; the factory is cached so
-the heavy import / network probe only happens once per process.
+values ``local`` | ``sagemaker`` | ``tei`` | ``openai`` | ``llama_server``;
+default ``local``). Use ``get_embedder()`` for the module-level singleton;
+the factory is cached so the heavy import / network probe only happens once
+per process.
 
-Backends expose their output dim via ``embedder.dim``. The three
-default backends (``local``, ``sagemaker``, ``tei``) all return 768-dim
-``list[float]`` vectors so the existing LadybugDB / DuckDB ``FLOAT[768]``
-schema needs zero migration. The ``openai`` backend produces 1536 or
-3072 dim vectors and requires a schema migration before use (see
+Backends expose their output dim via ``embedder.dim``. The four 768-dim
+backends (``local``, ``sagemaker``, ``tei``, ``llama_server``) return
+``list[float]`` vectors that are drop-in compatible with the existing
+LadybugDB / DuckDB ``FLOAT[768]`` schema. The ``openai`` backend produces
+1536 or 3072 dim vectors and requires a schema migration before use (see
 ``docs/EMBEDDERS.md``).
 
 Examples
@@ -111,8 +117,6 @@ def get_embedder() -> EmbedderBackend:
         from .llama_server import LlamaServerEmbedder
 
         return LlamaServerEmbedder.from_env()
-    # Unreachable — _resolve_backend_name normalises to a valid value.
-    raise EmbedderError(f"Unknown EMBEDDER_BACKEND: {name!r}")
 
 
 __all__ = [

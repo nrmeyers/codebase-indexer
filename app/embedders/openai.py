@@ -157,19 +157,10 @@ class OpenAIEmbedder(EmbedderBackend):
                 f"OPENAI_EMBED_DIM={dim_env!r} is not an integer."
             ) from None
 
-        try:
-            batch_size = int(
-                os.environ.get("OPENAI_EMBED_BATCH_SIZE") or _DEFAULT_BATCH_SIZE
-            )
-        except (TypeError, ValueError):
-            batch_size = _DEFAULT_BATCH_SIZE
+        from ._env_utils import env_float, env_int
 
-        try:
-            timeout_s = float(
-                os.environ.get("OPENAI_TIMEOUT_S") or _DEFAULT_TIMEOUT_S
-            )
-        except (TypeError, ValueError):
-            timeout_s = _DEFAULT_TIMEOUT_S
+        batch_size = env_int("OPENAI_EMBED_BATCH_SIZE", _DEFAULT_BATCH_SIZE)
+        timeout_s = env_float("OPENAI_TIMEOUT_S", _DEFAULT_TIMEOUT_S)
 
         return cls(
             api_key=api_key,

@@ -886,10 +886,18 @@ RETURN n.qualified_name AS qualified_name,
                     )
                     _retry_err: BaseException | None = None
                     _retry_embs: list[list[float]] | None = None
+                    # The outer alarm was sized for the parallel pool wait
+                    # only — arm a fresh 150s budget for the synchronous
+                    # retry so a wedged batch cannot blow past the parent's
+                    # heartbeat deadline, then restore the outer alarm so
+                    # subsequent iterations remain watchdogged.
+                    _outer_remaining = signal.alarm(150)
                     try:
                         _retry_embs = _embed_batch(_texts)
                     except Exception as _exc2:  # noqa: BLE001
                         _retry_err = _exc2
+                    finally:
+                        signal.alarm(max(1, _outer_remaining) if _outer_remaining else 0)
                     if _retry_err is None and _retry_embs is not None:
                         # Retry succeeded — use the retry result.
                         _err = None

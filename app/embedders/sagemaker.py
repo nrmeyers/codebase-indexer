@@ -230,6 +230,7 @@ class SageMakerEmbedder(EmbedderBackend):
         # latency for a genuinely-dead endpoint (~31s of backoff total).
         self.max_attempts = min(max(1, max_attempts), 5)
         self._client: Any | None = None
+        self._nk_coalesce_warned = False
 
     @classmethod
     def from_env(cls) -> "SageMakerEmbedder":
@@ -264,30 +265,17 @@ class SageMakerEmbedder(EmbedderBackend):
                 "Set SAGEMAKER_ENDPOINT_NAME (preferred) or SAGEMAKER_EMBED_URL."
             )
 
+        from ._env_utils import env_int
+
         region = (os.environ.get("SAGEMAKER_EMBED_REGION") or "us-east-1").strip()
-        try:
-            batch_size = int(
-                os.environ.get("SAGEMAKER_EMBED_BATCH_SIZE") or _DEFAULT_BATCH_SIZE
-            )
-        except (TypeError, ValueError):
-            batch_size = _DEFAULT_BATCH_SIZE
-
-        try:
-            max_attempts = int(
-                os.environ.get("SAGEMAKER_EMBED_MAX_ATTEMPTS")
-                or _DEFAULT_MAX_ATTEMPTS
-            )
-        except (TypeError, ValueError):
-            max_attempts = _DEFAULT_MAX_ATTEMPTS
-
         model = (os.environ.get("SAGEMAKER_MODEL_ID") or "e5-base-v2").strip()
         prefix_model = (os.environ.get("SAGEMAKER_PREFIX_MODEL") or "").strip()
 
         return cls(
             endpoint_name=endpoint,
             region=region,
-            batch_size=batch_size,
-            max_attempts=max_attempts,
+            batch_size=env_int("SAGEMAKER_EMBED_BATCH_SIZE", _DEFAULT_BATCH_SIZE),
+            max_attempts=env_int("SAGEMAKER_EMBED_MAX_ATTEMPTS", _DEFAULT_MAX_ATTEMPTS),
             model=model,
             prefix_model=prefix_model,
         )
@@ -437,6 +425,17 @@ class SageMakerEmbedder(EmbedderBackend):
             # to pin a single-vector pooling task in predict_fn.
             if len(raw) > len(chunk) and len(raw) % len(chunk) == 0:
                 stride = len(raw) // len(chunk)
+                if not self._nk_coalesce_warned:
+                    logger.warning(
+                        "SageMaker endpoint %r returned %d rows for %d inputs "
+                        "(stride=%d) — falling back to first-row-per-input. "
+                        "Pin a single-vector pooling task in predict_fn to fix.",
+                        self.endpoint_name,
+                        len(raw),
+                        len(chunk),
+                        stride,
+                    )
+                    self._nk_coalesce_warned = True
                 raw = [raw[i * stride] for i in range(len(chunk))]
 
             if len(raw) != len(chunk):
