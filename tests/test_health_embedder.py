@@ -168,6 +168,50 @@ def test_health_embedder_reports_lm_studio_fallback(
     assert block["fallback_lm_studio"] is True
 
 
+def test_health_embedder_unavailable_when_llama_server_transformers_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``EMBEDDER_BACKEND=llama_server`` + missing transformers → available: False.
+
+    The factory can advertise itself fine (HTTP probe deferred), but the
+    dependency validation step must still surface the missing client-side
+    ``transformers`` package as a populated ``last_error``.
+    """
+    import sys
+
+    class _FakeBackend:
+        name = "llama_server"
+        model = "nomic-ai/nomic-embed-text-v1.5"
+        dim = EMBEDDING_DIM
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[0.0] * EMBEDDING_DIM for _ in texts]
+
+    monkeypatch.setenv("EMBEDDER_BACKEND", "llama_server")
+    monkeypatch.setattr(
+        "app.embedders.availability.get_embedder",
+        lambda: _FakeBackend(),
+    )
+    monkeypatch.setattr(
+        "app.embedders.availability._probe_lm_studio_fallback",
+        lambda: False,
+    )
+    # Force the import-only ``transformers`` check inside
+    # ``_validate_backend_dependency`` to fail, mirroring a slim install.
+    saved = sys.modules.get("transformers")
+    sys.modules["transformers"] = None  # type: ignore[assignment]
+    try:
+        status = embedder_availability.probe_embedder()
+    finally:
+        if saved is not None:
+            sys.modules["transformers"] = saved
+        else:
+            sys.modules.pop("transformers", None)
+
+    assert status["available"] is False
+    assert "transformers" in (status["last_error"] or "")
+
+
 def test_emit_startup_warning_silent_when_available() -> None:
     """No banner when the primary backend is available."""
     import io

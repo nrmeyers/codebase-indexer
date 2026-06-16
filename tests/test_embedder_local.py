@@ -24,11 +24,14 @@ def test_local_embedder_satisfies_protocol() -> None:
     assert isinstance(LocalEmbedder(), EmbedderBackend)
 
 
-def test_local_embedder_exposes_dim() -> None:
-    """dim attribute defaults to EMBEDDING_DIM (e5-base-v2's 768)."""
+def test_local_embedder_exposes_dim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dim attribute defaults to EMBEDDING_DIM (nomic-v1.5's 768)."""
+    monkeypatch.delenv("LOCAL_EMBED_MODEL", raising=False)
+    monkeypatch.delenv("LOCAL_EMBED_DIM", raising=False)
     backend = LocalEmbedder()
     assert backend.dim == EMBEDDING_DIM
     assert backend.name == "local"
+    assert backend.model == "nomic-ai/nomic-embed-text-v1.5"
 
 
 def test_local_embedder_dim_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,3 +85,33 @@ async def test_local_embedder_missing_sentence_transformers_raises() -> None:
             sys.modules["sentence_transformers"] = saved
         else:
             sys.modules.pop("sentence_transformers", None)
+
+
+def test_local_embedder_auto_trusts_default_nomic_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default model is in AUTO_TRUST_REMOTE_CODE_MODELS -> trust_remote_code on."""
+    monkeypatch.delenv("LOCAL_EMBED_MODEL", raising=False)
+    monkeypatch.delenv("LOCAL_TRUST_REMOTE_CODE", raising=False)
+    backend = LocalEmbedder()
+    assert backend._trust_remote_code is True
+
+
+def test_local_embedder_does_not_trust_arbitrary_model_without_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unvetted LOCAL_EMBED_MODEL stays opt-in: trust_remote_code stays False."""
+    monkeypatch.setenv("LOCAL_EMBED_MODEL", "some/other-model")
+    monkeypatch.delenv("LOCAL_TRUST_REMOTE_CODE", raising=False)
+    backend = LocalEmbedder()
+    assert backend._trust_remote_code is False
+
+
+def test_local_embedder_env_opt_in_trusts_arbitrary_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LOCAL_TRUST_REMOTE_CODE=1 forces trust on for any model id."""
+    monkeypatch.setenv("LOCAL_EMBED_MODEL", "some/other-model")
+    monkeypatch.setenv("LOCAL_TRUST_REMOTE_CODE", "1")
+    backend = LocalEmbedder()
+    assert backend._trust_remote_code is True
