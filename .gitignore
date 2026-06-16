@@ -18,6 +18,7 @@ wheels/
 *.log
 service.log
 .cgr/
+.cgr-poc/
 .cgr-hash-cache.json
 .cgr-stat-cache.json
 # .planning/ holds team deliverables (DEVOPS_REQUEST, FRONTEND_AGENT_BRIEF,

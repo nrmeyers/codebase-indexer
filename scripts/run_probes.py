@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _harness_common import resolve_slugs_async  # noqa: E402
 from grade_queries import _grade_design  # noqa: E402
 from run_e2e import _DEFAULT_REPO_PATHS, _extract_top_k  # noqa: E402
 
@@ -39,26 +40,12 @@ log = logging.getLogger("probes")
 SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "eval" / "probes" / "snapshots"
 
 
-async def _resolve_slugs(
-    client: httpx.AsyncClient, base: str, repos: set[str]
-) -> dict[str, str]:
-    """Map checkout dir names to canonical service slugs via /health."""
-    slug_map: dict[str, str] = {}
-    health = (await client.get(f"{base}/health", timeout=10.0)).json()
-    slugs = [r["name"] for r in health.get("repos", [])]
-    for name in repos:
-        dir_name = Path(_DEFAULT_REPO_PATHS.get(name, name)).name
-        match = next((s for s in slugs if s == dir_name), None) or next(
-            (s for s in slugs if dir_name.lower() in s.lower()), None
-        )
-        slug_map[name] = match or dir_name
-    return slug_map
-
-
 async def run_probes(base: str, probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     async with httpx.AsyncClient() as client:
-        slug_map = await _resolve_slugs(client, base, {p["repo"] for p in probes})
+        slug_map = await resolve_slugs_async(
+            client, base, {p["repo"] for p in probes}, _DEFAULT_REPO_PATHS
+        )
         for probe in probes:
             r = await client.post(
                 f"{base}/context-bundle",

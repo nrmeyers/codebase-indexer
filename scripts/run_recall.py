@@ -30,6 +30,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _harness_common import resolve_slugs_sync  # noqa: E402
 from grade_queries import _grade_design  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -37,18 +38,6 @@ log = logging.getLogger("recall")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _CUTOFFS = (10, 25, 50)
-
-
-def _resolve_slugs(base: str, repos: set[str]) -> dict[str, str]:
-    health = httpx.get(f"{base}/health", timeout=10).json()
-    slugs = [r["name"] for r in health.get("repos", [])]
-    out: dict[str, str] = {}
-    for name in repos:
-        match = next((s for s in slugs if s == name), None) or next(
-            (s for s in slugs if name.lower() in s.lower()), None
-        )
-        out[name] = match or name
-    return out
 
 
 def main() -> int:
@@ -65,7 +54,7 @@ def main() -> int:
         log.error("no design queries")
         return 1
 
-    slug_map = _resolve_slugs(args.service_url, {q["repo"] for q in tasks})
+    slug_map = resolve_slugs_sync(args.service_url, {q["repo"] for q in tasks})
     per_cutoff: dict[int, list[float]] = {c: [] for c in _CUTOFFS}
     rows = []
 

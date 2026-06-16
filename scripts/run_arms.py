@@ -50,6 +50,7 @@ from typing import Any
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _harness_common import resolve_slugs_async  # noqa: E402
 from grade_queries import _grade_design  # noqa: E402
 from run_e2e import _DEFAULT_REPO_PATHS, _extract_top_k  # noqa: E402
 
@@ -132,7 +133,7 @@ def run_external(spec: dict[str, Any] | None, repo: str) -> list[dict[str, Any]]
             text=True,
             check=False,
         )
-        chunk = res.stdout.splitlines()[: EXTERNAL_MAX_LINES - len(out_lines)]
+        chunk = res.stdout.splitlines()[: EXTERNAL_MAX_LINES - len(out_lines) - 1]
         if chunk:
             out_lines.append(f"### git grep -n -C3 -i {kw}")
             out_lines.extend(chunk)
@@ -156,21 +157,6 @@ async def run_composed(
         log.error("%s: /context-bundle %s: %s", q["id"], r.status_code, r.text[:200])
         return []
     return _extract_top_k("design", r.json())
-
-
-async def _resolve_slugs(
-    client: httpx.AsyncClient, base: str, repos: set[str]
-) -> dict[str, str]:
-    slug_map: dict[str, str] = {}
-    health = (await client.get(f"{base}/health", timeout=10.0)).json()
-    slugs = [r["name"] for r in health.get("repos", [])]
-    for name in repos:
-        dir_name = Path(_DEFAULT_REPO_PATHS.get(name, name)).name
-        match = next((s for s in slugs if s == dir_name), None) or next(
-            (s for s in slugs if dir_name.lower() in s.lower()), None
-        )
-        slug_map[name] = match or dir_name
-    return slug_map
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +190,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
     results: list[dict[str, Any]] = []
     async with httpx.AsyncClient() as client:
-        slug_map = await _resolve_slugs(client, args.service_url, repos)
+        slug_map = await resolve_slugs_async(
+            client, args.service_url, repos, _DEFAULT_REPO_PATHS
+        )
         for q in tasks:
             spec, oracle_items = hydrate_oracle(q["id"])
             if spec is None:

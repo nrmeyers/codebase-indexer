@@ -1,17 +1,20 @@
 """LM Studio adapter — thin HTTP client for the OpenAI-compatible local API.
 
 LM Studio (https://lmstudio.ai) hosts GGUF/MLX models on a localhost server
-that speaks a subset of the OpenAI API.  When the user has it running with
-a code-embedding and/or code-reranking model loaded, we prefer it over the
-in-process ``transformers`` path because:
+that speaks a subset of the OpenAI API. This module exposes two surfaces:
 
-* The model stays warm in LM Studio's process, eliminating the ~3-5s cold
-  start uvicorn pays on the first query.
-* uvicorn's resident set stays lean (~500 MB instead of ~5 GB once a
-  reranker is added).
-* OOM kills land in LM Studio, not in the indexer service.
+* **Rerank** (``chat_complete``) — the ONLY rerank backend currently wired
+  into ``app.services.reranker``. ``RERANK_ENABLED=true`` + a CodeRankLLM-
+  class model loaded in LM Studio is the supported configuration. BUC-1545
+  tracks replacing this with a non-LM-Studio backend; until that ships,
+  this module is load-bearing and cannot be deleted.
+* **Embed** (``embed``) — dev fallback only, called from
+  ``app.routers.search._embed_query``. The prod ingest/query path uses
+  ``app.embedders.get_embedder()`` (local/sagemaker/tei/openai); this
+  helper only takes effect when LM Studio is up and a CodeRankEmbed-class
+  model is loaded. Self-fallback to the configured backend on any failure.
 
-Both backends remain in tree.  The adapter is **opt-in via env var**:
+Opt-in via env var:
 
     LM_STUDIO_URL=http://localhost:1234   # empty/unset = disabled
     LM_STUDIO_EMBED_MODEL=CodeRankEmbed   # substring match against /v1/models
@@ -19,8 +22,7 @@ Both backends remain in tree.  The adapter is **opt-in via env var**:
 
 Health probing is best-effort and *non-fatal*: if LM Studio is unreachable
 or the requested model isn't loaded, callers transparently fall back to
-the in-process embedder (``codebase_rag.embedder``) and skip the optional
-rerank stage.
+``app.embedders`` and skip the optional rerank stage.
 
 This module has zero hard dependencies on FastAPI, pydantic-settings, or
 any other infra — it reads the env vars directly so the same module can be

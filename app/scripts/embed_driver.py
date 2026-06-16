@@ -474,6 +474,13 @@ def resolve_batch_embedder() -> Any:
             # ``query`` prefix ``_embed_query`` applies; see
             # app.embedders.prefixes. No-op for prod backends and symmetric
             # models, so the prod ingest path is byte-for-byte unchanged.
+            #
+            # Throughput note: ``asyncio.run`` builds a fresh event loop per
+            # batch flush. Cheap when batches are big and infrequent, but
+            # raising ``SAGEMAKER_EMBED_CONCURRENCY`` beyond 1 multiplies
+            # the per-thread loop-construction overhead. If that ever becomes
+            # the bottleneck, hoist a single persistent loop here and call
+            # ``loop.run_until_complete``.
             prefixed = apply_prefix(backend, list(texts), role="document")
             return asyncio.run(backend.embed(prefixed))
 

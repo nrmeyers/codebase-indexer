@@ -271,6 +271,10 @@ def _expand_call_graph(
             captures wiring context — e.g. the route-mounting function that
             applies auth middleware around a seeded route handler — that a
             callee-only walk can never reach.
+        exclude_test_callees: When True, callees whose qname matches
+            ``_is_test_symbol`` (paths containing ``.tests.`` / ``.test.`` /
+            ``.spec.``, or ending in ``.test``) are dropped from the BFS
+            frontier so production wiring is not crowded out by test code.
 
     Returns:
         tuple:

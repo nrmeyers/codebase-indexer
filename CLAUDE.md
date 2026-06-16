@@ -105,7 +105,7 @@ Plus `GET /metrics` (Prometheus) and `GET /openapi.json`.
 | `slug.py` | Canonical `{org}__{repo}` slug derivation |
 | `source_fetch.py` | Source snippet resolution for FQNs (context-bundle + reranker) |
 | `reranker.py` | Opt-in (`?rerank=true`) listwise rerank; fail-open — always falls back to bi-encoder order |
-| `lm_studio.py` | **Deprecated** (LM Studio retired LE-129); kept for back-compat |
+| `lm_studio.py` | Only rerank backend currently wired (used by `reranker.py`); also a dev-only embed fallback in `search.py:_embed_query`. BUC-1545 tracks replacing it. |
 
 ## Embedders (app/embedders/)
 

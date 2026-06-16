@@ -192,26 +192,20 @@ class Settings(BaseSettings):
     CONTEXT_BUNDLE_TEST_PATH_PENALTY: float = 0.4
 
     # --- Rerank pipeline (disabled by default) ---
-    # Master control for the two-stage retrieval rerank path.  When False (default),
-    # dense vector ranking (e5-base-v2 + DuckDB cosine) is the only ranker.
-    # When True, semantic search top-50 are reranked via CodeRankLLM.
-    # LM Studio was retired (TheForge PR #168); future implementations will wire
-    # LLM-as-reranker via a different backend (e.g. Manifest) — see BUC-1545.
+    # Master control for the two-stage retrieval rerank path. When False
+    # (default), dense vector ranking is the only ranker. When True,
+    # semantic search top-50 are reranked via the LM Studio backend (the
+    # only rerank backend currently wired; see app/services/lm_studio.py).
+    # BUC-1545 tracks replacing this with a non-LM-Studio backend.
     RERANK_ENABLED: bool = False
 
-    # --- LM Studio adapter (deprecated; LM Studio retired in TheForge PR #168) ---
-    # These settings are retained for backward compatibility and reference.
-    # LM_STUDIO_URL is no longer probed at startup.  To re-enable rerank in a
-    # future release, set RERANK_ENABLED=true and configure a non-LM-Studio
-    # backend (TBD; see docs/SEARCH_RANKING.md for options).
-    # These are READ DIRECTLY by app.services.lm_studio (which has no
-    # pydantic-settings dependency), so duplicating them here is purely
-    # for documentation / IDE discoverability.  Keep names in sync with
-    # lm_studio._env() default values.
-    LM_STUDIO_URL: str = ""                       # e.g. http://localhost:1234 (deprecated)
-    LM_STUDIO_EMBED_MODEL: str = "CodeRankEmbed"  # substring hint (deprecated)
-    LM_STUDIO_RERANK_MODEL: str = "CodeRankLLM"   # substring hint (deprecated)
-    LM_STUDIO_TIMEOUT: float = 30.0
+    # LM_STUDIO_URL / LM_STUDIO_EMBED_MODEL / LM_STUDIO_RERANK_MODEL /
+    # LM_STUDIO_TIMEOUT are read directly by app.services.lm_studio via
+    # os.environ (the adapter has no pydantic-settings dependency, on
+    # purpose, so it can be imported from subprocess scripts without
+    # dragging in the settings stack). They are documented in
+    # .env.example; not redeclared here to avoid the out-of-sync trap
+    # of two sources of truth.
 
     # --- S3 snapshot / restore (BUC-1499) ---
     # When S3_INDEX_BUCKET is set the service pulls index files from S3 on
@@ -240,9 +234,9 @@ class Settings(BaseSettings):
     # Priority: SAGEMAKER_ENDPOINT_NAME > SAGEMAKER_EMBED_ENDPOINT > derived from URL.
     # Requires AWS credentials with sagemaker:InvokeEndpoint on the endpoint.
     # Read directly by app.embedders.sagemaker.SageMakerEmbedder.from_env().
-    SAGEMAKER_ENDPOINT_NAME: str = ""             # BUC-1605 preferred name (e.g. jina-code-v2-serverless; was forge-e5-embed-v2, swapped 2026-05-26 LE-129)
-    SAGEMAKER_EMBED_URL: str = ""                 # legacy alias: https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/forge-e5-embed-v1/invocations
-    SAGEMAKER_EMBED_ENDPOINT: str = ""            # legacy alias: forge-e5-embed-v1
+    SAGEMAKER_ENDPOINT_NAME: str = ""             # BUC-1605 preferred name (e.g. jina-code-v2-serverless, or nomic-v1.5-serverless post-swap)
+    SAGEMAKER_EMBED_URL: str = ""                 # legacy alias: https://runtime.sagemaker.us-east-1.amazonaws.com/endpoints/jina-code-v2-serverless/invocations
+    SAGEMAKER_EMBED_ENDPOINT: str = ""            # legacy alias: jina-code-v2-serverless
     SAGEMAKER_EMBED_REGION: str = "us-east-1"
     SAGEMAKER_EMBED_BATCH_SIZE: int = 32          # 16–64 per Forge contract
 
@@ -289,19 +283,6 @@ class Settings(BaseSettings):
     # os.environ without reloading the module.  The duplicated declaration
     # here is purely for IDE discoverability + .env.template documentation.
     CROSS_REPO_IMPORTS_ENABLED: bool = False
-
-    # --- Phase 1.3: code-specific embedding A/B path ---
-    # Default 'e5-base-v2' preserves the pre-Phase-1.3 behaviour exactly.
-    # Set to 'bge-code-v1' to write to the parallel embedding_v2 column and
-    # have search read from it (with graceful fallback to embedding when v2
-    # is NULL during partial migration).  See app/services/embedder.py.
-    # Read directly by app.services.embedder (no pydantic dep) — the values
-    # below are documentation / IDE discoverability only.
-    EMBEDDING_MODEL_ACTIVE: str = "e5-base-v2"     # 'e5-base-v2' | 'bge-code-v1'
-    SAGEMAKER_BGE_CODE_URL: str = ""               # full invocation URL (preferred)
-    SAGEMAKER_BGE_CODE_ENDPOINT: str = ""          # fallback if URL not set
-    SAGEMAKER_BGE_CODE_REGION: str = "us-east-1"
-    SAGEMAKER_BGE_CODE_BATCH_SIZE: int = 16
 
 
 # Module-level singleton — import this rather than re-instantiating Settings.
