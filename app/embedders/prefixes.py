@@ -9,14 +9,18 @@ side (``app/scripts/embed_driver.py``) and the query sides
 (``app/routers/search.py::_embed_query`` and ``POST /embed``) consult
 :func:`apply_prefix`, so they can never drift out of symmetry.
 
-Scope: prefixes are applied ONLY to POC swap-path backends — the in-process
-``local`` backend (``EMBEDDER_BACKEND=local`` + ``LOCAL_EMBED_MODEL``) and the
+Scope: prefixes are applied to the POC swap-path backends — the in-process
+``local`` backend (``EMBEDDER_BACKEND=local`` + ``LOCAL_EMBED_MODEL``), the
 ``llama_server`` backend (``EMBEDDER_BACKEND=llama_server`` against a llama.cpp
-embedding endpoint). Prod backends (``sagemaker``/``tei``/``openai``) keep
-their existing raw-text behaviour so already-built indexes stay valid. The
-``llama_server`` backend exposes the HF tokenizer id via ``prefix_model``;
-when present, the registry keys off that instead of the GGUF filename in
-``model`` so a quantised checkpoint still maps to its HF model card.
+embedding endpoint), and the ``sagemaker`` backend once the endpoint advertises
+a registered HF model id via ``SAGEMAKER_PREFIX_MODEL``. The remaining prod
+backends (``tei``/``openai``) keep their existing raw-text behaviour so
+already-built indexes stay valid. The ``llama_server`` and ``sagemaker``
+backends expose the HF tokenizer / model id via ``prefix_model``; when
+present, the registry keys off that instead of the friendlier ``model`` label
+so a GGUF filename or a SageMaker deployment alias still maps to its HF model
+card. SageMaker with ``prefix_model`` unset is the back-compat path: the gate
+finds no registry hit and returns texts unchanged.
 
 Prefix values are verified against each model card — NOT the vendored
 ``codebase_rag.constants`` values, which are stale for CodeRankEmbed: those
@@ -85,14 +89,15 @@ def apply_prefix(
 ) -> list[str]:
     """Prepend the model's ``role``-appropriate prefix to each text.
 
-    No-op (returns ``texts`` unchanged) unless the backend is one of the POC
-    swap-path backends (``local`` or ``llama_server``) AND its resolved model
-    has a non-empty prefix for this role. The resolved model is
-    ``backend.prefix_model`` when present (so a ``llama_server`` GGUF can
-    advertise its HF tokenizer id), otherwise ``backend.model``. Gating here
-    means callers don't need to know which models are asymmetric — they only
-    declare whether they're embedding a query or a document, and index/query
-    symmetry is guaranteed because both sides read this registry.
+    No-op (returns ``texts`` unchanged) unless the backend is one of the
+    swap-path backends (``local``, ``llama_server``, or ``sagemaker``) AND
+    its resolved model has a non-empty prefix for this role. The resolved
+    model is ``backend.prefix_model`` when present (so a ``llama_server``
+    GGUF or a ``sagemaker`` endpoint can advertise its HF id), otherwise
+    ``backend.model``. Gating here means callers don't need to know which
+    models are asymmetric — they only declare whether they're embedding a
+    query or a document, and index/query symmetry is guaranteed because
+    both sides read this registry.
 
     Args:
         backend: The resolved embedder backend (``name`` + ``model`` are read).
@@ -102,7 +107,11 @@ def apply_prefix(
     Returns:
         A new prefixed list, or ``texts`` unchanged when no prefix applies.
     """
-    if not texts or getattr(backend, "name", None) not in ("local", "llama_server"):
+    if not texts or getattr(backend, "name", None) not in (
+        "local",
+        "llama_server",
+        "sagemaker",
+    ):
         return texts
     # ``prefix_model`` lets a backend (e.g. ``llama_server``) advertise an
     # HF model id distinct from its serving name (e.g. a ``.gguf`` filename).

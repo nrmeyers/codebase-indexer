@@ -5,9 +5,10 @@ symmetric: the query side (``embed_text_sync(role="query")``, used by
 ``search._embed_query``) and the index side (``resolve_batch_embedder``'s
 ``_embed_via_backend``, ``role="document"``).
 
-The gate is ``backend.name == "local"`` — prod backends keep raw-text
-behaviour, which is what keeps the existing ``test_embed_driver`` symmetry
-tests (they use a ``sagemaker``-named fake) green.
+The gate is ``backend.name in {"local", "llama_server", "sagemaker"}`` —
+``sagemaker`` only prefixes when the endpoint advertises a registered HF id
+via ``prefix_model``. ``tei`` / ``openai`` keep raw-text behaviour so the
+existing index files stay valid.
 """
 from __future__ import annotations
 
@@ -76,10 +77,46 @@ def test_apply_prefix_local_e5_query_and_document() -> None:
     ]
 
 
+def test_apply_prefix_llama_server_e5_query_and_document() -> None:
+    be = _FakeBackend(name="llama_server", model="intfloat/e5-base-v2")
+    assert apply_prefix(be, ["x", "y"], role="query") == ["query: x", "query: y"]
+    assert apply_prefix(be, ["x", "y"], role="document") == [
+        "passage: x",
+        "passage: y",
+    ]
+
+
+def test_apply_prefix_sagemaker_with_prefix_model_query_and_document() -> None:
+    # SageMaker only prefixes when the endpoint advertises a registered HF
+    # id via prefix_model; the gate flip is what makes the nomic-v1.5
+    # endpoint swap actually wire its search_query: / search_document:
+    # prefixes through both index and query paths.
+    be = _FakeBackend(name="sagemaker", model="nomic-v1.5")
+    be.prefix_model = "nomic-ai/nomic-embed-text-v1.5"
+    assert apply_prefix(be, ["x"], role="query") == ["search_query: x"]
+    assert apply_prefix(be, ["x"], role="document") == ["search_document: x"]
+
+
+def test_apply_prefix_sagemaker_without_prefix_model_is_noop() -> None:
+    # Back-compat: when SAGEMAKER_PREFIX_MODEL is unset the gate fires but
+    # the registry lookup falls back to backend.model ("e5-base-v2"), which
+    # is not a registry key, so no prefix is prepended.
+    be = _FakeBackend(name="sagemaker", model="e5-base-v2")
+    assert apply_prefix(be, ["x"], role="query") == ["x"]
+    assert apply_prefix(be, ["x"], role="document") == ["x"]
+
+
+def test_apply_prefix_prefix_model_takes_precedence_over_model() -> None:
+    be = _FakeBackend(name="local", model="custom-q4.gguf")
+    be.prefix_model = "intfloat/e5-base-v2"
+    assert apply_prefix(be, ["x"], role="query") == ["query: x"]
+    assert apply_prefix(be, ["x"], role="document") == ["passage: x"]
+
+
 def test_apply_prefix_noop_for_nonlocal_backend_even_with_known_model() -> None:
-    # Prod backends keep raw-text behaviour so already-built indexes stay
-    # valid — the gate is backend.name == "local".
-    be = _FakeBackend(name="sagemaker", model="intfloat/e5-base-v2")
+    # tei/openai keep raw-text behaviour so already-built indexes stay
+    # valid — the gate is backend.name in {local, llama_server, sagemaker}.
+    be = _FakeBackend(name="tei", model="intfloat/e5-base-v2")
     assert apply_prefix(be, ["x"], role="query") == ["x"]
     assert apply_prefix(be, ["x"], role="document") == ["x"]
 

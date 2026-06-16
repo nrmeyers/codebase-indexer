@@ -196,10 +196,9 @@ def _mean_pool(x: Any) -> Any:
 
 
 class SageMakerEmbedder(EmbedderBackend):
-    """Boto3-backed client for Navistone's SageMaker e5-base-v2 endpoint."""
+    """Boto3-backed client for Navistone's SageMaker embedding endpoint."""
 
     name = "sagemaker"
-    model = "e5-base-v2"
     dim = EMBEDDING_DIM
 
     def __init__(
@@ -208,11 +207,22 @@ class SageMakerEmbedder(EmbedderBackend):
         region: str = "us-east-1",
         batch_size: int = _DEFAULT_BATCH_SIZE,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        model: str = "e5-base-v2",
+        prefix_model: str = "",
     ) -> None:
         if not endpoint_name:
             raise EmbedderError("SageMakerEmbedder: endpoint_name must be non-empty")
         self.endpoint_name = endpoint_name
         self.region = region
+        # Instance attr so swapping the underlying SageMaker deployment
+        # (e.g. e5-base-v2 -> nomic-embed-text-v1.5) is a single env var
+        # change rather than a class-attr lie about what the endpoint serves.
+        self.model = model
+        # Consulted by :mod:`app.embedders.prefixes`: a SageMaker endpoint
+        # serving an instruction-tuned model (e.g. nomic-v1.5) can advertise
+        # the HF model id explicitly without depending on the friendlier
+        # ``model`` label happening to match a registry key.
+        self.prefix_model = prefix_model
         # Clamp to the SageMaker contract (1-64). Larger batches trip the
         # 60s serverless timeout; smaller ones throttle ingest throughput.
         self.batch_size = min(max(1, batch_size), 64)
@@ -230,6 +240,15 @@ class SageMakerEmbedder(EmbedderBackend):
             2. ``SAGEMAKER_EMBED_ENDPOINT`` — legacy alias kept for
                backwards-compat with existing Navistone .env files.
             3. ``SAGEMAKER_EMBED_URL`` — full URL, endpoint name extracted.
+
+        Model labelling (independent of endpoint resolution):
+            * ``SAGEMAKER_MODEL_ID`` — human label exposed as ``.model``
+              (defaults to ``e5-base-v2`` for backwards compat).
+            * ``SAGEMAKER_PREFIX_MODEL`` — HF model id consulted by
+              :mod:`app.embedders.prefixes` (e.g.
+              ``nomic-ai/nomic-embed-text-v1.5``). Required to enable
+              query/document prefixing for SageMaker-served instruction-
+              tuned models; unset means raw-text behaviour preserved.
         """
         url = (os.environ.get("SAGEMAKER_EMBED_URL") or "").strip()
         endpoint = (
@@ -261,11 +280,16 @@ class SageMakerEmbedder(EmbedderBackend):
         except (TypeError, ValueError):
             max_attempts = _DEFAULT_MAX_ATTEMPTS
 
+        model = (os.environ.get("SAGEMAKER_MODEL_ID") or "e5-base-v2").strip()
+        prefix_model = (os.environ.get("SAGEMAKER_PREFIX_MODEL") or "").strip()
+
         return cls(
             endpoint_name=endpoint,
             region=region,
             batch_size=batch_size,
             max_attempts=max_attempts,
+            model=model,
+            prefix_model=prefix_model,
         )
 
     @staticmethod
