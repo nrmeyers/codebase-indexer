@@ -31,8 +31,11 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import errno
+import hashlib
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -138,11 +141,9 @@ def _describe(client: httpx.Client, model: str, name: str, src: str) -> str | No
         "think": False,
         "options": {"temperature": 0.2, "num_predict": 96},
     }
-    try:
-        r = client.post(OLLAMA_URL, json=body, timeout=90)
-        desc = (r.json().get("response") or "").strip()
-    except Exception:
-        return None
+    r = client.post(OLLAMA_URL, json=body, timeout=90)
+    r.raise_for_status()
+    desc = (r.json().get("response") or "").strip()
     # Sanitise: collapse whitespace, drop wrapping quotes, clamp length.
     desc = " ".join(desc.replace("\n", " ").split()).strip('"').strip()
     # Strip the residual preamble the model sometimes still emits, so the
@@ -160,6 +161,56 @@ def _describe(client: httpx.Client, model: str, name: str, src: str) -> str | No
     return desc
 
 
+def _src_hash(src: str) -> str:
+    """SHA-1 fingerprint of the symbol's source body; resumability key."""
+    return hashlib.sha1(src.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _atomic_write_cards(out_path: Path, cards: dict[str, dict[str, str]]) -> None:
+    """Atomic write of the sidecar so a crash mid-flush cannot mask a clean
+    empty file for the next run. ENOSPC is logged and re-raised — better to
+    abort the slug than to leave a half-written cards.json on disk."""
+    tmp = out_path.with_suffix(".json.tmp")
+    payload = json.dumps(cards, indent=0, sort_keys=True)
+    try:
+        tmp.write_text(payload)
+    except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            log.error("ENOSPC writing %s — aborting checkpoint", tmp)
+        # Best-effort cleanup; ignore unlink failures.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, out_path)
+
+
+def _load_cards(out_path: Path) -> dict[str, dict[str, str]]:
+    """Load + migrate the sidecar to the {qn: {desc, src_hash}} shape.
+
+    Legacy sidecars stored ``{qn: desc}`` (str values); migrate in-memory
+    so existing entries with no known src_hash are treated as stale and
+    refreshed on the next pass (src_hash="" never matches a real hash).
+    """
+    if not out_path.exists():
+        return {}
+    try:
+        raw = json.loads(out_path.read_text())
+    except Exception:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for qn, entry in raw.items():
+        if isinstance(entry, str):
+            out[qn] = {"desc": entry, "src_hash": ""}
+        elif isinstance(entry, dict) and entry.get("desc"):
+            out[qn] = {
+                "desc": str(entry["desc"]),
+                "src_hash": str(entry.get("src_hash") or ""),
+            }
+    return out
+
+
 def generate_for_repo(
     slug: str, repo_root: Path, model: str, concurrency: int, limit: int | None
 ) -> int:
@@ -175,13 +226,23 @@ def generate_for_repo(
     ]
 
     out_path = Path(settings.LADYBUG_DB_DIR) / f"{slug}.cards.json"
-    cards: dict[str, str] = {}
-    if out_path.exists():
-        try:
-            cards = json.loads(out_path.read_text())
-        except Exception:
-            cards = {}
-    pending = [r for r in todo if r["qn"] not in cards]
+    cards = _load_cards(out_path)
+
+    repo_root = repo_root.expanduser().resolve()
+
+    # Pre-hash each row's source so the resumability check is body-aware:
+    # a stored card whose src_hash no longer matches the body has gone stale
+    # and must be regenerated.
+    pending: list[tuple[dict[str, Any], str, str]] = []
+    for r in todo:
+        src = _read_source(repo_root, str(r.get("rel_path") or ""), r["sl"], r["el"])
+        if not src.strip():
+            continue
+        h = _src_hash(src)
+        existing = cards.get(r["qn"])
+        if existing and existing.get("src_hash") == h:
+            continue
+        pending.append((r, src, h))
     if limit:
         pending = pending[:limit]
     log.info(
@@ -191,30 +252,41 @@ def generate_for_repo(
     if not pending:
         return 0
 
-    repo_root = repo_root.expanduser().resolve()
+    aborted = False
 
-    def _work(r: dict[str, Any]) -> tuple[str, str | None]:
-        src = _read_source(repo_root, str(r.get("rel_path") or ""), r["sl"], r["el"])
-        name = str(r["qn"]).split("::")[0].split(".")[-1]
-        with httpx.Client() as c:
-            return r["qn"], _describe(c, model, name, src)
+    with httpx.Client() as client:
+        def _work(item: tuple[dict[str, Any], str, str]) -> tuple[str, str, str | None]:
+            r, src, h = item
+            name = str(r["qn"]).split("::")[0].split(".")[-1]
+            return r["qn"], h, _describe(client, model, name, src)
 
-    done = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
-        futures = [ex.submit(_work, r) for r in pending]
-        for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
-            try:
-                qn, desc = fut.result()
-            except Exception:
-                continue
-            if desc:
-                cards[qn] = desc
-                done += 1
-            if i % 25 == 0:
-                log.info("  %s: %d/%d generated", slug, i, len(pending))
-                out_path.write_text(json.dumps(cards, indent=0, sort_keys=True))
-    out_path.write_text(json.dumps(cards, indent=0, sort_keys=True))
-    log.info("%s: wrote %d cards -> %s", slug, len(cards), out_path)
+        done = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = [ex.submit(_work, item) for item in pending]
+            for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                try:
+                    qn, h, desc = fut.result()
+                except httpx.HTTPStatusError as exc:
+                    if 500 <= exc.response.status_code < 600:
+                        log.error(
+                            "%s: Ollama 5xx (%s) — aborting slug",
+                            slug, exc.response.status_code,
+                        )
+                        aborted = True
+                        break
+                    continue
+                except Exception:
+                    continue
+                if desc:
+                    cards[qn] = {"desc": desc, "src_hash": h}
+                    done += 1
+                if i % 25 == 0:
+                    log.info("  %s: %d/%d generated", slug, i, len(pending))
+                    _atomic_write_cards(out_path, cards)
+
+    _atomic_write_cards(out_path, cards)
+    log.info("%s: wrote %d cards -> %s%s",
+             slug, len(cards), out_path, " (aborted)" if aborted else "")
     return done
 
 

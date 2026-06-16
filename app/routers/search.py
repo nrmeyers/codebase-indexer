@@ -599,17 +599,10 @@ def semantic_search(
         )
 
 
-# Symbol-card marker (methodology §5). Defined locally — search.py must not
-# import from context_bundle (that module imports _semantic_search_impl from
-# here, so the dependency only goes one way).
-_SYMBOL_CARD_MARKER = "::Symbol::card"
-
-
-def _fold_card_qname(qn: str) -> str:
-    """Map a ``{qn}::Symbol::card`` proxy to its parent symbol, else identity."""
-    if qn.endswith(_SYMBOL_CARD_MARKER):
-        return qn[: -len(_SYMBOL_CARD_MARKER)]
-    return qn
+from ..services.symbol_cards import (
+    SYMBOL_CARD_MARKER as _SYMBOL_CARD_MARKER,
+    fold_card_qname as _fold_card_qname,
+)
 
 
 def _semantic_search_impl(
@@ -789,6 +782,20 @@ def _semantic_search_impl(
 
             filtered = [r for r in raw if not _is_noise(r.qualified_name)]
 
+            # Fold {qn}::Symbol::card proxies into their parent symbol BEFORE
+            # any downstream stage (FQN pinning, PageRank fusion, RRF/BM25
+            # fusion, rerank) so a single canonical row per symbol carries the
+            # max(parent_cosine, card_cosine) score forward and the card qname
+            # never reaches consumers.
+            _by_parent: dict[str, Any] = {}
+            for _r in filtered:
+                _pqn = _fold_card_qname(_r.qualified_name)
+                _prev = _by_parent.get(_pqn)
+                if _prev is None or _r.score > _prev.score:
+                    _r.qualified_name = _pqn
+                    _by_parent[_pqn] = _r
+            filtered = sorted(_by_parent.values(), key=lambda r: r.score, reverse=True)
+
             # Intent routing: if query looks like a bare qualified name (e.g.
             # "myapp.utils.retry"), pin exact / prefix matches to the top.
             _q_stripped = q.strip()
@@ -927,20 +934,10 @@ def _semantic_search_impl(
     # qualified-name was detected and pinned, "semantic" otherwise) so HTTP
     # callers can see why a particular ranking was produced without
     # reverse-engineering the query string.
-    # Fold symbol-card proxies ({qn}::Symbol::card) back to their parent
-    # symbol and de-duplicate, so a card hit surfaces the real symbol and
-    # the card qname is never emitted (methodology §5). ``filtered`` is in
-    # final rank order, so keeping the first occurrence preserves ranking.
-    _emitted: set[str] = set()
-    _results: list[SemanticResult] = []
-    for r in filtered:
-        _qn = _fold_card_qname(r.qualified_name)
-        if _qn in _emitted:
-            continue
-        _emitted.add(_qn)
-        _results.append(SemanticResult(symbol=_qn, score=round(r.score, 4), type=""))
-        if len(_results) >= k:
-            break
+    _results = [
+        SemanticResult(symbol=r.qualified_name, score=round(r.score, 4), type="")
+        for r in filtered[:k]
+    ]
     return SemanticSearchResponse(results=_results, search_intent=search_intent)
 
 
