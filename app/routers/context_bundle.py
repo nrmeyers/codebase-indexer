@@ -1377,21 +1377,21 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
         # live in different embedding spaces, so the cosine scores from
         # ``semantic_code_search`` are near-degenerate (~0.12) and rank
         # script/test files that merely mention the query terms above the real
-        # implementation. The search router's ``_semantic_search_impl`` embeds
-        # via ``app.embedders.sync_bridge`` (matching the index) AND applies
-        # the descriptive-query rewriter + PageRank + RRF/BM25 fusion — which
-        # is exactly why /search/semantic ranks the implementation at ~0.83.
+        # implementation. The retrieval service embeds via
+        # ``app.embedders.sync_bridge`` (matching the index) AND applies the
+        # descriptive-query rewriter + PageRank + RRF/BM25 fusion — which is
+        # exactly why /search/semantic ranks the implementation at ~0.83.
         # Reusing it makes the bundle's seeds match that quality.
-        from .search import _semantic_search_impl  # noqa: PLC0415
+        from app.services.retrieval import semantic_search as semantic_search_service  # noqa: PLC0415
 
         # Request a deep result pool so the score-based merge + test/script
         # down-weight below has room to rank past the script cluster.
-        # ``_semantic_search_impl`` is called directly (not via the HTTP
-        # surface), so the route's ``k <= 100`` Query bound does not apply;
-        # it over-fetches ``k * 50`` candidates internally before de-noising
-        # and slicing to ``k``.
+        # The retrieval service is called directly (not via the HTTP surface),
+        # so the route's ``k <= 100`` Query bound does not apply; it
+        # over-fetches ``k * 50`` candidates internally before de-noising and
+        # slicing to ``k``.
         _seed_pool = max(effective_k * 5, 100)
-        _sem_resp = _semantic_search_impl(
+        _sem_resp = semantic_search_service(
             q=req.task_description,
             k=_seed_pool,
             repo=repo_slug,

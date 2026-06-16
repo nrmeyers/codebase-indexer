@@ -79,8 +79,8 @@ def _semantic_search_with(raw_rows, tmp_path):
     """Call /search/semantic with ``raw_rows`` mocked at the vector-store layer."""
     duck = tmp_path / "fake.duck"
     duck.write_bytes(b"")
-    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
-         patch("app.routers.search._embed_unavailable", False), \
+    with patch("app.embedders.sync_bridge.embed_text_sync",
+               lambda text, role="query": [0.0] * 768), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
          patch("codebase_rag.storage.vector_store.open_or_create",

@@ -7,19 +7,20 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.models import SemanticResult, SemanticSearchResponse
+from app.models import SemanticResult
+from app.services.retrieval import SemanticSearchResult
 
 client = TestClient(app)
 
 
-def _semantic_response(seed: list[dict]) -> SemanticSearchResponse:
-    """Build a SemanticSearchResponse from ``[{qualified_name, score}, ...]``.
+def _semantic_response(seed: list[dict]) -> SemanticSearchResult:
+    """Build a SemanticSearchResult from ``[{qualified_name, score}, ...]``.
 
-    Context-bundle seeds from the search router's ``_semantic_search_impl``
+    Context-bundle seeds from the retrieval service's ``semantic_search``
     (LE-180 — same embedding path + fusion that /search/semantic uses), so
     tests patch that function rather than the legacy ``semantic_code_search``.
     """
-    return SemanticSearchResponse(
+    return SemanticSearchResult(
         results=[
             SemanticResult(symbol=r["qualified_name"], score=r.get("score", 0.5), type="")
             for r in seed
@@ -78,7 +79,7 @@ def test_context_bundle_returns_symbols(tmp_path: Path) -> None:
 
     with (
         patch(
-            "app.routers.search._semantic_search_impl",
+            "app.services.retrieval.semantic_search",
             return_value=_semantic_response(seed),
         ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
@@ -98,7 +99,7 @@ def test_context_bundle_returns_symbols(tmp_path: Path) -> None:
 
 def test_context_bundle_empty_when_no_semantic_results(tmp_path: Path) -> None:
     with patch(
-        "app.routers.search._semantic_search_impl",
+        "app.services.retrieval.semantic_search",
         return_value=_semantic_response([]),
     ):
         resp = client.post(
@@ -124,7 +125,7 @@ def test_context_bundle_depth_zero(tmp_path: Path) -> None:
 
     with (
         patch(
-            "app.routers.search._semantic_search_impl",
+            "app.services.retrieval.semantic_search",
             return_value=_semantic_response(seed),
         ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
@@ -233,7 +234,7 @@ def test_context_bundle_seeds_implementation_over_scripts(tmp_path: Path) -> Non
 
     with (
         patch(
-            "app.routers.search._semantic_search_impl",
+            "app.services.retrieval.semantic_search",
             return_value=_semantic_response(seed),
         ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
@@ -279,7 +280,7 @@ def test_context_bundle_seeds_implementation_over_scripts(tmp_path: Path) -> Non
 
     with (
         patch(
-            "app.routers.search._semantic_search_impl",
+            "app.services.retrieval.semantic_search",
             return_value=_semantic_response(seed),
         ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
@@ -340,7 +341,7 @@ def test_context_bundle_symbols_are_relevance_ordered(tmp_path: Path) -> None:
 
     with (
         patch(
-            "app.routers.search._semantic_search_impl",
+            "app.services.retrieval.semantic_search",
             return_value=_semantic_response(seed),
         ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
@@ -386,7 +387,7 @@ def test_context_bundle_symbols_are_relevance_ordered(tmp_path: Path) -> None:
 def test_context_bundle_503_when_semantic_search_unavailable(tmp_path: Path) -> None:
     """When the semantic seed search raises, the endpoint returns 503."""
     with patch(
-        "app.routers.search._semantic_search_impl",
+        "app.services.retrieval.semantic_search",
         side_effect=RuntimeError("model not loaded"),
     ):
         resp = client.post(
@@ -469,7 +470,7 @@ def test_context_bundle_lexical_seed_leg(tmp_path: Path) -> None:
 
     with (
         patch(
-            "app.routers.search._semantic_search_impl",
+            "app.services.retrieval.semantic_search",
             return_value=_semantic_response(seed),
         ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
@@ -504,7 +505,7 @@ def test_context_bundle_lexical_seed_leg(tmp_path: Path) -> None:
     # symbol intent has no lexical leg — the helper must not be consulted.
     with (
         patch(
-            "app.routers.search._semantic_search_impl",
+            "app.services.retrieval.semantic_search",
             return_value=_semantic_response(seed),
         ),
         patch("app.routers.context_bundle._get_conn", return_value=conn),
