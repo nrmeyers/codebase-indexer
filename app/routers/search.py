@@ -607,8 +607,8 @@ _SYMBOL_CARD_MARKER = "::Symbol::card"
 
 def _fold_card_qname(qn: str) -> str:
     """Map a ``{qn}::Symbol::card`` proxy to its parent symbol, else identity."""
-    if _SYMBOL_CARD_MARKER in qn:
-        return qn.split(_SYMBOL_CARD_MARKER, 1)[0]
+    if qn.endswith(_SYMBOL_CARD_MARKER):
+        return qn[: -len(_SYMBOL_CARD_MARKER)]
     return qn
 
 

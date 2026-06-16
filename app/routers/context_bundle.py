@@ -1107,8 +1107,8 @@ _SYMBOL_CARD_MARKER = "::Symbol::card"
 
 def _card_parent(qn: str) -> str:
     """Return the parent symbol qname for a card qname, else ``qn``."""
-    if _SYMBOL_CARD_MARKER in qn:
-        return qn.split(_SYMBOL_CARD_MARKER, 1)[0]
+    if qn.endswith(_SYMBOL_CARD_MARKER):
+        return qn[: -len(_SYMBOL_CARD_MARKER)]
     return qn
 
 # Max lines of the span head included per summary snippet. Class spans can run

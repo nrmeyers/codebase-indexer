@@ -85,11 +85,14 @@ def apply_prefix(
 ) -> list[str]:
     """Prepend the model's ``role``-appropriate prefix to each text.
 
-    No-op (returns ``texts`` unchanged) unless the backend is the in-process
-    ``local`` backend AND its model has a non-empty prefix for this role.
-    Gating here means callers don't need to know which models are asymmetric —
-    they only declare whether they're embedding a query or a document, and
-    index/query symmetry is guaranteed because both sides read this registry.
+    No-op (returns ``texts`` unchanged) unless the backend is one of the POC
+    swap-path backends (``local`` or ``llama_server``) AND its resolved model
+    has a non-empty prefix for this role. The resolved model is
+    ``backend.prefix_model`` when present (so a ``llama_server`` GGUF can
+    advertise its HF tokenizer id), otherwise ``backend.model``. Gating here
+    means callers don't need to know which models are asymmetric — they only
+    declare whether they're embedding a query or a document, and index/query
+    symmetry is guaranteed because both sides read this registry.
 
     Args:
         backend: The resolved embedder backend (``name`` + ``model`` are read).

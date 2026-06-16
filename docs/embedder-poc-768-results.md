@@ -20,6 +20,24 @@ handful of seeds far more than the @50 tail.
 | **nomic-ai/nomic-embed-text-v1.5** (chosen) | **0.7056** | 0.8333 | 0.8889 |
 | intfloat/e5-base-v2 (prior baseline) | 0.6667 | **0.8500** | **0.9111** |
 
+**Probe regressions accepted as part of the swap** (regression gate at
+`eval/probes/snapshots/summary.json` regenerated against nomic — the JSON
+is the current expected behavior, not a quality floor):
+
+- `probe-tf-auth` facet_coverage **1.0 → 0.6667** (`session_jwt` no longer
+  seeded). On e5, the File-surface fallback in `embed_driver.py` (PR
+  `03cdf23`) lifted this canary to 1.0; under nomic the same File chunks
+  rank below the per-facet seed cutoff.
+- `probe-cis-hang` facet_coverage **1.0 → 0.5** (`threshold` facet lost —
+  `JOB_STALENESS_THRESHOLD_SECONDS` constant no longer in seed window).
+
+Both are scoring losses, not breakage — the underlying file chunks are
+indexed; they don't rank into the bundle's seed budget. The +3.9pp head-of-
+list recall win across the 15 design tasks is judged net-positive against
+the two facet losses on these two probes. If the regression gate flags
+these later, the cause will be a *different* drop on top of the new
+baseline, which is exactly the gate's job.
+
 Secondary considerations confirming the call:
 - Nomic is **instruction-tuned with Matryoshka** support — future-proof for
   256/512-dim truncation if we ever want a cheaper KNN layer without
@@ -54,7 +72,7 @@ own correct query/doc prefix (`app/embedders/prefixes.py`).
 
 | Model | @10 | **@25** | @50 | composed lift | probe regressions vs e5 |
 |-------|-----|---------|-----|---------------|--------------------------|
-| **nomic-ai/nomic-embed-text-v1.5** (chosen 2026-06-15) | **0.706** | 0.833 | 0.889 | — | — |
+| **nomic-ai/nomic-embed-text-v1.5** (chosen 2026-06-15) | **0.706** | 0.833 | 0.889 | — | tf-auth 1.0→0.67 (session_jwt), cis-hang 1.0→0.50 (threshold) |
 | intfloat/e5-base-v2 (prior baseline) | 0.667 | **0.850** | **0.911** | 0.967 | — |
 | nomic-ai/CodeRankEmbed | 0.722 | 0.817 | 0.883 | **1.00** | auth 0.67→0.33, hang 1.0→0.50 |
 | ibm-granite/granite-embedding-english-r2 | 0.700 | 0.817 | 0.911 | 0.967 | none (collide 0.50→1.00 ↑) |
