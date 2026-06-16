@@ -260,11 +260,7 @@ def emit_startup_warning(status: dict[str, Any] | None = None) -> None:
         "                    + TEI_URL=http://localhost:8080\n"
         "====================================================================\n"
     )
-    # The banner intentionally uses the U+26A0 WARNING SIGN to make the
-    # "your install is broken" signal hard to miss on a busy terminal.
-    # Operator visibility outweighs the project-wide no-emoji style rule
-    # here — every other surface stays clean.
-    print("⚠ EMBEDDER UNAVAILABLE", banner, sep="\n", flush=True)  # noqa: T201
+    print("[WARN] EMBEDDER UNAVAILABLE", banner, sep="\n", flush=True)  # noqa: T201
     logger.error(
         "embedder unavailable at startup (backend=%s): %s",
         backend,

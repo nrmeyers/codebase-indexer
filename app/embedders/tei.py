@@ -70,46 +70,21 @@ class TEIEmbedder(EmbedderBackend):
         # Clamp to a sane window — TEI happily accepts 1, but huge batches
         # blow up request body size and HTTP keepalive timing.
         self.batch_size = min(max(1, batch_size), 256)
-        self._client: httpx.AsyncClient | None = None
 
     @classmethod
     def from_env(cls) -> "TEIEmbedder":
+        from ._env_utils import env_int
+
         base_url = (os.environ.get("TEI_URL") or DEFAULT_URL).strip()
-        try:
-            timeout_ms = int(
-                (os.environ.get("TEI_TIMEOUT_MS") or DEFAULT_TIMEOUT_MS)
-            )
-        except (TypeError, ValueError):
-            timeout_ms = DEFAULT_TIMEOUT_MS
-        try:
-            batch_size = int(
-                (os.environ.get("TEI_BATCH_SIZE") or DEFAULT_BATCH_SIZE)
-            )
-        except (TypeError, ValueError):
-            batch_size = DEFAULT_BATCH_SIZE
         return cls(
             base_url=base_url,
-            timeout_ms=timeout_ms,
-            batch_size=batch_size,
+            timeout_ms=env_int("TEI_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
+            batch_size=env_int("TEI_BATCH_SIZE", DEFAULT_BATCH_SIZE),
         )
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Lazy-init the httpx.AsyncClient; reused across calls for keepalive."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                timeout=self.timeout_s,
-                headers={"Content-Type": "application/json"},
-            )
-        return self._client
-
-    async def aclose(self) -> None:
-        """Close the underlying httpx client. Idempotent."""
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
-
-    async def _embed_batch(self, chunk: list[str]) -> list[list[float]]:
-        client = await self._get_client()
+    async def _embed_batch(
+        self, client: httpx.AsyncClient, chunk: list[str]
+    ) -> list[list[float]]:
         payload: dict[str, Any] = {"inputs": chunk, "normalize": True}
         try:
             resp = await client.post("/embed", json=payload)
@@ -154,7 +129,15 @@ class TEIEmbedder(EmbedderBackend):
         if not texts:
             return []
         results: list[list[float]] = []
-        for start in range(0, len(texts), self.batch_size):
-            chunk = texts[start : start + self.batch_size]
-            results.extend(await self._embed_batch(chunk))
+        # Per-call client — sync_bridge invokes via asyncio.run() so a
+        # cached client would be bound to the first event loop and raise
+        # "Event loop is closed" on every subsequent call.
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=self.timeout_s,
+            headers={"Content-Type": "application/json"},
+        ) as client:
+            for start in range(0, len(texts), self.batch_size):
+                chunk = texts[start : start + self.batch_size]
+                results.extend(await self._embed_batch(client, chunk))
         return results

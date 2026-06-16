@@ -577,8 +577,7 @@ def test_semantic_search_returns_results(tmp_path) -> None:
         _fake_search_result("mymod.bar", 0.80),
     ]
 
-    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
-         patch("app.routers.search._embed_unavailable", False), \
+    with patch("app.embedders.sync_bridge.embed_text_sync", return_value=[0.0] * 768), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
          patch("codebase_rag.storage.vector_store.open_or_create",
@@ -615,8 +614,7 @@ def test_semantic_search_surfaces_fqn_intent(tmp_path) -> None:
         _fake_search_result("other.bar", 0.95),
     ]
 
-    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
-         patch("app.routers.search._embed_unavailable", False), \
+    with patch("app.embedders.sync_bridge.embed_text_sync", return_value=[0.0] * 768), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
          patch("codebase_rag.storage.vector_store.open_or_create",
@@ -641,8 +639,7 @@ def test_semantic_search_empty(tmp_path) -> None:
     duck = tmp_path / "fake.duck"
     duck.write_bytes(b"")
 
-    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
-         patch("app.routers.search._embed_unavailable", False), \
+    with patch("app.embedders.sync_bridge.embed_text_sync", return_value=[0.0] * 768), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
          patch("codebase_rag.storage.vector_store.open_or_create",
@@ -685,8 +682,7 @@ def test_semantic_search_serves_200_when_rerank_true_but_lm_studio_unreachable(
     # but the backend isn't — this is the exact failure mode BUC-1651 fixes.
     monkeypatch.setattr(settings, "RERANK_ENABLED", True)
 
-    with patch("app.routers.search._embed_fn", lambda q: [0.0] * 768), \
-         patch("app.routers.search._embed_unavailable", False), \
+    with patch("app.embedders.sync_bridge.embed_text_sync", return_value=[0.0] * 768), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
          patch("codebase_rag.storage.vector_store.open_or_create",
@@ -750,87 +746,38 @@ def test_symbol_lookup_not_found() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_semantic_search_503_when_import_fails() -> None:
-    """When codebase_rag.embedder cannot be imported (e.g. torch missing),
-    the endpoint must return 503 with a valid JSON body — not 500.
-
-    Strategy: set sys.modules entry to None which makes Python raise
-    ImportError on ``from codebase_rag.embedder import embed_query``.
+def test_semantic_search_503_when_embedder_returns_none(tmp_path) -> None:
+    """When the configured embedder backend cannot embed (returns None),
+    the endpoint must return 503 with a valid JSON body — not 500 and
+    not a foreign-space fallback embedding.
     """
-    import sys
-    import app.routers.search as _search_mod
-
-    # Reset cached state so the lazy-load branch is taken.
-    original_fn = _search_mod._embed_fn
-    original_unavail = _search_mod._embed_unavailable
-    _search_mod._embed_fn = None
-    _search_mod._embed_unavailable = False
-
-    # Save the real module so we can restore it after the test.
-    real_mod = sys.modules.get("codebase_rag.embedder")
-
-    try:
-        # Setting sys.modules[name] = None causes `from name import …` to
-        # raise ImportError — this simulates a missing ML dependency.
-        sys.modules["codebase_rag.embedder"] = None  # type: ignore[assignment]
-        # Force every provider unavailable so the fallback chain reaches
-        # the in-process torch path that the import is faking out.
-        # BUC-1605: the default backend is now ``local`` (no env vars
-        # required), so an unmocked ``get_embedder_or_none`` would return
-        # a valid backend and bypass the 503 path under test.
-        with patch("app.embedders.sync_bridge.get_embedder_or_none",
-                   return_value=None), \
-             patch("app.embedders.sync_bridge.embed_text_sync",
-                   return_value=None), \
-             patch("app.services.lm_studio.can_embed",
-                   return_value=False), \
-             patch("app.services.lm_studio.embed",
-                   return_value=None):
-            resp = client.get("/search/semantic", params={"q": "retry http"})
-    finally:
-        # Restore everything regardless of outcome.
-        _search_mod._embed_fn = original_fn
-        _search_mod._embed_unavailable = original_unavail
-        if real_mod is not None:
-            sys.modules["codebase_rag.embedder"] = real_mod
-        else:
-            sys.modules.pop("codebase_rag.embedder", None)
+    # The .duck-path check fires before the embed call, so back the test
+    # with a real (empty) file to force the route past it and into the
+    # embed branch we actually want to verify.
+    duck = tmp_path / "fake.duck"
+    duck.touch()
+    with patch("app.embedders.sync_bridge.embed_text_sync",
+               return_value=None), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)):
+        resp = client.get("/search/semantic", params={"q": "retry http", "repo": "fake"})
 
     assert resp.status_code == 503
     body = resp.json()
-    # Response must be valid JSON with a 'detail' key (FastAPI HTTPException shape)
     assert "detail" in body
-    assert isinstance(body["detail"], str)
+    assert "unavailable" in body["detail"].lower()
 
 
-def test_semantic_search_503_uses_fast_fail_after_first_import_failure() -> None:
-    """Once the import fails, _embed_unavailable=True and subsequent calls
-    skip the import attempt and return 503 immediately."""
-    import app.routers.search as _search_mod
-
-    original_fn = _search_mod._embed_fn
-    original_unavail = _search_mod._embed_unavailable
-
-    # Simulate a prior import failure having set the flag
-    _search_mod._embed_fn = None
-    _search_mod._embed_unavailable = True
-
-    try:
-        # BUC-1605: force the embedder + LM Studio paths unavailable so the
-        # fast-fail branch can be reached. The default ``local`` backend
-        # would otherwise satisfy ``_sm_available`` and bypass this branch.
-        with patch("app.embedders.sync_bridge.get_embedder_or_none",
-                   return_value=None), \
-             patch("app.embedders.sync_bridge.embed_text_sync",
-                   return_value=None), \
-             patch("app.services.lm_studio.can_embed",
-                   return_value=False), \
-             patch("app.services.lm_studio.embed",
-                   return_value=None):
-            resp = client.get("/search/semantic", params={"q": "anything"})
-    finally:
-        _search_mod._embed_fn = original_fn
-        _search_mod._embed_unavailable = original_unavail
+def test_semantic_search_503_again_on_subsequent_call(tmp_path) -> None:
+    """503 is sticky: a second call with the embedder still down also returns
+    503 (no silent fallback to a different vector space)."""
+    duck = tmp_path / "fake.duck"
+    duck.touch()
+    with patch("app.embedders.sync_bridge.embed_text_sync",
+               return_value=None), \
+         patch("app.config.Settings.vec_db_path_for_repo",
+               lambda self, repo: str(duck)):
+        resp = client.get("/search/semantic", params={"q": "anything", "repo": "fake"})
 
     assert resp.status_code == 503
     body = resp.json()
@@ -874,7 +821,6 @@ def test_semantic_search_passes_full_vector_from_embedder(tmp_path) -> None:
                return_value=[0.1] * 768), \
          patch("app.embedders.sync_bridge.get_embedder_or_none",
                return_value=fake_backend), \
-         patch("app.routers.search._embed_unavailable", False), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
          patch("codebase_rag.storage.vector_store.open_or_create",
@@ -923,7 +869,6 @@ def test_semantic_search_does_not_500_on_embedder_path(tmp_path) -> None:
                return_value=[0.5] * 768), \
          patch("app.embedders.sync_bridge.get_embedder_or_none",
                return_value=fake_backend), \
-         patch("app.routers.search._embed_unavailable", False), \
          patch("app.config.Settings.vec_db_path_for_repo",
                lambda self, repo: str(duck)), \
          patch("codebase_rag.storage.vector_store.open_or_create",
@@ -962,55 +907,31 @@ def test_should_return_503_not_500_when_configured_backend_returns_none() -> Non
     After the fix the route raises HTTPException(503) with a clear
     remediation message — never a bare RuntimeError / 500.
     """
-    import app.routers.search as _search_mod
+    # Simulate: get_embedder_or_none returns a non-None backend
+    # (EMBEDDER_BACKEND=local, lazy construction), but embed_text_sync
+    # returns None (sentence-transformers missing, silently swallowed).
+    fake_backend = MagicMock()
+    fake_backend.name = "local"
 
-    original_fn = _search_mod._embed_fn
-    original_unavail = _search_mod._embed_unavailable
-    # Ensure the torch-fallback lazy-load path won't bypass the error.
-    _search_mod._embed_fn = None
-    _search_mod._embed_unavailable = False
-
-    import sys
-    real_cgr_mod = sys.modules.get("codebase_rag.embedder")
-
+    # Also patch the duck-path check so we reach the embed call rather
+    # than short-circuiting on "no embedding store found".
+    import tempfile
+    import os as _os
+    with tempfile.NamedTemporaryFile(suffix=".duck", delete=False) as tmp:
+        duck_path = tmp.name
     try:
-        # Simulate: get_embedder_or_none returns a non-None backend
-        # (EMBEDDER_BACKEND=local, lazy construction), but embed_text_sync
-        # returns None (sentence-transformers missing, silently swallowed).
-        fake_backend = MagicMock()
-        fake_backend.name = "local"
-        sys.modules["codebase_rag.embedder"] = None  # type: ignore[assignment]
-
-        # Also patch the duck-path check so we reach the embed call rather
-        # than short-circuiting on "no embedding store found".
-        import tempfile
-        import os as _os
-        with tempfile.NamedTemporaryFile(suffix=".duck", delete=False) as tmp:
-            duck_path = tmp.name
-        try:
-            with patch("app.embedders.sync_bridge.get_embedder_or_none",
-                       return_value=fake_backend), \
-                 patch("app.embedders.sync_bridge.embed_text_sync",
-                       return_value=None), \
-                 patch("app.services.lm_studio.can_embed",
-                       return_value=False), \
-                 patch("app.services.lm_studio.embed",
-                       return_value=None), \
-                 patch("app.config.Settings.vec_db_path_for_repo",
-                       lambda self, repo: duck_path):
-                resp = client.get("/search/semantic", params={"q": "anything", "repo": "fake"})
-        finally:
-            try:
-                _os.unlink(duck_path)
-            except OSError:
-                pass
+        with patch("app.embedders.sync_bridge.get_embedder_or_none",
+                   return_value=fake_backend), \
+             patch("app.embedders.sync_bridge.embed_text_sync",
+                   return_value=None), \
+             patch("app.config.Settings.vec_db_path_for_repo",
+                   lambda self, repo: duck_path):
+            resp = client.get("/search/semantic", params={"q": "anything", "repo": "fake"})
     finally:
-        _search_mod._embed_fn = original_fn
-        _search_mod._embed_unavailable = original_unavail
-        if real_cgr_mod is not None:
-            sys.modules["codebase_rag.embedder"] = real_cgr_mod
-        else:
-            sys.modules.pop("codebase_rag.embedder", None)
+        try:
+            _os.unlink(duck_path)
+        except OSError:
+            pass
 
     # Must be 503 (service unavailable) — never 500 (unhandled exception).
     assert resp.status_code == 503, (

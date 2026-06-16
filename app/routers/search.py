@@ -145,15 +145,6 @@ _WRITE_KEYWORDS = (
 )
 
 # ---------------------------------------------------------------------------
-# Semantic search — lazy import cache
-# ---------------------------------------------------------------------------
-# embed_query lives in codebase_rag and requires torch/transformers.  Cache
-# the import result so subsequent calls avoid re-importing a 400 MB library.
-_embed_fn: Any = None            # cached embed_query callable
-_embed_unavailable: bool = False  # True once import fails; never retried
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -615,88 +606,34 @@ def _semantic_search_impl(
     """Inner implementation for semantic_search (extracted for metrics wrapping)."""
     import re as _re
 
-    global _embed_fn, _embed_unavailable  # noqa: PLW0603
-
-    # Provider priority: configured embedder backend (prod = SageMaker) →
-    # LM Studio (dev) → in-process torch.
-    from ..embedders.sync_bridge import (  # noqa: PLC0415
-        embed_text_sync,
-        get_embedder_or_none,
-    )
-    from ..services import lm_studio          # local import keeps cold-start cheap
+    from ..embedders.sync_bridge import embed_text_sync  # noqa: PLC0415
 
     def _embed_query(text: str) -> list[float]:
-        # Configured embedder primary. ``role="query"`` lets the local
-        # backend prepend the model's query prefix (e5 ``query: ``,
-        # CodeRankEmbed instruction) — symmetric with the ``document`` prefix
-        # the index pass applies; see app.embedders.prefixes. No-op for prod
-        # backends and symmetric models. ``embed_text_sync`` returns the
-        # *full* 768-dim vector (it unwraps the single-element async batch
-        # internally), so no ``[0]`` indexing here — regression guard from
-        # BUC-1570, where ``[0]`` sliced one float out of the 768-dim vector
-        # and crashed downstream in ``_l2_normalise``.
+        # Configured embedder is the sole provider. ``role="query"`` lets
+        # the local backend prepend the model's query prefix (e5
+        # ``query: ``, CodeRankEmbed instruction, nomic ``search_query: ``)
+        # — symmetric with the ``document`` prefix the index pass applies;
+        # see app.embedders.prefixes. No-op for prod backends and symmetric
+        # models. ``embed_text_sync`` returns the *full* 768-dim vector (it
+        # unwraps the single-element async batch internally), so no ``[0]``
+        # indexing here — regression guard from BUC-1570, where ``[0]``
+        # sliced one float out of the 768-dim vector and crashed downstream
+        # in ``_l2_normalise``.
         vec = embed_text_sync(text, role="query")
         if vec:
             return vec
-
-        # LM Studio dev fallback — uses asymmetric "search_query: " prefix.
-        if vec := lm_studio.embed(text, prefix="search_query: "):
-            return vec
-
-        # In-process torch last resort.  ``_embed_fn`` may have been loaded
-        # already (when both ``_sm_available`` and ``_lm_available`` were
-        # False at route entry), or it may be None because ``_sm_available``
-        # was True (configured backend constructed but its model failed to
-        # load at embed time — e.g. EMBEDDER_BACKEND=local without the
-        # sentence-transformers missing).  Attempt a lazy load here before giving up
-        # so that a partially-available configured backend doesn't
-        # permanently suppress the torch fallback.
-        global _embed_fn, _embed_unavailable  # noqa: PLW0603
-        if _embed_fn is None and not _embed_unavailable:
-            try:
-                from codebase_rag.embedder import embed_query as _eq  # type: ignore[import-untyped]
-                _embed_fn = _eq
-            except ImportError:
-                _embed_unavailable = True
-
-        if _embed_fn is not None:
-            return _embed_fn(text)
-
-        # All embedding providers failed or are unavailable.  Surface a
-        # clear, actionable 503 rather than a bare RuntimeError so callers
-        # see "503 Semantic search unavailable" instead of a generic 500.
-        # Common cause: EMBEDDER_BACKEND=local without sentence-transformers
-        # extra installed.  Install with:
-        #   uv sync
+        # Never fall back to a different vector space — a foreign embedding
+        # query against the DuckDB index returns garbage at best and
+        # silently-wrong rankings at worst.
         raise HTTPException(
             status_code=503,
             detail=(
-                "Semantic search unavailable: no embedding provider succeeded. "
-                "For local installs run: uv sync "
+                "Semantic search unavailable: configured embedder backend "
+                "failed. For local installs run: uv sync "
                 "(installs sentence-transformers for EMBEDDER_BACKEND=local). "
                 "Check server logs for the exact initialisation error."
             ),
         )
-
-    _sm_available = get_embedder_or_none() is not None
-    _lm_available = lm_studio.can_embed()
-
-    if _embed_unavailable and not _sm_available and not _lm_available:
-        raise HTTPException(
-            status_code=503,
-            detail="Semantic search unavailable (missing deps; import failed on first attempt)",
-        )
-
-    if _embed_fn is None and not _sm_available and not _lm_available:
-        try:
-            from codebase_rag.embedder import embed_query  # type: ignore[import-untyped]
-            _embed_fn = embed_query
-        except ImportError as exc:
-            _embed_unavailable = True
-            raise HTTPException(
-                status_code=503,
-                detail=f"Semantic search unavailable (missing deps): {exc}",
-            ) from exc
 
     # Resolve the .duck path for the requested repo.
     if repo:

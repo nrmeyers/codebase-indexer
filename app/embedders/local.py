@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import threading
 from typing import Any, Callable
@@ -83,10 +84,9 @@ AUTO_TRUST_REMOTE_CODE_MODELS: frozenset[str] = frozenset(
 #: ``encode()`` call → one progress tick → one heartbeat bump.  Override via
 #: ``LOCAL_ENCODE_BATCH_SIZE``: long-context code models (CodeRankEmbed,
 #: jina-v2-base-code — 8K ctx) can OOM a small GPU at 32; drop to 8.
-try:
-    ENCODE_BATCH_SIZE = int(os.environ.get("LOCAL_ENCODE_BATCH_SIZE") or 32)
-except ValueError:
-    ENCODE_BATCH_SIZE = 32
+from ._env_utils import env_int as _env_int
+
+ENCODE_BATCH_SIZE = _env_int("LOCAL_ENCODE_BATCH_SIZE", 32)
 
 #: Maximum character length for a single embed input text. nomic-v1.5
 #: supports 8K tokens (Matryoshka) but the chunk strategies in
@@ -254,11 +254,12 @@ class LocalEmbedder(EmbedderBackend):
                 any exception from the callback is swallowed.
 
         Returns:
-            One 768-dim vector per input text, in input order.
+            One ``self.dim``-dim vector per input text, in input order.
+            When ``LOCAL_EMBED_DIM`` selects a smaller-than-native dim
+            (Matryoshka truncation, e.g. 512 or 256 on nomic-v1.5), the
+            vector is truncated AFTER encoding and re-L2-normalised so
+            cosine similarity stays comparable across embeddings.
         """
-        if self._model is None:
-            self._model = self._load_model()
-
         texts = self._truncate_texts(texts)
 
         result: list[list[float]] = []
@@ -271,7 +272,17 @@ class LocalEmbedder(EmbedderBackend):
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             )
-            result.extend([float(x) for x in row] for row in vectors)
+            for row in vectors:
+                vec = [float(x) for x in row]
+                # Matryoshka truncation: if the operator asked for a
+                # smaller dim than the model's native output, slice and
+                # re-normalise so the truncated vector stays unit-norm.
+                if len(vec) > self.dim:
+                    vec = vec[: self.dim]
+                    norm = math.sqrt(sum(v * v for v in vec))
+                    if norm > 0.0:
+                        vec = [v / norm for v in vec]
+                result.append(vec)
             if batch_callback is not None:
                 try:
                     batch_callback(len(result))
