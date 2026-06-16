@@ -1,12 +1,18 @@
 """POST /embed — embed an arbitrary text string via the configured embedder
 backend (typically SageMaker in production; ``local`` for standalone installs).
 
-Returns a 768-dim e5-base-v2 vector ready for KNN / cosine ops against the
-indexer's per-repo centroids (``GET /repos/{name}/centroid``, BUC-1581).
+Returns a 768-dim vector ready for KNN / cosine ops against the indexer's
+per-repo centroids (``GET /repos/{name}/centroid``, BUC-1581).
 
 BUC-1592: unblocks TheForge's cross-repo affinity weighting in real chat —
 ``weightReposByCentroidAffinity`` already exists on the orchestrator side,
 it was the *query vector* (not the per-repo centroids) that was missing.
+
+The response ``model`` field reports the *actual* backend model id
+(``backend.model``) so a callers-side artifact tagged with one model can
+be detected the next time the indexer is reconfigured. Local default is
+``nomic-ai/nomic-embed-text-v1.5`` post-768-POC; SageMaker reports its
+own served model (currently ``jina-code-v2-serverless``).
 
 Design notes:
     * The embedder factory (:mod:`app.embedders`, BUC-1605) raises
@@ -16,9 +22,8 @@ Design notes:
       chat continues).
     * Auth middleware (BUC-1431 bearer) applies automatically — no extra
       wiring at the router level.
-    * Length cap of 4000 chars is generous compared to the ~512-token /
-      ~2000-char effective window of e5-base-v2 (the model truncates
-      internally) but keeps the request body bounded for sanity.
+    * Length cap of 4000 chars keeps the request body bounded for sanity;
+      all current 768-dim models truncate internally well below that.
 """
 from __future__ import annotations
 
@@ -34,12 +39,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Pinned model identifier reported by this router. The SageMaker endpoint
-# was swapped to jina-code-v2-serverless on 2026-05-26 (LE-129); SageMakerEmbedder
-# reports the new model name itself when used. This constant remains "e5-base-v2"
-# for the local/TEI backends until they are migrated too — keep in sync with
-# whichever backend the deployment actually uses.
-_MODEL_NAME = "e5-base-v2"
+#: Fallback provenance tag if a backend somehow surfaces with no ``model``
+#: attribute (legacy shims, hand-rolled doubles in tests). Real backends
+#: all advertise ``backend.model`` and that wins.
+_UNKNOWN_MODEL = "unknown"
 
 
 class EmbedRequest(BaseModel):
@@ -49,7 +52,7 @@ class EmbedRequest(BaseModel):
         * min 1 — reject empty strings via 422 rather than wasting a
           SageMaker invocation on a no-op.
         * max 4000 — generous compared to the effective ~2000-char window
-          of e5-base-v2. Keeps request bodies bounded.
+          of every 768-dim embedder we ship. Keeps request bodies bounded.
     """
 
     text: str = Field(min_length=1, max_length=4000)
@@ -70,8 +73,9 @@ async def embed(req: EmbedRequest) -> EmbedResponse:
     Returns:
         EmbedResponse: ``embedding`` (768-dim float list), ``dims`` (== 768
         in practice — populated from the actual vector length so a
-        downstream model swap is observable), and ``model`` (pinned to
-        ``"e5-base-v2"``).
+        downstream model swap is observable), and ``model`` (the
+        configured backend's model id, e.g. ``nomic-ai/nomic-embed-text-v1.5``
+        for local or ``jina-code-v2-serverless`` for SageMaker).
 
     Raises:
         HTTPException: 503 when the embedder backend is unconfigured,
@@ -95,7 +99,13 @@ async def embed(req: EmbedRequest) -> EmbedResponse:
 
     t0 = time.time()
     try:
-        vectors = await backend.embed([req.text])
+        # This endpoint returns *query* vectors for TheForge, so apply the
+        # local model's query prefix — symmetric with the document prefix the
+        # index pass uses; see app.embedders.prefixes. No-op for prod backends
+        # and symmetric models.
+        from app.embedders.prefixes import apply_prefix
+
+        vectors = await backend.embed(apply_prefix(backend, [req.text], role="query"))
     except EmbedderError as exc:
         logger.warning("embed: backend %s call failed: %s", backend.name, exc)
         raise HTTPException(
@@ -123,8 +133,9 @@ async def embed(req: EmbedRequest) -> EmbedResponse:
         )
 
     vec = vectors[0]
+    model_name = str(getattr(backend, "model", "") or _UNKNOWN_MODEL)
     logger.info(
         "embed: backend=%s model=%s dims=%d latency_ms=%d",
-        backend.name, _MODEL_NAME, len(vec), int((time.time() - t0) * 1000),
+        backend.name, model_name, len(vec), int((time.time() - t0) * 1000),
     )
-    return EmbedResponse(embedding=vec, dims=len(vec), model=_MODEL_NAME)
+    return EmbedResponse(embedding=vec, dims=len(vec), model=model_name)

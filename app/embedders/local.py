@@ -1,12 +1,22 @@
 """In-process ``sentence-transformers`` backend (BUC-1605).
 
-Runs ``intfloat/e5-base-v2`` on the host CPU/GPU with zero external
-dependencies — perfect for standalone evaluation or a laptop install.
+Runs ``nomic-ai/nomic-embed-text-v1.5`` on the host CPU/GPU with zero
+external dependencies — perfect for standalone evaluation or a laptop
+install. Switched from ``intfloat/e5-base-v2`` after the 768-dim POC
+(``.planning/runs/768-poc/``): nomic-v1.5 wins recall@10 by +3.9pp,
+trades 1–2pp at @25/@50, and is instruction-tuned with Matryoshka
+support for future dim truncation. Schema is unchanged (FLOAT[768]).
 
-The first call downloads the model (~440 MB) into the HuggingFace cache
+The first call downloads the model (~520 MB) into the HuggingFace cache
 (``~/.cache/huggingface/hub`` by default) and may take 30-60s; subsequent
 calls hit the cached weights and respond in tens of milliseconds per
 batch on a modern CPU.
+
+``nomic-bert`` ships custom modeling code, so the backend auto-enables
+``trust_remote_code=True`` when ``LOCAL_EMBED_MODEL`` resolves to one of
+the vetted nomic-family ids (see :data:`AUTO_TRUST_REMOTE_CODE_MODELS`).
+Any other model still requires the explicit ``LOCAL_TRUST_REMOTE_CODE``
+opt-in.
 
 The blocking sentence-transformers ``encode()`` call is shoved into a
 worker thread via :func:`asyncio.to_thread` so the FastAPI event loop
@@ -24,10 +34,10 @@ Two changes guard against the watchdog false-kill observed on 1654-file,
    file and bumps ``job.last_progress_at`` so the watchdog sees a live job.
 
 2. **Input truncation** — each text is capped at ``EMBED_MAX_CHARS``
-   (4096 characters, conservative proxy for ~512 BPE tokens on e5-base-v2)
-   before encode.  A minified / generated single-line file can be megabytes;
-   without this cap a single ``encode()`` call can block for minutes on CPU,
-   burning through the watchdog budget.
+   (4096 characters, conservative cap) before encode.  A minified /
+   generated single-line file can be megabytes; without this cap a single
+   ``encode()`` call can block for minutes on CPU, burning through the
+   watchdog budget.
 
 Dependencies
 ------------
@@ -48,20 +58,43 @@ from .base import EMBEDDING_DIM, EmbedderBackend, EmbedderError
 logger = logging.getLogger(__name__)
 
 #: HuggingFace model id. Pinned so the local backend stays bit-compatible
-#: with the SageMaker / TEI endpoints (which all serve the same weights).
-DEFAULT_MODEL = "intfloat/e5-base-v2"
+#: with the prod path. Swapped from ``intfloat/e5-base-v2`` to
+#: ``nomic-ai/nomic-embed-text-v1.5`` after the 768-dim POC — see module
+#: docstring. The SageMaker / TEI paths still serve their own weights;
+#: this default governs the in-process ``local`` backend only.
+DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+
+#: HF model ids that ship custom modeling code and require
+#: ``trust_remote_code=True`` to load. The local backend auto-enables the
+#: flag for these so the operator does not have to remember the
+#: ``LOCAL_TRUST_REMOTE_CODE`` env knob. Membership is the only signal —
+#: an unknown model still requires the explicit env opt-in.
+AUTO_TRUST_REMOTE_CODE_MODELS: frozenset[str] = frozenset(
+    {
+        "nomic-ai/nomic-embed-text-v1.5",
+        "nomic-ai/nomic-embed-text-v1",
+        "nomic-ai/CodeRankEmbed",
+        "jinaai/jina-embeddings-v2-base-code",
+    }
+)
 
 #: Number of texts passed to one ``model.encode()`` call.  Matches the
 #: embed driver's ``_BATCH`` so each outer flush triggers roughly one
-#: ``encode()`` call → one progress tick → one heartbeat bump.
-ENCODE_BATCH_SIZE = 32
+#: ``encode()`` call → one progress tick → one heartbeat bump.  Override via
+#: ``LOCAL_ENCODE_BATCH_SIZE``: long-context code models (CodeRankEmbed,
+#: jina-v2-base-code — 8K ctx) can OOM a small GPU at 32; drop to 8.
+try:
+    ENCODE_BATCH_SIZE = int(os.environ.get("LOCAL_ENCODE_BATCH_SIZE") or 32)
+except ValueError:
+    ENCODE_BATCH_SIZE = 32
 
-#: Maximum character length for a single embed input text.  e5-base-v2
-#: silently truncates at 512 BPE tokens (~2–4 chars each); feeding it a
-#: megabyte-sized minified file wastes tokenisation time and can block a
-#: CPU encode for tens of seconds.  4096 chars is a conservative cap that
-#: keeps encode time predictable while retaining the meaningful leading
-#: portion of any realistic function/class body.
+#: Maximum character length for a single embed input text. nomic-v1.5
+#: supports 8K tokens (Matryoshka) but the chunk strategies in
+#: ``app/services/chunk_strategies.py`` never emit anything close to that;
+#: 4096 chars (~1K BPE tokens) is a safety valve against pathological
+#: minified / generated single-line files that would otherwise wedge a
+#: single ``encode()`` call for tens of seconds on CPU and burn the phase
+#: watchdog budget. Tuned conservatively rather than to the model ceiling.
 EMBED_MAX_CHARS = 4096
 
 
@@ -102,7 +135,8 @@ class LocalEmbedder(EmbedderBackend):
             or DEFAULT_MODEL
         ).strip()
         # Allow an operator to override dim when running a non-default
-        # sentence-transformers model. Defaults to e5-base-v2's 768.
+        # sentence-transformers model. Defaults to nomic-v1.5's 768
+        # (Matryoshka native; truncation to 512/256 is opt-in via env).
         env_dim = os.environ.get("LOCAL_EMBED_DIM")
         if dim is not None:
             self.dim = int(dim)
@@ -113,6 +147,20 @@ class LocalEmbedder(EmbedderBackend):
                 self.dim = EMBEDDING_DIM
         else:
             self.dim = EMBEDDING_DIM
+        # Some code/nomic embedders ship custom modeling code that
+        # sentence-transformers only loads with trust_remote_code=True
+        # (which executes code from the model repo).  Auto-enabled for the
+        # vetted set in ``AUTO_TRUST_REMOTE_CODE_MODELS`` (currently the
+        # nomic family + CodeRankEmbed + jina-v2-base-code) so the default
+        # ``nomic-ai/nomic-embed-text-v1.5`` works out of the box.  An
+        # unknown ``LOCAL_EMBED_MODEL`` still requires the explicit
+        # ``LOCAL_TRUST_REMOTE_CODE=1`` opt-in.
+        env_trust = os.environ.get(
+            "LOCAL_TRUST_REMOTE_CODE", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._trust_remote_code = (
+            env_trust or self.model in AUTO_TRUST_REMOTE_CODE_MODELS
+        )
         self._model: Any | None = None
         # threading.Lock — NOT asyncio.Lock.
         # This guard must work across concurrent asyncio.run() calls in
@@ -141,7 +189,9 @@ class LocalEmbedder(EmbedderBackend):
             ) from exc
 
         try:
-            return SentenceTransformer(self.model)
+            return SentenceTransformer(
+                self.model, trust_remote_code=self._trust_remote_code
+            )
         except Exception as exc:  # noqa: BLE001 — surface the original cause
             raise EmbedderError(
                 f"LocalEmbedder failed to load model {self.model!r}: {exc}"
@@ -150,9 +200,10 @@ class LocalEmbedder(EmbedderBackend):
     def _truncate_texts(self, texts: list[str]) -> list[str]:
         """Cap each text at ``EMBED_MAX_CHARS`` and log a warning on truncation.
 
-        e5-base-v2 silently truncates at ~512 BPE tokens.  Passing it a
-        multi-megabyte string wastes tokenisation time and can wedge a CPU
-        encode for tens of seconds, burning through the phase watchdog budget.
+        The model itself has its own (much higher) token cap; this cap
+        exists to keep a single pathological input — multi-megabyte
+        minified file, generated source — from wedging a CPU encode for
+        tens of seconds and burning through the phase watchdog budget.
         This method makes the truncation explicit and loud so the operator
         knows which symbol triggered the cap.
 
@@ -168,8 +219,8 @@ class LocalEmbedder(EmbedderBackend):
             if len(t) > EMBED_MAX_CHARS:
                 logger.warning(
                     "LocalEmbedder: input truncated from %d to %d chars "
-                    "(model max ~512 tokens). Truncation is logged but does "
-                    "not fail the embed.",
+                    "(watchdog cap; the model's own token limit is higher). "
+                    "Truncation is logged but does not fail the embed.",
                     len(t),
                     EMBED_MAX_CHARS,
                 )

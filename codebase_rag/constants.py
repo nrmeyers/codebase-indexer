@@ -151,8 +151,15 @@ V1_PATH = "/v1"
 HTTP_OK = 200
 
 CODERANK_EMBED_MODEL = "nomic-ai/CodeRankEmbed"
-CODERANK_CODE_PREFIX = "Represent this code snippet: "
-CODERANK_QUERY_PREFIX = "search_query: "
+# Local correction to vendored constants: CodeRankEmbed is asymmetric and
+# query-only per its model card (huggingface.co/nomic-ai/CodeRankEmbed) —
+# documents/code are embedded RAW and only queries get the instruction
+# prefix. The previous values ("Represent this code snippet: " on code and
+# "search_query: " on queries) were nomic-embed-text conventions and degraded
+# code retrieval. Mirrors app.embedders.prefixes for the local backend; keep
+# the two in sync. (NB: re-vendoring from upstream will revert this.)
+CODERANK_CODE_PREFIX = ""
+CODERANK_QUERY_PREFIX = "Represent this query for searching relevant code: "
 EMBEDDING_DEFAULT_BATCH_SIZE = 32
 # Batch size for LM Studio HTTP /v1/embeddings calls.  LM Studio supports
 # list input so N=64 texts in one request replaces 64 sequential round-trips.

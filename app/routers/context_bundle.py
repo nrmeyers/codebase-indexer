@@ -1097,6 +1097,20 @@ def _entrypoint_symbols(conn: object, limit: int = 15) -> list[str]:
 
 _SUMMARY_QNAME_MARKER = "::summary"
 
+# Symbol-card marker (methodology §5). A ``{qn}::Symbol::card`` doc is a
+# never-emitted, task-vocabulary retrieval proxy for its PARENT ``{qn}``.
+# Unlike ``::summary`` chunks (which ARE emitted as design context), a card
+# hit is rewritten to its parent at seed time and the card qname never
+# appears in a bundle.
+_SYMBOL_CARD_MARKER = "::Symbol::card"
+
+
+def _card_parent(qn: str) -> str:
+    """Return the parent symbol qname for a card qname, else ``qn``."""
+    if qn.endswith(_SYMBOL_CARD_MARKER):
+        return qn[: -len(_SYMBOL_CARD_MARKER)]
+    return qn
+
 # Max lines of the span head included per summary snippet. Class spans can run
 # to hundreds of lines; the leading lines carry the signature, docstring, and
 # (for __init__.py modules) the import/__all__ surface, which is what a
@@ -1389,9 +1403,15 @@ def build_context_bundle(req: ContextBundleRequest) -> ContextBundleResponse:
             rerank=bool(req.rerank),
         )
         # Adapt the SemanticResult list to the {qualified_name, score} shape
-        # the existing de-noise + ranking code consumes.
+        # the existing de-noise + ranking code consumes. ``_sem_resp.results``
+        # is already in final (fused/reranked) rank order — preserve it
+        # verbatim; re-sorting by the raw cosine ``.score`` would revert that
+        # ordering and change which symbols seed. Symbol-card hits are folded
+        # to their parent upstream in ``_semantic_search_impl``, so no card
+        # qname reaches here; ``_card_parent`` stays as defence-in-depth and
+        # is a no-op on real qnames.
         seed_results = [
-            {"qualified_name": r.symbol, "score": r.score}
+            {"qualified_name": _card_parent(r.symbol), "score": r.score}
             for r in _sem_resp.results
         ]
         # Drop noise: test fixtures AND anonymous inline arrows/callbacks

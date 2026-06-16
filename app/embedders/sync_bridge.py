@@ -31,9 +31,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from . import get_embedder
 from .base import EmbedderBackend, EmbedderError
+
+if TYPE_CHECKING:
+    from .prefixes import Role
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +67,11 @@ def get_embedder_or_none() -> EmbedderBackend | None:
         return None
 
 
-def embed_text_sync(text: str) -> list[float] | None:
+def embed_text_sync(
+    text: str,
+    *,
+    role: Role | None = None,
+) -> list[float] | None:
     """Embed a single text synchronously; return a 768-dim vector or ``None``.
 
     Drop-in replacement for the legacy ``SageMakerEmbedder.embed(text)``
@@ -71,11 +79,13 @@ def embed_text_sync(text: str) -> list[float] | None:
 
     1. Resolve the configured backend via :func:`get_embedder_or_none`.
        ``None`` → return ``None`` immediately (no error, no log).
-    2. Run the async batched ``embed([text])`` on a fresh event loop
+    2. Apply the model's role-appropriate prefix when ``role`` is given
+       (see :mod:`app.embedders.prefixes`).
+    3. Run the async batched ``embed([text])`` on a fresh event loop
        (``asyncio.run``). The fresh-loop pattern is safe here because
        every call site that uses this helper is *outside* an asyncio
        context (worker threads, sync route handlers).
-    3. Unwrap the single-element batch and return the vector.
+    4. Unwrap the single-element batch and return the vector.
 
     Failures (network, protocol mismatch) collapse to ``None`` with a
     WARN log — matching the legacy contract where transient SageMaker
@@ -84,6 +94,12 @@ def embed_text_sync(text: str) -> list[float] | None:
     Args:
         text: Input string to embed. Empty strings short-circuit to
             ``None`` (mirrors the legacy behaviour; no network call).
+        role: ``"query"`` for query-side callers (semantic search), so
+            instruction-tuned local models (e5, CodeRankEmbed) get their
+            required query prefix — symmetric with the ``"document"`` prefix
+            the index pass applies. ``None`` (default) preserves the legacy
+            raw-text contract for warmup probes and the v2 A/B embedder, and
+            is also a no-op for prod backends and symmetric models.
 
     Returns:
         list[float] | None: 768-dim vector on success, ``None`` on
@@ -97,8 +113,15 @@ def embed_text_sync(text: str) -> list[float] | None:
     if backend is None:
         return None
 
+    if role is None:
+        inputs = [text]
+    else:
+        from .prefixes import apply_prefix
+
+        inputs = apply_prefix(backend, [text], role=role)
+
     try:
-        vectors = asyncio.run(backend.embed([text]))
+        vectors = asyncio.run(backend.embed(inputs))
     except EmbedderError as exc:
         logger.warning("embed_text_sync: backend %s failed: %s", backend.name, exc)
         return None
