@@ -129,4 +129,5 @@ def test_module_exports() -> None:
         "sagemaker",
         "tei",
         "openai",
+        "llama_server",
     }
