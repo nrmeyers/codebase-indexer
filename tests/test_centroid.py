@@ -80,8 +80,10 @@ def _seed_centrality_and_embeddings(
         conn.execute("DELETE FROM embeddings")
         conn.execute("DELETE FROM centrality")
 
-        # Add embedding_v2 column the same way ensure_v2_schema does — we
-        # write to it directly so this test pins the production read path.
+        # Add the legacy embedding_v2 column (from the retired bge-code-v1
+        # A/B harness) and write to it directly so this test pins the
+        # production read path: centroid.py still COALESCEs over it for
+        # backward compatibility with .duck files that retain the column.
         existing_cols = {
             r[0]
             for r in conn.execute(

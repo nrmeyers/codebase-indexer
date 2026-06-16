@@ -39,11 +39,9 @@ from typing import Any
 
 import numpy as np
 
+from ..embedders.base import EMBEDDING_DIM
+
 logger = logging.getLogger(__name__)
-
-
-# Must match ``EMBEDDING_DIM`` in app.services.centroid / app.services.embedder.
-EMBEDDING_DIM = 768
 
 # Hard ceiling on vectors loaded into memory for a single neighbors/clusters
 # call. ~50k * 768 * 4 bytes ≈ 150 MB as float32 — bounded and safe. Beyond

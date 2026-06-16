@@ -718,13 +718,13 @@ def _semantic_search_impl(
                 break
         if not vec_path:
             raise HTTPException(
-                status_code=503,
+                status_code=404,
                 detail="No embedding store found. Run POST /index first.",
             )
 
     if not Path(vec_path).exists():
         raise HTTPException(
-            status_code=503,
+            status_code=404,
             detail=f"No embedding store found for repo '{repo}'. Run POST /index first.",
         )
 
@@ -735,13 +735,6 @@ def _semantic_search_impl(
             status_code=503,
             detail=f"DuckDB vector store unavailable: {exc}",
         ) from exc
-
-    # Phase 1.3 — code-specific embedding A/B path.  When the operator flips
-    # EMBEDDING_MODEL_ACTIVE=bge-code-v1 we read the parallel embedding_v2
-    # column.  search_similar_v2 falls back to the legacy `embedding` column
-    # on rows where v2 is still NULL during a partial migration.
-    from ..services.embedder import is_v2_active as _is_v2_active
-    from ..services.embedder import search_similar_v2 as _search_similar_v2  # noqa: PLC0415
 
     # Over-fetch to push past degenerate anonymous/fixture embeddings.
     # When rerank=true, we additionally guarantee at least 50 post-noise
@@ -782,10 +775,7 @@ def _semantic_search_impl(
         query_embedding = _embed_query(embed_query_text)
         vec_conn = open_or_create(vec_path)
         try:
-            if _is_v2_active():
-                raw = _search_similar_v2(vec_conn, query_embedding, k=fetch_k)
-            else:
-                raw = search_similar(vec_conn, query_embedding, k=fetch_k)
+            raw = search_similar(vec_conn, query_embedding, k=fetch_k)
 
             filtered = [r for r in raw if not _is_noise(r.qualified_name)]
 
@@ -1289,7 +1279,6 @@ def lexical_search(
     except Exception as exc:
         # Best-effort: never fail the lexical surface — return empty.
         logger.debug("lexical_search swallowed error: %s", exc)
-        _status_code = 200
         return LexicalSearchResponse(results=[])
     finally:
         _metrics.record_search(

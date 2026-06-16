@@ -70,6 +70,9 @@ class EmbedResponse(BaseModel):
 async def embed(req: EmbedRequest) -> EmbedResponse:
     """Embed ``req.text`` via the configured embedder backend.
 
+    Role: this endpoint always applies the model's QUERY prefix. Use against
+    document-side stores (centroids, .duck vectors).
+
     Returns:
         EmbedResponse: ``embedding`` (768-dim float list), ``dims`` (== 768
         in practice — populated from the actual vector length so a

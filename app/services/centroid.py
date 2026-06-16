@@ -43,13 +43,10 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from ..embedders.base import EMBEDDING_DIM
+
 logger = logging.getLogger(__name__)
 
-
-# 768 dims — must match ``EMBEDDING_DIM`` in ``app.services.embedder``.
-# Hard-coded here (not imported) so this module has no upstream import cycle
-# with the embedder; the dim is a stable cross-service contract anyway.
-EMBEDDING_DIM = 768
 
 # Cache TTL — 1h. Centroids are stable across queries within a single index
 # window. Re-indexing bumps the .duck file mtime which invalidates the entry
@@ -174,9 +171,9 @@ def _read_embeddings_for_qnames(
 
     placeholders = ",".join(["?"] * len(qnames))
 
-    # Detect which columns exist. ``embedding_v2`` is added by
-    # app/services/embedder.py via additive ALTER TABLE, so older .duck
-    # files will only have ``embedding``. We fall back gracefully.
+    # Detect which columns exist. ``embedding_v2`` is a legacy column from
+    # the retired bge-code-v1 A/B harness; older .duck files will only have
+    # ``embedding``. We fall back gracefully via COALESCE.
     try:
         existing_cols = {
             r[0]

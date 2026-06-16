@@ -71,14 +71,20 @@ LLAMA_SERVE: dict[str, dict[str, str]] = {
     },
 }
 
-# tag -> HF model id. All 768-dim, OSI-licensed, <1B params (see POC doc).
+# tag -> HF model id. Verdict reached (MEMORY.md decision_nomic_v1_5): the
+# winning model is nomic-v1.5. The bake-off roster lived here for the
+# multi-arm POC; to reproduce, pass --legacy-roster.
 ROSTER: list[tuple[str, str]] = [
-    ("e5", "intfloat/e5-base-v2"),                              # 0 baseline
-    ("coderank", "nomic-ai/CodeRankEmbed"),                     # 1
-    ("jina", "jinaai/jina-embeddings-v2-base-code"),            # 2
-    ("gte-modernbert", "Alibaba-NLP/gte-modernbert-base"),      # 3
-    ("granite-r2", "ibm-granite/granite-embedding-english-r2"), # 4
-    ("nomic-v1.5", "nomic-ai/nomic-embed-text-v1.5"),           # 5 general text (nomic-bert, 768 MRL)
+    ("nomic-v1.5", "nomic-ai/nomic-embed-text-v1.5"),
+]
+
+LEGACY_ROSTER: list[tuple[str, str]] = [
+    ("e5", "intfloat/e5-base-v2"),                              # baseline
+    ("coderank", "nomic-ai/CodeRankEmbed"),
+    ("jina", "jinaai/jina-embeddings-v2-base-code"),
+    ("gte-modernbert", "Alibaba-NLP/gte-modernbert-base"),
+    ("granite-r2", "ibm-granite/granite-embedding-english-r2"),
+    ("nomic-v1.5", "nomic-ai/nomic-embed-text-v1.5"),
 ]
 
 
@@ -338,11 +344,26 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", help="comma-separated tags to run")
     ap.add_argument("--outdir", default=str(REPO_ROOT / ".planning" / "runs" / "768-poc"))
+    ap.add_argument(
+        "--legacy-roster",
+        action="store_true",
+        help="run the pre-verdict bake-off roster (e5, coderank, jina, gte-modernbert, granite-r2, nomic-v1.5)",
+    )
+    ap.add_argument(
+        "--clean",
+        action="store_true",
+        help="rmtree .cgr-poc/ and --outdir before running (POC artifacts are not committed)",
+    )
     a = ap.parse_args()
     only = set(a.only.split(",")) if a.only else None
     outdir = Path(a.outdir)
+    if a.clean:
+        import shutil
+        shutil.rmtree(REPO_ROOT / ".cgr-poc", ignore_errors=True)
+        shutil.rmtree(outdir, ignore_errors=True)
     outdir.mkdir(parents=True, exist_ok=True)
-    for tag, hf in ROSTER:
+    roster = LEGACY_ROSTER if a.legacy_roster else ROSTER
+    for tag, hf in roster:
         if only and tag not in only:
             continue
         try:
