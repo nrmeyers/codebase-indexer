@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # on first use, so there's no eager schema warm-up here.
     from pathlib import Path as _Path
     import logging as _logging
-    import real_ladybug as _lb
+    import ladybug as _lb
     from .services.ladybug_buffer_pool import resolve_buffer_pool_size as _resolve_bps
     from .services.s3_store import restore_indexes as _s3_restore, snapshot_indexes as _s3_snapshot
 

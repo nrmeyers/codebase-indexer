@@ -48,7 +48,7 @@ _SYMBOL_CYPHER = (
 
 def migrate_repo(slug: str, db_path: Path) -> int:
     """Migrate one repo's symbols into its Tantivy index. Return docs added."""
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
 
     db = lb.Database(str(db_path), read_only=True)
     conn = lb.Connection(db)

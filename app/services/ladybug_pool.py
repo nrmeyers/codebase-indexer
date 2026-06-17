@@ -45,7 +45,7 @@ def open_read_conn(db_path: str) -> Tuple[Any, Any]:
         closing the connection (and dropping references to the database
         before any subprocess that needs the file).
     """
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
 
     from .ladybug_buffer_pool import resolve_buffer_pool_size
 
@@ -68,7 +68,7 @@ def open_rw_conn(db_path: str) -> Tuple[Any, Any]:
     Returns:
         Tuple of ``(Database, Connection)``.
     """
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
 
     from .ladybug_buffer_pool import resolve_buffer_pool_size
 

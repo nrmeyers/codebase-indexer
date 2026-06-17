@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-import real_ladybug as lb
+import ladybug as lb
 
 from .. import constants as cs
 from ..config import settings

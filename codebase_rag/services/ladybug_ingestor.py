@@ -24,7 +24,7 @@ import types
 from collections import defaultdict
 from datetime import UTC, datetime
 
-import real_ladybug as lb
+import ladybug as lb
 from loguru import logger
 
 from .. import exceptions as ex
@@ -138,7 +138,7 @@ class LadybugIngestor:
             else:
                 self.flush_all()
         finally:
-            # Explicitly close handles so real_ladybug releases the OS file
+            # Explicitly close handles so ladybug releases the OS file
             # lock immediately. Assigning None alone relies on CPython's GC
             # timing which is too slow when another process (the embedding
             # subprocess) expects to acquire the same lock within ms.

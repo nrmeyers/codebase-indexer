@@ -95,7 +95,7 @@ Description:"""
 
 
 def _rows_for_repo(repo_db_path: str) -> list[dict[str, Any]]:
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
 
     from app.services.ladybug_buffer_pool import resolve_buffer_pool_size
 

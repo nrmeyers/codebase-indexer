@@ -509,7 +509,7 @@ def test_blocking_index_completes_with_heartbeat_wrapper_and_resolves_symbols(
     assert job.rel_count > 0, "structural write produced no relationships"
 
     # The route handler resolves in the written graph (no partial write).
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
 
     from app.config import settings as _settings
     from app.services.slug import derive_slug as _derive_slug
@@ -581,7 +581,7 @@ def test_truncated_graph_self_heals_on_incremental_reindex(tmp_path: Path) -> No
 
     # --- Simulate truncation: delete all definition nodes, keeping structure
     # and the (now-stale) hash cache. This is the live "369-node" state. ---
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
 
     db = lb.Database(db_path)
     conn = lb.Connection(db)

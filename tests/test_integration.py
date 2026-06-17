@@ -83,7 +83,7 @@ def app_client(db_path: str):
     import app.routers.context_bundle as cb_mod
 
     def _get_conn_fresh():
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        import ladybug as lb  # type: ignore[import-untyped]
 
         db = lb.Database(db_path)
         conn = lb.Connection(db)
@@ -169,7 +169,7 @@ def seeded_db(tmp_path: Path) -> str:
     """Create a LadybugDB with a small schema and a few nodes."""
     db_path = str(tmp_path / "test.db")
     try:
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        import ladybug as lb  # type: ignore[import-untyped]
         from codebase_rag.services.ladybug_schema import migrate
 
         migrate(db_path)
@@ -206,7 +206,7 @@ def test_structural_search_real_db(seeded_db: str) -> None:
     import app.routers.search as search_mod
 
     def _conn():
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        import ladybug as lb  # type: ignore[import-untyped]
 
         return lb.Connection(lb.Database(seeded_db))
 
@@ -231,7 +231,7 @@ def test_symbol_lookup_real_db(seeded_db: str, tmp_path: Path) -> None:
     import app.routers.search as search_mod
 
     def _conn():
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        import ladybug as lb  # type: ignore[import-untyped]
 
         return lb.Connection(lb.Database(seeded_db))
 

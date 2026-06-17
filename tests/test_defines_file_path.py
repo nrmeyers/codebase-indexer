@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import real_ladybug as lb
+import ladybug as lb
 
 
 @pytest.fixture()

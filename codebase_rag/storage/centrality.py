@@ -25,7 +25,7 @@ def compute_pagerank(repo_db_path: str) -> dict[str, float]:
         when the graph has no CALLS edges (single-file repos, etc.).
     """
     import networkx as nx
-    import real_ladybug as lb
+    import ladybug as lb
 
     db = lb.Database(repo_db_path)
     conn = lb.Connection(db)

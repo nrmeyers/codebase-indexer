@@ -700,10 +700,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Imports of code-graph-rag + real-ladybug happen here (not at module
+    # Imports of code-graph-rag + ladybug happen here (not at module
     # top) so that ``import app.scripts.embed_driver`` from a unit test
     # does not require the full embedding stack to be installed.
-    import real_ladybug as lb
+    import ladybug as lb
     from app.services.ladybug_buffer_pool import resolve_buffer_pool_size
     from codebase_rag.storage.vector_store import (
         EmbeddingRow,

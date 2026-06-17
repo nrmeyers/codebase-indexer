@@ -21,7 +21,7 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.2.2",
     "uvicorn[standard]>=0.45.0",
-    "real-ladybug>=0.15.3",
+    "ladybug==0.17.1",
     # Vendored codebase_rag engine (see codebase_rag/VENDORED.md) — its
     # runtime deps are merged below so the service installs standalone
     # with no sibling repo checkout.
@@ -47,7 +47,7 @@ dependencies = [
     # DuckDB v5.3 §6.5: per-repo .duck files with FLOAT[768] + array_cosine_distance.
     # Optional listwise rerank via nomic-ai/CodeRankLLM is provided through LM Studio
     # (see app/services/lm_studio.py) — no extra Python deps required.
-    "duckdb>=1.1.0",
+    "duckdb>=1.5.4",
     "bm25s>=0.2.13",
     # Plan G + J: structured docstring extraction + PageRank centrality.
     # Both modules live in code-graph-rag/codebase_rag/storage/ and are
