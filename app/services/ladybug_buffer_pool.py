@@ -28,7 +28,7 @@ Env var:
                             integer.  Unset / empty / non-numeric /
                             non-positive falls back to ``DEFAULT_BUFFER_POOL_SIZE``.
 
-The kwarg name was verified against real_ladybug 0.15.3:
+The kwarg name was verified against ladybug 0.17.1:
 ``Database.__init__(..., buffer_pool_size: int = 0, ...)`` — 0 means
 "auto-size", which is exactly the unbounded behaviour we are replacing.
 """

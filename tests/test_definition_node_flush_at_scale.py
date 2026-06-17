@@ -40,7 +40,7 @@ def migrated_db(tmp_path: Path) -> str:
 
 
 def _open_ro(db_path: str):
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
 
     from app.services.ladybug_buffer_pool import resolve_buffer_pool_size
 

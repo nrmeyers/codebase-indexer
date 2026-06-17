@@ -229,8 +229,8 @@ def test_should_compute_pagerank_via_per_label_queries(tmp_path: Path) -> None:
 
     fake_db = MagicMock()
 
-    with patch("real_ladybug.Database", return_value=fake_db), \
-         patch("real_ladybug.Connection", return_value=fake_conn):
+    with patch("ladybug.Database", return_value=fake_db), \
+         patch("ladybug.Connection", return_value=fake_conn):
         scores = cgr_compute_pagerank("/fake/path.db")
 
     assert scores, "expected non-empty PageRank scores"

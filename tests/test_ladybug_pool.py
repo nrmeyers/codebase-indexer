@@ -21,7 +21,7 @@ from app.services.ladybug_pool import open_read_conn, open_rw_conn
 @pytest.fixture()
 def seeded_db(tmp_path: Path) -> str:
     """Spin up a tiny real LadybugDB so we can exercise the file lock."""
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
     from codebase_rag.services.ladybug_schema import migrate
 
     db_path = str(tmp_path / "lock.db")

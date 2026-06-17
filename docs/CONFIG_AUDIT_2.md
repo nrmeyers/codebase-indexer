@@ -42,7 +42,7 @@ smoke = "python scripts/lm_studio_smoke.py"
 | fastapi | >=0.136.0 | 5.2 MB | Web framework (all routers) | **LOW** | ✅ required |
 | pydantic | >=2.13.3 | 2.8 MB | Request/response models, Settings | **MEDIUM** | ✅ required |
 | uvicorn | >=0.45.0 | 1.2 MB | ASGI server | **LOW** | ✅ required |
-| real-ladybug | >=0.15.3 | 600 KB | Graph DB (`app/services/graph_db.py`) | **MEDIUM** | ✅ required |
+| ladybug | ==0.17.1 | 600 KB | Graph DB (`app/services/graph_db.py`) | **MEDIUM** | ✅ required |
 | duckdb | >=1.1.0 | 18 MB | Embeddings + vector search | **MEDIUM** | ✅ required |
 | torch | >=2.6.0 | 600+ MB | CodeRankEmbed via transformers | **HIGH** | ✅ required (optional; conditional) |
 | transformers | >=4.0.0 | 1.8 GB | Embedding model loader | **HIGH** | ✅ required (optional; conditional) |

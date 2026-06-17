@@ -1,7 +1,7 @@
 """Tests for the bounded LadybugDB buffer-pool sizing helper.
 
 These tests import ONLY ``app.services.ladybug_buffer_pool`` (a leaf module
-with no model / embedder / FastAPI dependencies) plus ``real_ladybug`` for
+with no model / embedder / FastAPI dependencies) plus ``ladybug`` for
 the live-open smoke test, so they are safe to run under tight host memory
 pressure without booting the service or pulling in torch.
 """
@@ -96,7 +96,7 @@ def test_database_opens_with_bounded_buffer_pool() -> None:
     test for the ``Mmap for size ... failed`` hard-fail: a bounded pool
     must open where the unbounded default could not.
     """
-    lb = pytest.importorskip("real_ladybug")
+    lb = pytest.importorskip("ladybug")
 
     bounded = 256 * 1024 * 1024  # 256 MiB — comfortably small
 
@@ -114,7 +114,7 @@ def test_database_opens_with_bounded_buffer_pool() -> None:
 
 def test_resolved_size_opens_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
     """The helper's resolved value is a legal ``buffer_pool_size`` for open."""
-    lb = pytest.importorskip("real_ladybug")
+    lb = pytest.importorskip("ladybug")
 
     # Pin a small bounded value via the env var so the open stays light.
     monkeypatch.setenv(ENV_VAR, str(256 * 1024 * 1024))

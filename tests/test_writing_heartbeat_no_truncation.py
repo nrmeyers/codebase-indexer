@@ -54,7 +54,7 @@ def _make_running_writing_job(js, job_id: str, repo_slug: str):
 
 
 def _count_nodes(db_path: str) -> int:
-    import real_ladybug as lb
+    import ladybug as lb
 
     db = lb.Database(db_path)
     conn = lb.Connection(db)

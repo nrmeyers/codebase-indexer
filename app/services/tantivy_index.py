@@ -420,7 +420,7 @@ def rebuild_lexical_index(
     if _load_tantivy() is None:
         return 0
     try:
-        import real_ladybug as _lb  # type: ignore[import-untyped]
+        import ladybug as _lb  # type: ignore[import-untyped]
         from .ladybug_buffer_pool import resolve_buffer_pool_size
     except Exception as exc:  # pragma: no cover - env-specific
         logger.warning("rebuild_lexical_index: ladybug unavailable: %s", exc)

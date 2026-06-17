@@ -34,7 +34,7 @@ Migration completeness contract (BUC-1621):
 
 from __future__ import annotations
 
-import real_ladybug as lb
+import ladybug as lb
 from loguru import logger
 
 # ---------------------------------------------------------------------------

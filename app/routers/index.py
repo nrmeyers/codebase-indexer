@@ -1078,7 +1078,7 @@ def _graph_is_truncated(repo_db_path: str) -> bool:
     db = None
     conn = None
     try:
-        import real_ladybug as lb  # type: ignore[import-untyped]  # noqa: PLC0415
+        import ladybug as lb  # type: ignore[import-untyped]  # noqa: PLC0415
         from ..services.ladybug_buffer_pool import (  # noqa: PLC0415
             resolve_buffer_pool_size,
         )
@@ -1426,7 +1426,7 @@ def _blocking_index(job: _Job, force_reindex: bool) -> None:
     _def_count = 0
     _counts_ok = False
     try:
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        import ladybug as lb  # type: ignore[import-untyped]
         from ..services.ladybug_buffer_pool import resolve_buffer_pool_size  # noqa: PLC0415
 
         _count_db = lb.Database(repo_db_path, buffer_pool_size=resolve_buffer_pool_size())

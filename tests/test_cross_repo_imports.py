@@ -243,7 +243,7 @@ def seeded_importer_db(tmp_path: Path) -> str:
     ``navistone__shared-types::@navistone/shared-types`` and copy the
     IMPORTS edge over to point at the new node.
     """
-    import real_ladybug as lb  # type: ignore[import-untyped]
+    import ladybug as lb  # type: ignore[import-untyped]
     from codebase_rag.services.ladybug_schema import migrate
 
     db_path = str(tmp_path / "theforge.db")
@@ -331,7 +331,7 @@ class TestResolveCrossRepoImports:
         # Verify the rewrite committed: the old external Module is gone,
         # the new cross-repo Module exists, and the IMPORTS edge now
         # targets the new node.
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        import ladybug as lb  # type: ignore[import-untyped]
         db = lb.Database(seeded_importer_db, read_only=True)
         conn = lb.Connection(db)
         try:
@@ -392,7 +392,7 @@ class TestResolveCrossRepoImports:
         assert stats.unmatched == 1
 
         # Verify the original external Module is still there untouched.
-        import real_ladybug as lb  # type: ignore[import-untyped]
+        import ladybug as lb  # type: ignore[import-untyped]
         db = lb.Database(seeded_importer_db, read_only=True)
         conn = lb.Connection(db)
         try:
