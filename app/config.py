@@ -187,11 +187,11 @@ class Settings(BaseSettings):
     GH_TOKEN: str = ""
 
     # Comma-separated list of owners (users or orgs) that are permitted to
-    # be cloned and indexed.  Empty list disables the guard (all owners
-    # allowed) — set this to e.g. ``"navistone"`` in production to make
-    # sure the indexer can never be tricked into cloning random public
-    # repos.  Owners are compared case-insensitively.
-    GITHUB_ALLOWED_OWNERS: str = "navistone"
+    # be cloned and indexed.  Empty (the default) disables the guard (all
+    # owners allowed) — set this to your org(s), e.g. ``"acme"`` or
+    # ``"acme,acme-labs"``, in production so the indexer can never be tricked
+    # into cloning random public repos.  Owners are compared case-insensitively.
+    GITHUB_ALLOWED_OWNERS: str = ""
 
     @property
     def github_allowed_owners(self) -> list[str]:
@@ -245,7 +245,7 @@ class Settings(BaseSettings):
     # startup and pushes changed files back on clean shutdown.  This lets
     # containers inherit the last committed graph without a bind-mount.
     # Leave blank in local dev to disable S3 sync entirely.
-    S3_INDEX_BUCKET: str = "navistone-forge-data"   # set to "" to disable
+    S3_INDEX_BUCKET: str = ""   # set to a bucket name to enable S3 sync; empty = disabled
     S3_INDEX_PREFIX: str = "code-indexer/indexes"   # key prefix inside the bucket
     S3_INDEX_REGION: str = "us-east-1"
 
