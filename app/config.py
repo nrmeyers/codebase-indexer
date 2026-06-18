@@ -257,8 +257,8 @@ class Settings(BaseSettings):
     #
     #   local      sentence-transformers in-process (no AWS, no sidecar).
     #              Default for standalone installs.
-    #   sagemaker  Navistone's AWS SageMaker jina-code-v2-serverless endpoint (was E5, swapped 2026-05-26 LE-129).
-    #              Default for the Navistone production deploy.
+    #   sagemaker  the AWS SageMaker jina-code-v2-serverless endpoint (was E5, swapped 2026-05-26 LE-129).
+    #              Default for the production deploy.
     #   tei        Hugging Face Text-Embeddings-Inference HTTP sidecar
     #              (http://localhost:8080 by default).
     EMBEDDER_BACKEND: str = "local"

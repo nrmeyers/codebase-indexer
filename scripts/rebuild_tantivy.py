@@ -12,7 +12,7 @@ Usage:
 
 Example:
     uv run python scripts/rebuild_tantivy.py \
-        navistone__TheForge=$HOME/dev/claude/TheForge \
+        nrmeyers__TheForge=$HOME/dev/claude/TheForge \
         code-indexer-service=$HOME/dev/claude/code-indexer-service
 """
 from __future__ import annotations

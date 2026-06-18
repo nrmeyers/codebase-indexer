@@ -7,7 +7,7 @@ notes). The agent-skills index lives here so the whole team sees it.
 
 ### Backlog
 
-GitHub Issues on `navistone/code-indexer-service` via the `gh` CLI. See `docs/agents/backlog.md`.
+GitHub Issues on `nrmeyers/codebase-indexer` via the `gh` CLI. See `docs/agents/backlog.md`.
 
 ### Triage labels
 

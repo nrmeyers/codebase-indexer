@@ -110,7 +110,7 @@ Plus `GET /metrics` (Prometheus) and `GET /openapi.json`.
 ## Embedders (app/embedders/)
 
 Pluggable via `EMBEDDER_BACKEND` env var: `local` (default; sentence-transformers
-in-process, 768-dim e5-base-v2), `sagemaker` (Navistone prod; jina-code-v2
+in-process, 768-dim e5-base-v2), `sagemaker` (production; jina-code-v2
 serverless endpoint since LE-129), `tei` (HF TEI sidecar), `openai`
 (text-embedding-3-small, 1536-dim — **requires re-index**; the other three share
 the FLOAT[768] schema and are env-var swappable). Use the async `get_embedder()`
@@ -128,9 +128,9 @@ See `.env.example` and `app/config.py` (all config via `Settings`). Critical one
 | `LADYBUG_DB_DIR` | `.cgr/repos` | Per-repo `{slug}.db` files (`LADYBUG_DB_PATH` is legacy fallback) |
 | `JOBS_DB_PATH` | `.cgr/jobs.sqlite` | Durable job store |
 | `EMBEDDER_BACKEND` | `local` | `local`/`sagemaker`/`tei`/`openai`; prod = `sagemaker` |
-| `S3_INDEX_BUCKET` | `navistone-forge-data` | Empty = S3 persistence disabled |
+| `S3_INDEX_BUCKET` | `` (empty) | Set to an S3 bucket to enable sync; empty disables it |
 | `WATCH_ENABLED` | `false` | File-watcher master switch |
-| `GITHUB_TOKEN` / `GITHUB_ALLOWED_OWNERS` | — / `navistone` | Enables `/github/*` routes; owner allowlist |
+| `GITHUB_TOKEN` / `GITHUB_ALLOWED_OWNERS` | — / `` (empty) | Enables `/github/*` routes; empty allowlist = all owners (set per deploy) |
 | `TARGET_REPO_PATH` | `.` | Default repo when request omits `repo_path` |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Loopback-only by default; `0.0.0.0` for containers |
 

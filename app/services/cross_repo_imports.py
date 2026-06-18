@@ -3,7 +3,7 @@
 When the Code Indexer ingests N repos into one LadybugDB instance, the
 underlying ``codebase_rag`` fork treats each repo's graph as isolated.  An
 import that resolves to a sibling indexed repo (e.g. ``TheForge`` importing
-``@navistone/shared-types`` from the ``shared-types`` repo) ends up as an
+``@nrmeyers/shared-types`` from the ``shared-types`` repo) ends up as an
 "external" :class:`Module` node — a leaf with no project prefix — instead
 of being linked across to the corresponding ``Module`` node in the other
 repo's graph.
@@ -93,10 +93,10 @@ class RepoIdentity:
     or not readable; the matcher treats them as "no match" sentinels.
 
     Attributes:
-        slug: The Code Indexer slug for this repo (e.g. ``navistone__TheForge``).
+        slug: The Code Indexer slug for this repo (e.g. ``nrmeyers__TheForge``).
             Used to namespace the rewritten cross-repo Module qnames.
         npm_name: The ``name`` field from ``package.json`` (e.g.
-            ``@navistone/shared-types``).  Empty if absent.
+            ``@nrmeyers/shared-types``).  Empty if absent.
         python_name: The ``project.name`` from ``pyproject.toml`` (PEP 621)
             or — as a fallback — the first top-level Python package
             directory.  Normalised to dotted form (``-`` and ``_`` are
@@ -288,7 +288,7 @@ def match_external_module(
 
     Args:
         qualified_name: The Module's ``qualified_name`` as stored in the
-            graph (e.g. ``@navistone/shared-types`` or ``flask.helpers``).
+            graph (e.g. ``@nrmeyers/shared-types`` or ``flask.helpers``).
         path_hint: The Module's ``path`` column — often the original
             full import path before the parser stripped the trailing
             symbol; matched as a fallback.

@@ -52,7 +52,7 @@ class GitHubRepo(BaseModel):
     sorting/filtering, and default branch for the clone.
     """
 
-    full_name: str = Field(description="owner/name (e.g. 'navistone/legacy-api')")
+    full_name: str = Field(description="owner/name (e.g. 'nrmeyers/legacy-api')")
     name: str = Field(description="Short repo name (e.g. 'legacy-api')")
     owner: str = Field(description="Account or org that owns the repo")
     private: bool = Field(description="True for private repos")
@@ -76,10 +76,10 @@ class GitHubOrg(BaseModel):
 
     The Settings UI uses these to render the allowlist editor as a
     checkbox list with the user's actual orgs (instead of forcing
-    them to type ``navistone`` from memory).
+    them to type ``nrmeyers`` from memory).
     """
 
-    login: str = Field(description="Org slug, e.g. 'navistone'")
+    login: str = Field(description="Org slug, e.g. 'nrmeyers'")
     description: str | None = None
     avatar_url: str | None = None
     allowlisted: bool = Field(

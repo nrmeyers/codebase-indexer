@@ -1,8 +1,8 @@
 """AWS SageMaker Serverless Inference backend (BUC-1605).
 
-Calls Navistone's ``forge-e5-embed-v2`` endpoint in ``us-east-1`` via
+Calls the ``forge-e5-embed-v2`` endpoint in ``us-east-1`` via
 ``boto3.client('sagemaker-runtime')``. This is the default for the
-Navistone production deploy; standalone installs without AWS creds
+production deploy; standalone installs without AWS creds
 should leave this alone and use the ``local`` backend instead.
 
 Endpoint contract
@@ -196,7 +196,7 @@ def _mean_pool(x: Any) -> Any:
 
 
 class SageMakerEmbedder(EmbedderBackend):
-    """Boto3-backed client for Navistone's SageMaker embedding endpoint."""
+    """Boto3-backed client for the SageMaker embedding endpoint."""
 
     name = "sagemaker"
     dim = EMBEDDING_DIM
@@ -239,7 +239,7 @@ class SageMakerEmbedder(EmbedderBackend):
         Resolution priority (highest first):
             1. ``SAGEMAKER_ENDPOINT_NAME`` — preferred BUC-1605 name.
             2. ``SAGEMAKER_EMBED_ENDPOINT`` — legacy alias kept for
-               backwards-compat with existing Navistone .env files.
+               backwards-compat with existing .env files.
             3. ``SAGEMAKER_EMBED_URL`` — full URL, endpoint name extracted.
 
         Model labelling (independent of endpoint resolution):
