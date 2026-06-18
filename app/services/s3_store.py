@@ -17,7 +17,7 @@ just queries it — restore_indexes() pulls it on the next /index call,
 or callers can use ensure_local() to lazy-load a single repo.
 
 Env vars (all optional — S3 sync is a no-op when S3_INDEX_BUCKET is empty):
-    S3_INDEX_BUCKET             default 'navistone-forge-data'
+    S3_INDEX_BUCKET             default '' (S3 sync disabled)
     S3_INDEX_PREFIX             default 'code-indexer/indexes'
     S3_INDEX_REGION             default 'us-east-1'
     S3_INDEX_LOCAL_TTL_HOURS    default '24' — evict cached files
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BUCKET = "navistone-forge-data"
+_DEFAULT_BUCKET = ""
 _DEFAULT_PREFIX = "code-indexer/indexes"
 _DEFAULT_REGION = "us-east-1"
 _DEFAULT_SNAPSHOT_RETAIN = 10
