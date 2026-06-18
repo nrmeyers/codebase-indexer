@@ -3,17 +3,12 @@
 **Status:** ready to run (2026-06-13). Operationalizes
 [`embedder-eval-plan.md`](embedder-eval-plan.md) with a concrete 768-dim
 candidate set. This repo stays at `FLOAT[768]`, so **every candidate here is a
-swap-class A/B — no schema change, no migration**. The sibling repo
-`codebase-indexer-qwen` runs the 1024-dim roster
-([`embedder-poc-1024.md`](../../codebase-indexer-qwen/docs/embedder-poc-1024.md)).
+swap-class A/B — no schema change, no migration**.
 
 ## Goal
 
 Find the best **open-source, <1B-param, CPU-runnable** 768-dim embedder for
-first-stage code retrieval on this corpus — and, via the shared harness,
-produce numbers directly comparable to the 1024 roster so we can answer: *does
-the 1024 separability ceiling actually buy anything on a real codebase, or is a
-strong 768 code embedder enough?*
+first-stage code retrieval on this corpus.
 
 ## Hard constraints (locked)
 
@@ -69,14 +64,3 @@ Swap-class (768, no migration): **ship a candidate if mean recall@25 improves
 below its current lift) and probes stay **6/6**. Low bar to adopt — there's no
 migration cost. Report latency/index-cost alongside; a code embedder that
 doubles index time for +0.02 recall is a different decision than a free one.
-
-## Cross-repo comparability (the dimension question)
-
-This roster and the 1024 roster share the **same 15 oracle tasks + 6 probes,
-the same `run_recall.py` recall@k/MRR metric, and the same raw
-`/search/semantic` path**. That makes the 768-repo winner and the 1024-repo
-winner directly comparable. If the best 768 code embedder here matches or beats
-the best 1024 model there on recall@25 at lower CPU latency, the 1024
-separability ceiling is not paying for itself on this corpus — and the cheaper,
-no-migration 768 path wins. If 1024 opens a real recall gap at scale, that
-vindicates the migration cost. Run both rosters before deciding either.

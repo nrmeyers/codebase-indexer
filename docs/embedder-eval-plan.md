@@ -27,16 +27,10 @@ two (see "Primary metric").
 | `local` (current baseline) | `intfloat/e5-base-v2` | 768 | none | dev only |
 | `sagemaker` (current prod) | `jina-code-v2` | 768 | none — same `FLOAT[768]` | **prod runs this** |
 | code-specialized (local) | `nomic-ai/CodeRankEmbed` or jina-code-v2 local | 768 | none (swap via `EMBEDDER_BACKEND`) | matches prod family |
-| convergence candidate | `qwen3-embedding` (0.6B) | **1024** | **migration**: `FLOAT[768]→FLOAT[1024]`, full re-index, baseline reset | none yet; the tripod-convergence bet |
 
 Notes:
 - `local`/`sagemaker`/`tei` already share the `FLOAT[768]` schema and are
   env-swappable (`EMBEDDER_BACKEND`) — cheap to A/B, no migration.
-- `qwen3-embedding` is the only one needing the 1024-dim schema change +
-  full re-index of all three repos + a baseline re-run. Its value is the
-  tripod story (code-indexer + AgentAlloy sharing one embedding engine, per
-  the GPU/embedder memory), where success = **no regression**, not a big
-  lift. Gate it accordingly.
 - A code-specialized embedder (CodeRankEmbed/jina-code) is the most likely
   to actually move recall, since e5-base-v2 is general-prose-trained and
   code identifiers are out-of-distribution for it. This is the candidate I
@@ -71,14 +65,7 @@ post-previous-stage baseline by a pre-registered margin):
    recall@25 improves by **≥ 0.05** over e5-base-v2 with **zero** composed
    regressions (no task drops below its current lift) and probes stay 6/6.
    Cheap to try; low bar to adopt because there's no migration cost.
-2. **`qwen3-embedding` (1024-dim, migration):** the bar is **no
-   regression** — mean lift ≥ 0.9778, all 15 tasks ≥ current, probes 6/6 —
-   because the win is engine convergence, not benchmark lift. Do NOT pay the
-   re-index/migration cost unless a swap-class candidate has already shown
-   recall headroom exists (i.e. run step 1 first; if e5 is already
-   saturated, qwen3 convergence is a separate strategic call, not a
-   retrieval win).
-3. Report **token/latency cost** beside quality for each (embed throughput,
+2. Report **token/latency cost** beside quality for each (embed throughput,
    index size, query-embed latency). A code embedder that doubles index
    time for +0.02 recall is a different decision than one that's free.
 
@@ -91,11 +78,7 @@ post-previous-stage baseline by a pre-registered margin):
    tells us immediately whether recall is even the bottleneck.
 3. **A/B a 768-dim code embedder** (`EMBEDDER_BACKEND` swap + re-index the
    three repos — cheap, no schema change). This is the high-information,
-   low-cost experiment; run it before touching qwen3.
-4. **Only if (3) shows headroom** (or for the convergence decision
-   independent of lift): scope the `qwen3-embedding` 1024-dim migration as
-   its own task (schema bump, re-index, baseline reset, CI cache-key bump
-   per §5).
+   low-cost experiment.
 
 ## Constraints / traps to carry in
 
