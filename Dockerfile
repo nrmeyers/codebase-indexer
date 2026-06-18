@@ -1,17 +1,14 @@
 # syntax=docker/dockerfile:1.7
 #
 # Code Indexer Service — production image.
-# Per .planning/phase-plans/PHASE_3_DOCKER.md §5.
 #
-# Build context expectation: the PARENT directory of this repo. The CI
-# workflow at TheForge/.github/workflows/build-and-push.yml checks out
-# both `code-indexer-service` and `code-graph-rag` as siblings and runs
-# `docker build -f code-indexer-service/Dockerfile .` from that parent
-# so this Dockerfile can `COPY code-graph-rag` to satisfy the
-# [tool.uv.sources] path dep declared in pyproject.toml.
+# Build context: THIS repo's root. The graph engine is vendored at
+# `codebase_rag/` (see codebase_rag/VENDORED.md) and its runtime deps are
+# merged into pyproject.toml, so there is no longer a `code-graph-rag`
+# sibling to COPY and no `[tool.uv.sources]` path dep.
 #
-# Local equivalent (from your home dir):
-#   cd ~ && docker build -t forge-code-indexer -f code-indexer-service/Dockerfile .
+#   podman build -t codebase-indexer .        # from the repo root
+#   docker build -t codebase-indexer .        # equivalent
 #
 # Runtime container behaviour:
 #   - Listens on 0.0.0.0:8000 (matches `code-indexer:8000` in the
@@ -32,52 +29,32 @@ RUN apt-get update && \
         build-essential cmake git libssl-dev zlib1g-dev libzstd-dev && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /
-
-# code-graph-rag is the path-dep sibling (per pyproject.toml's
-# [tool.uv.sources]: `code-graph-rag = { path = "../code-graph-rag" }`).
-# Copy it FIRST so changes to the indexer's pyproject.toml don't bust
-# the cgr install layer.
-#
-# Build-context expectation: the build context must contain a
-# `code-graph-rag/` directory at its root. The CI workflow at
-# TheForge/.github/workflows/build-and-push.yml is responsible for
-# ensuring the cgr fork is checked out to that path — see the companion
-# TheForge PR that fixes the workflow's `path:` setting from
-# `vitali87-code-graph-rag` to `code-graph-rag`.
-COPY code-graph-rag ./code-graph-rag
-
-# Indexer manifest + lockfile only — `uv sync --no-install-project`
-# resolves deps without copying app source so subsequent app-only
-# changes hit a warm dep cache.
 WORKDIR /app
-COPY code-indexer-service/pyproject.toml code-indexer-service/uv.lock ./
 
+# Manifest + lockfile only — `uv sync --no-install-project` resolves deps
+# without copying app source, so later app-only changes hit a warm dep
+# cache. README.md is REQUIRED: pyproject.toml declares `readme = "README.md"`
+# and hatchling reads it during the project install.
+COPY pyproject.toml uv.lock README.md ./
 
-# Install lockfile-resolved deps (no app source yet, no extras).
+# Install lockfile-resolved deps (no app source yet, no dev/extras).
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
-# pyarrow is the 380× bulk_insert speedup
-# (code-graph-rag/scripts/BENCH_RESULTS_2026-04-27.md). The `arrow` extra
-# is declared on code-graph-rag's pyproject.toml — NOT on the indexer's
-# — so `uv sync --extra arrow` fails from this repo's perspective. Pull
-# pyarrow explicitly with `uv pip install --no-deps` so the lockfile
-# resolution above stays intact and pyarrow lands in the runtime image.
-# vector_store.py in code-graph-rag auto-detects pyarrow at import time
-# and routes to the bulk_insert_arrow path when present; falls back to
-# executemany otherwise.
+# pyarrow is the 380× bulk_insert speedup. The vendored codebase_rag
+# vector_store auto-detects it at import time and routes to the
+# bulk_insert_arrow path when present, falling back to executemany
+# otherwise. It is not a default dependency, so pull it explicitly with
+# `--no-deps` to keep the locked resolution above intact.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-deps "pyarrow>=15.0"
 
-# Now copy app source and re-sync to install code-indexer-service itself.
-# README.md is REQUIRED — pyproject.toml declares `readme = "README.md"`
-# and hatchling reads the file during the editable install. Without it,
-# `uv sync` fails with `OSError: Readme file does not exist: README.md`.
-COPY code-indexer-service/app ./app
-COPY code-indexer-service/main.py ./main.py
-COPY code-indexer-service/scripts ./scripts
-COPY code-indexer-service/README.md ./README.md
+# Now copy app source + the vendored engine, then install the project
+# itself (`app` + `codebase_rag` are the two wheel packages).
+COPY app ./app
+COPY codebase_rag ./codebase_rag
+COPY main.py ./main.py
+COPY scripts ./scripts
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
@@ -93,31 +70,36 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Copy the venv first (heavy, changes infrequently) then app source
-# (light, changes often) — keeps the runtime image rebuild fast on
-# code-only changes.
-COPY --from=builder --chown=forge:forge /app/.venv /app/.venv
-COPY --from=builder --chown=forge:forge /app/app /app/app
-COPY --from=builder --chown=forge:forge /app/scripts /app/scripts
-COPY --from=builder --chown=forge:forge /app/main.py /app/main.py
-# code-graph-rag is editable-installed into the venv; keeping its source
-# tree at the path uv recorded means import resolves at runtime.
-COPY --from=builder --chown=forge:forge /code-graph-rag /code-graph-rag
+# Copy the whole project dir from the builder in one shot: the venv plus
+# the `app` and vendored `codebase_rag` source trees (the project is
+# installed editable, so both source trees must live at the path uv
+# recorded — /app — for imports to resolve at runtime), along with the
+# manifests/scripts. Done as a single COPY because podman/buildah can
+# fail to stat individually cherry-picked subdirs from a prior stage
+# that ended on a cache-mounted RUN.
+COPY --from=builder --chown=forge:forge /app /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     LM_STUDIO_URL=http://host.docker.internal:1234 \
     CGR_DATA_DIR=/var/lib/forge/cgr \
+    LADYBUG_DB_DIR=/var/lib/forge/cgr/repos \
     JOBS_DB_PATH=/var/lib/forge/jobs/jobs.sqlite
+
+# Persist indexes + job state across container restarts by mounting a
+# volume at /var/lib/forge (the dirs above all live under it).
+RUN mkdir -p /var/lib/forge/cgr/repos /var/lib/forge/jobs && \
+    chown -R forge:forge /var/lib/forge
+VOLUME ["/var/lib/forge"]
 
 USER forge
 EXPOSE 8000
 
 # Long start_period because the first request loads the embedder weights
-# and pyarrow lazy imports — both can take ~20-30 s on a cold container.
+# (downloaded to the HF cache on cold start) and pyarrow lazy-imports —
+# both can take tens of seconds on a fresh container.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=45s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
-ENV PATH="/app/.venv/bin:$PATH"
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -54,7 +54,7 @@ remote origin — `app/services/slug.py`). Job state persists in SQLite WAL at
 ## Dev Commands
 
 ```bash
-uv sync                                              # Install deps (uv workspace; path dep on ../code-graph-rag)
+uv sync                                              # Install deps (engine vendored in codebase_rag/ — no sibling checkout)
 uv run uvicorn app.main:app --port 8000              # Start service
 uv run pytest tests/ -v                              # Run tests (~60 files, 500+ tests)
 uv run pytest tests/test_search.py::test_name -v     # Single test
