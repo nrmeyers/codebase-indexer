@@ -98,6 +98,13 @@ EXPOSE 8000
 # Long start_period because the first request loads the embedder weights
 # (downloaded to the HF cache on cold start) and pyarrow lazy-imports —
 # both can take tens of seconds on a fresh container.
+#
+# NOTE: podman/buildah IGNORE HEALTHCHECK when building in the default OCI
+# image format (you'll see a "HEALTHCHECK is not supported for OCI image
+# format" warning). To bake it in under podman, build with
+# `podman build --format docker .` (or export BUILDAH_FORMAT=docker); docker
+# honours it natively. Independently, orchestrators (compose/k8s) should
+# health-check `GET /health` directly rather than rely on this directive.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=45s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 

@@ -1,5 +1,5 @@
 [project]
-name = "code-indexer-service"
+name = "codebase-indexer"
 version = "0.1.0"
 description = "FastAPI HTTP gateway exposing code-graph-rag indexing and search to TheForge"
 readme = "README.md"
