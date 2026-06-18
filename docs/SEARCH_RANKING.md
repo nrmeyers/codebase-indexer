@@ -6,10 +6,10 @@ The Code Indexer uses a **single-stage dense-vector ranking** approach:
 
 ### Stage 1: Dense Vector Similarity (always active)
 
-1. **Query embedding**: Natural-language task description embedded with `intfloat/e5-base-v2` (768-dim)
+1. **Query embedding**: Natural-language task description embedded with `nomic-ai/nomic-embed-text-v1.5` (768-dim)
    - **Provider priority**: SageMaker endpoint (prod) → in-process torch (fallback)
    - **SageMaker endpoint**: `forge-e5-embed-v1` in `us-east-1` (AWS)
-   - **No asymmetric prefix**: e5 models handle query/corpus symmetry natively
+   - **Asymmetric prefixes**: nomic-v1.5 prepends `search_query: ` on queries and `search_document: ` on the corpus (applied via `app/embedders/prefixes.py`); omitting them degrades recall
 
 2. **Candidate retrieval**: Top-k cosine similarity via DuckDB `array_cosine_distance`
    - Index lives in per-repo `.duck` files

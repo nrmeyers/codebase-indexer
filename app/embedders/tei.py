@@ -10,7 +10,7 @@ batching and an OpenAI-compatible-ish API. The Code Indexer hits its
         -p 8080:80 \\
         --gpus all \\
         ghcr.io/huggingface/text-embeddings-inference:1.5 \\
-        --model-id intfloat/e5-base-v2
+        --model-id nomic-ai/nomic-embed-text-v1.5
 
 Endpoint contract
 -----------------
@@ -56,7 +56,7 @@ class TEIEmbedder(EmbedderBackend):
     """HTTP client for a Hugging Face Text-Embeddings-Inference sidecar."""
 
     name = "tei"
-    model = "e5-base-v2"
+    model = "nomic-ai/nomic-embed-text-v1.5"
     dim = EMBEDDING_DIM
 
     def __init__(

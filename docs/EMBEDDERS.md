@@ -38,9 +38,9 @@ The selected backend is exposed via `GET /health`:
 
 | Backend     | Default model               | Dim   | Cost / 1M tokens | Network | Setup                                          |
 |-------------|-----------------------------|-------|-------------------|---------|------------------------------------------------|
-| `local`     | `intfloat/e5-base-v2`       | 768   | $0 (CPU/GPU)      | no      | `uv sync --group local-embed`                  |
-| `tei`       | `intfloat/e5-base-v2`       | 768   | $0 (your GPU)     | local   | Run TEI sidecar at `:8080`                     |
-| `sagemaker` | `intfloat/e5-base-v2`       | 768   | ~$0.05 (observed)| AWS     | Provision SageMaker Serverless endpoint        |
+| `local`     | `nomic-ai/nomic-embed-text-v1.5` | 768 | $0 (CPU/GPU)      | no      | `uv sync --group local-embed`                  |
+| `tei`       | `nomic-ai/nomic-embed-text-v1.5` | 768 | $0 (your GPU)     | local   | Run TEI sidecar at `:8080`                     |
+| `sagemaker` | `nomic-ai/nomic-embed-text-v1.5` | 768 | ~$0.05 (observed)| AWS     | Provision SageMaker Serverless endpoint        |
 | `openai`    | `text-embedding-3-small`    | 1536  | $0.02             | OpenAI  | `uv sync --extra byo` + `OPENAI_API_KEY`       |
 | `openai`    | `text-embedding-3-large`    | 3072  | $0.13             | OpenAI  | `uv sync --extra byo` + `OPENAI_API_KEY`       |
 
@@ -76,7 +76,7 @@ The selected backend is exposed via `GET /health`:
 ```bash
 # .env
 EMBEDDER_BACKEND=local
-# Optional — defaults to intfloat/e5-base-v2 (768-dim)
+# Optional — defaults to nomic-ai/nomic-embed-text-v1.5 (768-dim)
 # LOCAL_EMBED_MODEL=sentence-transformers/all-mpnet-base-v2
 # LOCAL_EMBED_DIM=768
 ```
@@ -98,7 +98,7 @@ Start the sidecar:
 ```bash
 docker run -d --name tei -p 8080:80 --gpus all \
   ghcr.io/huggingface/text-embeddings-inference:1.5 \
-  --model-id intfloat/e5-base-v2
+  --model-id nomic-ai/nomic-embed-text-v1.5
 ```
 
 ### `sagemaker` (AWS)
@@ -231,7 +231,7 @@ startup probe in `app.main.lifespan` (`app/embedders/availability.py`):
 ```json
 {
   "backend": "local",
-  "model": "intfloat/e5-base-v2",
+  "model": "nomic-ai/nomic-embed-text-v1.5",
   "dim": 768,
   "configured": true,
   "error": null,
@@ -333,7 +333,7 @@ Restart the indexer after fixing.
 # bring the TEI sidecar up
 docker run -d --name tei -p 8080:80 --gpus all \
   ghcr.io/huggingface/text-embeddings-inference:1.5 \
-  --model-id intfloat/e5-base-v2
+  --model-id nomic-ai/nomic-embed-text-v1.5
 curl -s http://localhost:8080/health | jq .   # sidecar self-check
 ```
 

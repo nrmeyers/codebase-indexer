@@ -97,7 +97,7 @@ The CLI auto-starts the FastAPI service in the background on first use. To run t
 
 `grep` and your IDE's "Find Usages" both top out where this tool starts:
 
-- **Semantic, not lexical.** Query "the auth handler" without knowing the function is called `verify_session_token`. Backed by 768-dim [`intfloat/e5-base-v2`](https://huggingface.co/intfloat/e5-base-v2) embeddings (across `local` / `tei` / `sagemaker`) stored in DuckDB.
+- **Semantic, not lexical.** Query "the auth handler" without knowing the function is called `verify_session_token`. Backed by 768-dim [`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) embeddings (across `local` / `tei` / `sagemaker`) stored in DuckDB.
 - **Cross-file and cross-repo by default.** Imports, calls, inheritance, and references are first-class graph edges. Ask "who calls X" across the entire indexed corpus, not just the current file.
 - **Structural Cypher queries.** The symbol graph is queryable directly — return every `Function` that imports from a given module, list all `Class` nodes with more than 20 methods, etc.
 - **Grounded context bundles for LLMs.** `/context-bundle` returns the symbols, snippets, and call graph relevant to a task — primary use case is feeding a coding agent without dumping whole files.
@@ -339,7 +339,7 @@ flowchart LR
 - **Parsing.** [tree-sitter](https://tree-sitter.github.io/) grammars for 12 languages: Python, JavaScript, TypeScript, TSX, Rust, Go, Scala, Java, C++, C#, PHP, and Lua. Symbols (functions, classes, methods), files, modules, and references become typed graph nodes.
 - **Graph store.** [LadybugDB](https://docs.ladybugdb.com/) — an embedded, file-backed [kuzu](https://kuzudb.com/) fork. One `.db` file per repo at `.cgr/repos/<slug>.db`. Cypher-queryable. No Docker.
 - **Vector store.** DuckDB `FLOAT[768]` column plus `array_cosine_distance` for similarity search. One `.duck` file per repo at `.cgr/repos/<slug>.duck`.
-- **Embedders.** Four interchangeable backends behind a single `EmbedderBackend` protocol. The three "native" backends all produce 768-dim `intfloat/e5-base-v2` vectors (`local` / `tei` / `sagemaker`) so the on-disk index shape is portable across them — but indexes built under one model are NOT interchangeable with another. (A 2026-05-26 swap to `jinaai/jina-code-embeddings-v2` was benchmarked and **reverted** — 16% vs 83% recall@5 on the golden set; E5 is the retained choice, see LE-144.) A fourth backend, `openai`, is the bring-your-own path (1536 or 3072 dim — needs a re-index). Switch with `EMBEDDER_BACKEND={local|sagemaker|tei|openai}` and restart. See [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
+- **Embedders.** Four interchangeable backends behind a single `EmbedderBackend` protocol. The three "native" backends all produce 768-dim `nomic-ai/nomic-embed-text-v1.5` vectors (`local` / `tei` / `sagemaker`) so the on-disk index shape is portable across them — but indexes built under one model are NOT interchangeable with another. (Model timeline: `intfloat/e5-base-v2` → a 2026-05-26 swap to `jinaai/jina-code-embeddings-v2` benchmarked and **reverted** — 16% vs 83% recall@5 on the golden set, see LE-144 → `nomic-ai/nomic-embed-text-v1.5` **adopted after the 768-dim POC**: +3.9pp recall@10 over e5, same FLOAT[768] schema.) A fourth backend, `openai`, is the bring-your-own path (1536 or 3072 dim — needs a re-index). Switch with `EMBEDDER_BACKEND={local|sagemaker|tei|openai}` and restart. See [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md).
 - **Imports across repos.** Cross-repo `IMPORTS` edges link symbols indexed under different slugs (BUC-1598).
 - **Centrality.** PageRank scores over the call/import graph are precomputed and exposed at `/search/centrality` (BUC-1577, BUC-1599 persistence).
 
@@ -359,7 +359,7 @@ flowchart LR
 | `INDEXER_HOST` / `HOST`   | `127.0.0.1`             | HTTP bind address. **Loopback-only by default** (see security note below). `INDEXER_HOST` takes precedence over `HOST`. Set to `0.0.0.0` to listen on all interfaces (containers / multi-host deploys). |
 | `PORT`                    | `8000`                  | HTTP bind port.                                                  |
 | `EMBEDDER_BACKEND`        | `local`                 | One of `local`, `sagemaker`, `tei`, `openai`.                    |
-| `LOCAL_EMBED_MODEL`       | `intfloat/e5-base-v2`   | Override only after re-indexing.                                 |
+| `LOCAL_EMBED_MODEL`       | `nomic-ai/nomic-embed-text-v1.5` | Override only after re-indexing.                                 |
 | `SAGEMAKER_ENDPOINT_NAME` | —                       | Required when `EMBEDDER_BACKEND=sagemaker`.                      |
 | `SAGEMAKER_EMBED_REGION`  | `us-east-1`             | AWS region for the SageMaker endpoint.                           |
 | `TEI_URL`                 | `http://localhost:8080` | Endpoint for the TEI sidecar.                                    |
@@ -380,9 +380,9 @@ Copy [`.env.example`](.env.example) to `.env` and adjust paths for your machine.
 
 | Backend     | Default model              | Dim   | When to use                                | Tradeoffs                                                        |
 | ----------- | -------------------------- | ----- | ------------------------------------------ | ---------------------------------------------------------------- |
-| `local`     | `intfloat/e5-base-v2`      | 768   | Standalone / laptop / no AWS. **Default.** | ~440 MB model download on first run; CPU-bound; zero infra cost. |
-| `sagemaker` | `intfloat/e5-base-v2`      | 768   | production. (A 2026-05-26 jina swap was reverted — E5 retained, LE-144.) | GPU-backed batching; requires AWS creds; per-invocation cost.    |
-| `tei`       | `intfloat/e5-base-v2`      | 768   | Self-hosted GPU box.                       | Highest throughput; one extra container; no AWS coupling.        |
+| `local`     | `nomic-ai/nomic-embed-text-v1.5` | 768 | Standalone / laptop / no AWS. **Default.** | ~520 MB model download on first run; CPU-bound; zero infra cost. |
+| `sagemaker` | `nomic-ai/nomic-embed-text-v1.5` | 768 | production. (Timeline: e5 → jina swap 2026-05-26 reverted LE-144 → nomic-v1.5 adopted after the 768-dim POC, +3.9pp recall@10 over e5.) | GPU-backed batching; requires AWS creds; per-invocation cost.    |
+| `tei`       | `nomic-ai/nomic-embed-text-v1.5` | 768 | Self-hosted GPU box.                       | Highest throughput; one extra container; no AWS coupling.        |
 | `openai`    | `text-embedding-3-small`   | 1536  | Bring your own — no AWS, no GPU.           | $0.02 / 1M tokens; needs `OPENAI_API_KEY`; **re-index required** (1536 ≠ 768). |
 
 Switching among `local` / `sagemaker` / `tei` is a pure env-var flip — the DuckDB `FLOAT[768]` schema is shared. Switching to `openai` (or anywhere the dim changes) needs a fresh index because the column type doesn't match; see [`docs/EMBEDDERS.md`](docs/EMBEDDERS.md) for the recipe, cost/quality comparison, and protocol contract for plugging in your own backend.

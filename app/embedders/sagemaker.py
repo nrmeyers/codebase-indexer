@@ -50,10 +50,13 @@ emits under bulk-ingest concurrency.
 
 Truncation
 ----------
-e5-base-v2 has a hard 512-token position-embedding limit; SageMaker's HF
-inference toolkit does NOT truncate automatically. We hard-cap each text
-at 1000 chars (~300 tokens for Python code) on the client before sending,
-matching the pre-existing ``codebase_rag.embedder`` behaviour.
+The served model (current target: ``nomic-ai/nomic-embed-text-v1.5``,
+2048-token window) is fronted by SageMaker's HF inference toolkit, which
+does NOT truncate automatically. We hard-cap each text at :data:`_MAX_CHARS`
+(4096 chars ≈ ~1K tokens) on the client before sending — matching the
+``local`` / ``embed_driver`` cap so the same input produces the same vector
+across backends, and staying well under any backend's token limit. (The
+stale 1000-char e5-era cap over-truncated code mid-function.)
 """
 from __future__ import annotations
 
@@ -71,11 +74,13 @@ from .base import EMBEDDING_DIM, EmbedderBackend, EmbedderError
 
 logger = logging.getLogger(__name__)
 
-#: Per-text character cap before sending to the endpoint. Above ~1200 chars
-#: e5-base-v2 hits its 512-token position-embedding limit and SageMaker
-#: returns a 400. Binary search settled on 1000 as the safe ceiling
-#: (~3.3 chars/token for Python).
-_MAX_CHARS = 1000
+#: Per-text character cap before sending to the endpoint. 4096 chars
+#: (~1K tokens) matches the ``local`` backend's ``EMBED_MAX_CHARS`` and
+#: ``embed_driver``'s ``EMBED_MAX_INPUT_CHARS`` so the same input yields the
+#: same vector regardless of backend, and stays well under the served
+#: model's context window (nomic-embed-text-v1.5 = 2048 tokens). Raised from
+#: the stale e5-era 1000-char cap, which over-truncated code mid-function.
+_MAX_CHARS = 4096
 _DEFAULT_BATCH_SIZE = 16
 _CONNECT_TIMEOUT = 10
 _READ_TIMEOUT = 90
@@ -214,9 +219,11 @@ class SageMakerEmbedder(EmbedderBackend):
             raise EmbedderError("SageMakerEmbedder: endpoint_name must be non-empty")
         self.endpoint_name = endpoint_name
         self.region = region
-        # Instance attr so swapping the underlying SageMaker deployment
-        # (e.g. e5-base-v2 -> nomic-embed-text-v1.5) is a single env var
-        # change rather than a class-attr lie about what the endpoint serves.
+        # Instance attr so swapping the underlying SageMaker deployment is a
+        # single env var change rather than a class-attr lie about what the
+        # endpoint serves. Current target is nomic-embed-text-v1.5; the
+        # ``e5-base-v2`` default below is a backwards-compat label for old
+        # .env files that predate ``SAGEMAKER_MODEL_ID``.
         self.model = model
         # Consulted by :mod:`app.embedders.prefixes`: a SageMaker endpoint
         # serving an instruction-tuned model (e.g. nomic-v1.5) can advertise

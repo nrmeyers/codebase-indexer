@@ -30,10 +30,10 @@ separately and is exercised only by the live indexer.
 
 Tree-sitter is NOT used for parsing — markdown has no AST node type in
 our graph schema and we treat the content as plain text.  Embedding goes
-through the existing SageMaker code-embedding endpoint (e5-base-v2 /
-Jina); the slight domain mismatch is acceptable because recall on
-"LE-123" / "REG-D" style noun-phrase queries is dominated by the lexical
-tantivy arm anyway.
+through the same code-embedding path as everything else
+(nomic-embed-text-v1.5); the slight domain mismatch is acceptable because
+recall on "LE-123" / "REG-D" style noun-phrase queries is dominated by the
+lexical tantivy arm anyway.
 """
 from __future__ import annotations
 
@@ -160,10 +160,10 @@ def discover_markdown_files(repo_root: Path) -> list[Path]:
 # Files without any headings produce a single chunk covering the whole
 # document, keyed by the filename stem.
 
-# Limits — keep individual chunks within the SageMaker token budget.  The
-# e5/Jina endpoints accept ~512 tokens of content; we cap at ~3500 chars
-# (conservative ~4 chars/token) and emit a small overlap so a long
-# section does not get truncated to a useless mid-sentence cutoff.
+# Limits — keep individual chunks within the embedder's token budget.
+# nomic-embed-text-v1.5 accepts a 2048-token window; we cap well under that
+# at ~3500 chars (conservative ~4 chars/token) and emit a small overlap so
+# a long section does not get truncated to a useless mid-sentence cutoff.
 _MAX_CHARS = 3500
 _OVERLAP_CHARS = 200
 

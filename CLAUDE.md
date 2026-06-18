@@ -110,7 +110,7 @@ Plus `GET /metrics` (Prometheus) and `GET /openapi.json`.
 ## Embedders (app/embedders/)
 
 Pluggable via `EMBEDDER_BACKEND` env var: `local` (default; sentence-transformers
-in-process, 768-dim e5-base-v2), `sagemaker` (production; jina-code-v2
+in-process, 768-dim nomic-embed-text-v1.5), `sagemaker` (production; jina-code-v2
 serverless endpoint since LE-129), `tei` (HF TEI sidecar), `openai`
 (text-embedding-3-small, 1536-dim — **requires re-index**; the other three share
 the FLOAT[768] schema and are env-var swappable). Use the async `get_embedder()`

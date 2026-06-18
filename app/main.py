@@ -538,8 +538,8 @@ def create_app() -> FastAPI:
     app.include_router(search.router, tags=["search"])
     app.include_router(context_bundle.router, tags=["context"])
     # BUC-1592 — query-embedding surface for TheForge's cross-repo affinity
-    # weighting. Single-string input → 768-dim vector (sagemaker:
-    # jina-code-v2; local/tei: e5-base-v2). LE-129 swapped SageMaker 2026-05-26.
+    # weighting. Single-string input → 768-dim vector (local/tei:
+    # nomic-embed-text-v1.5; sagemaker: jina-code-v2, LE-129 swap 2026-05-26).
     app.include_router(embed.router, tags=["embed"])
     app.include_router(explorer.router, tags=["explorer"])
     app.include_router(github.router, tags=["github"])

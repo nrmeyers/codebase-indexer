@@ -60,11 +60,13 @@ class EmbedderBackend(Protocol):
         name: Stable identifier of the backend (``"local"``, ``"sagemaker"``,
             ``"tei"``, ``"openai"``, or ``"llama_server"``). Surfaced in
             /health responses and logs.
-        model: Name of the underlying model. The 768-dim backends serve
-            either ``intfloat/e5-base-v2`` (sagemaker, tei) or
-            ``nomic-ai/nomic-embed-text-v1.5`` (local default, llama_server);
-            both land at the shared 768 schema dim. The ``openai`` backend
-            serves ``text-embedding-3-small`` or ``text-embedding-3-large``.
+        model: Name of the underlying model. The 768-dim backends default to
+            ``nomic-ai/nomic-embed-text-v1.5`` (local, tei, llama_server);
+            the ``sagemaker`` backend's label tracks whatever its endpoint
+            serves. Both ``nomic-embed-text-v1.5`` and the legacy
+            ``intfloat/e5-base-v2`` land at the shared 768 schema dim. The
+            ``openai`` backend serves ``text-embedding-3-small`` or
+            ``text-embedding-3-large``.
         dim: Output vector dimensionality. Exposed so downstream vector-
             index sizing matches across backends — callers MUST verify this
             equals their DuckDB / pgvector schema's declared dim before

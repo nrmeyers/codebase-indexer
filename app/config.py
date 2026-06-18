@@ -296,7 +296,7 @@ class Settings(BaseSettings):
     # Hugging Face Text-Embeddings-Inference HTTP sidecar. Bring up via:
     #   docker run -d -p 8080:80 --gpus all \
     #     ghcr.io/huggingface/text-embeddings-inference:1.5 \
-    #     --model-id intfloat/e5-base-v2
+    #     --model-id nomic-ai/nomic-embed-text-v1.5
     # Read directly by app.embedders.tei.TEIEmbedder.from_env().
     TEI_URL: str = "http://localhost:8080"
     TEI_TIMEOUT_MS: int = 30000
