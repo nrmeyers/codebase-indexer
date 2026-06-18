@@ -15,7 +15,7 @@ That file remains as historical record; new work tracks here.
 TheForge API (Express :3001)
         │  HTTP :8000
         ▼
-code-indexer-service (FastAPI gateway, this repo)
+codebase-indexer (FastAPI gateway, this repo)
         │  Python import
         ▼
 code-graph-rag (LadybugIngestor + CodeRankEmbed + DuckDB)
@@ -280,7 +280,7 @@ ADRs in `docs/adr/`:
 ## Files changed in latest two-stage retrieval work
 
 ```
-code-indexer-service/
+codebase-indexer/
   app/main.py                   load_dotenv() bridge
   app/services/lm_studio.py     +can_embed, +can_rerank, +reasoning_content fallback,
                                 +chat_template_kwargs

@@ -152,7 +152,13 @@ def test_list_renders_repo_table_when_repos_are_indexed(
 def test_search_renders_results_when_semantic_search_returns_hits(
     respx_mock: respx.MockRouter, runner: CliRunner
 ) -> None:
-    """``search`` should render score/qname/file rows for each hit."""
+    """``search`` should render a score/symbol row for each hit.
+
+    The real ``GET /search/semantic`` returns ``{symbol, score, type}`` per
+    hit (NOT qualified_name/file_path/line_number — those are what the
+    /symbols/* endpoints return). Keep this mock faithful to that contract
+    so it actually guards the CLI's column rendering against regressions.
+    """
     respx_mock.get("/search/semantic").mock(
         return_value=httpx.Response(
             200,
@@ -160,9 +166,8 @@ def test_search_renders_results_when_semantic_search_returns_hits(
                 "results": [
                     {
                         "score": 0.91,
-                        "qualified_name": "app.auth.login",
-                        "file_path": "app/auth.py",
-                        "line_number": 42,
+                        "symbol": "app.auth.login",
+                        "type": "function",
                     }
                 ]
             },

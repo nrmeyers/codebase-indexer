@@ -479,19 +479,19 @@ def search(
         return
     table = Table(title=f"semantic: {query}")
     table.add_column("score", justify="right")
-    table.add_column("qualified_name")
-    table.add_column("file")
-    table.add_column("line", justify="right")
+    table.add_column("symbol")
+    table.add_column("type")
     for r in results:
         if not isinstance(r, dict):
             continue
         score = r.get("score")
         score_str = f"{score:.3f}" if isinstance(score, (int, float)) else "?"
+        # /search/semantic returns {symbol, score, type}; fall back to the
+        # older qualified_name key in case an older service is on the line.
         table.add_row(
             score_str,
-            str(r.get("qualified_name", "?")),
-            str(r.get("file_path", "")),
-            str(r.get("line_number", "")),
+            str(r.get("symbol") or r.get("qualified_name", "?")),
+            str(r.get("type", "")),
         )
     console.print(table)
 

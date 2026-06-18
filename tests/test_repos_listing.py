@@ -131,6 +131,42 @@ def test_should_mark_repo_stale_when_head_sha_differs(tmp_path: Path) -> None:
     assert item["repo_path"] == str(repo_root)
 
 
+def test_should_report_indexed_when_no_git_sha_on_either_side(tmp_path: Path) -> None:
+    """A non-git directory (no recorded SHA, no local HEAD) reports
+    ``indexed`` — not the misleading ``stale``. There is nothing to drift
+    against; this is the standalone-CLI "index a plain folder" path. TheForge
+    always indexes git repos with a SHA, so it never reaches this branch."""
+    slug = "local__plain_dir"
+    repo_root = tmp_path / "plain"
+    repo_root.mkdir()
+
+    indexed_repos.add(slug)
+    indexed_repo_paths[slug] = str(repo_root)
+
+    with (
+        patch(
+            "app.routers.index._read_meta",
+            return_value={
+                "last_indexed_at": "1700000000.0",
+                # no ``last_indexed_sha`` — the indexed path is not a git repo
+                "root_path": str(repo_root),
+            },
+        ),
+        patch("app.routers.repos._git_sha", return_value=None),
+        patch("app.routers.repos.subprocess.run") as mock_run,
+        patch("app.routers.repos.settings") as mock_settings,
+    ):
+        mock_settings.LADYBUG_DB_DIR = str(tmp_path / "no-such-dir")
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        resp = client.get("/repos")
+
+    assert resp.status_code == 200
+    item = resp.json()["repos"][0]
+    assert item["indexed"] is True
+    assert item["status"] == "indexed"
+
+
 # ---------------------------------------------------------------------------
 # POST /index — App-authenticated clones
 # ---------------------------------------------------------------------------

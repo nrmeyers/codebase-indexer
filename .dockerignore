@@ -1,6 +1,7 @@
-# Per .planning/phase-plans/PHASE_3_DOCKER.md §3.1
-# Excludes from the parent-dir build context — see Dockerfile header for
-# why context: . means we're shipping the parent and need to scope down.
+# Excludes for the `podman build .` / `docker build .` context (repo root).
+# The engine is vendored at codebase_rag/, so the build context is just this
+# repo (no parent dir / sibling code-graph-rag). These patterns keep caches,
+# scratch DBs, and tests out of the image.
 
 # Indexer-side junk
 .venv/

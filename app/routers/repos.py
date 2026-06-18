@@ -90,9 +90,12 @@ class RepoListItem(BaseModel):
     indexed: bool = Field(description="True when at least one successful index has run.")
     status: str = Field(
         description=(
-            "Freshness verdict: ``unindexed`` | ``fresh`` | ``stale``. "
+            "Freshness verdict: ``unindexed`` | ``indexed`` | ``fresh`` | ``stale``. "
             "``fresh`` means last_indexed_sha matches the current local HEAD; "
-            "``stale`` means the index ran but the SHAs differ; "
+            "``stale`` means the index ran but the SHAs differ (or only one "
+            "side has a SHA, so drift can't be ruled out); "
+            "``indexed`` means the index completed but there is no git SHA on "
+            "either side to verify against (e.g. a non-git directory); "
             "``unindexed`` means no successful index job has ever completed. "
             "Drift detection against the GitHub remote is TheForge's "
             "responsibility — this endpoint only sees what's locally known."
@@ -140,7 +143,13 @@ def list_repos() -> RepoListResponse:
         * ``fresh`` — ``last_indexed_sha`` matches the local working
           tree's current ``git rev-parse HEAD``. Drift detection against
           the *remote* is TheForge's responsibility.
-        * ``stale`` — index ran, but the local HEAD has moved on.
+        * ``stale`` — index ran, but the local HEAD has moved on (or only
+          one side has a SHA, so freshness can't be proven).
+        * ``indexed`` — index completed but there is no git SHA on either
+          side to compare (e.g. a non-git directory indexed by the
+          standalone CLI). Not "stale" — there is simply nothing to drift
+          against. TheForge always indexes git repos with a recorded SHA,
+          so it never sees this value.
 
     Returns an empty list on a fresh database.
     """
@@ -188,13 +197,19 @@ def list_repos() -> RepoListResponse:
         else:
             repo_root = indexed_repo_paths.get(slug) or meta.get("root_path") or ""
             current_head = _git_sha(str(repo_root)) if repo_root else None
-            if last_indexed_sha and current_head and last_indexed_sha == current_head:
-                status_verdict = "fresh"
-            elif last_indexed_sha and current_head and last_indexed_sha != current_head:
-                status_verdict = "stale"
+            if last_indexed_sha and current_head:
+                # Both SHAs known → real drift verdict.
+                status_verdict = "fresh" if last_indexed_sha == current_head else "stale"
+            elif not last_indexed_sha and not current_head:
+                # No git SHA on either side (e.g. a non-git directory): the
+                # index completed, there is simply nothing to verify
+                # freshness against. Report "indexed" rather than the
+                # misleading "stale". TheForge always indexes git repos with
+                # a recorded SHA, so it never reaches this branch.
+                status_verdict = "indexed"
             else:
-                # No SHA on either side → can't prove drift; assume stale
-                # so TheForge re-checks against the GitHub App rather than
+                # Exactly one SHA available → can't compare; stay
+                # conservative ("stale") so TheForge re-checks rather than
                 # trusting an unverifiable "fresh" answer.
                 status_verdict = "stale"
 
