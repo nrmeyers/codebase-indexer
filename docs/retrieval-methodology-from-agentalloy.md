@@ -207,8 +207,8 @@ back by id. That shape is what AgentAlloy converged on. Refinements:)
   get reversed; stale-decision injection is the knowledge leg's
   equivalent of AgentAlloy's intake-boilerplate bug — the failure mode
   that made composed context *worse than nothing*.
-- **One embedder family across all legs** (currently
-  qwen3-embedding, 1024-dim) so similarity spaces stay comparable if
+- **One embedder family across all legs** (nomic-embed-text-v1.5,
+  768-dim) so similarity spaces stay comparable if
   results are ever fused cross-store — with RRF doing the fusion,
   since raw cosine scores across heterogeneous corpora aren't
   calibrated against each other.
