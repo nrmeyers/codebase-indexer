@@ -516,20 +516,24 @@ def resolve_batch_embedder() -> Any:
 # ---------------------------------------------------------------------------
 # Input truncation (fix/embedding-phase-stall).
 #
-# e5-base-v2 silently truncates its input at 512 BPE tokens (~2–4 chars
-# each).  A minified / generated file that ends up as one enormous line in
-# the source range can be hundreds of kilobytes; on CPU that single text
-# dominates one ``encode()`` call for tens of seconds — sometimes past the
-# phase watchdog threshold when several such texts land in the same batch.
+# nomic-embed-text-v1.5 accepts up to 2048 tokens (the GGUF / server path;
+# the sentence-transformers build can reach 8192 via NTK scaling).  A
+# minified / generated file that ends up as one enormous line in the source
+# range can be hundreds of kilobytes; on CPU that single text dominates one
+# ``encode()`` call for tens of seconds — sometimes past the phase watchdog
+# threshold when several such texts land in the same batch.
 #
 # Truncating here (before the text reaches any model) is the correct fix:
-# the meaningful semantic content is always in the first ~512 tokens, and
-# every extra character beyond the model's context window is ignored anyway.
+# the meaningful semantic content of a symbol is in its opening lines, and
+# the cap stays safely under the model's context window so nothing useful is
+# silently dropped by the model itself.
 # ---------------------------------------------------------------------------
 
 #: Maximum character length of a single embed input text sent to any
-#: backend.  4096 chars ≈ 1024–2048 tokens, well above e5-base-v2's
-#: effective 512-token window.  Truncation is logged and counted.
+#: backend.  4096 chars ≈ ~1K BPE tokens — a conservative safety valve well
+#: under nomic-embed-text-v1.5's 2048-token window, sized to defend against
+#: pathological minified / generated single-line files rather than to the
+#: model ceiling.  Truncation is logged and counted.
 EMBED_MAX_INPUT_CHARS = 4096
 
 
@@ -985,8 +989,9 @@ RETURN n.qualified_name AS qualified_name,
             format_docstring=format_docstring,
         )
         # Truncate BEFORE hashing so the stored content_hash fingerprints
-        # exactly what the embedder sees.  The model truncates at ~512 BPE
-        # tokens anyway; characters beyond EMBED_MAX_INPUT_CHARS are ignored.
+        # exactly what the embedder sees.  EMBED_MAX_INPUT_CHARS (~1K tokens)
+        # sits well under nomic's 2048-token window, so the cap — not the
+        # model — is what bounds a pathological single-line input here.
         if len(_embed_text) > EMBED_MAX_INPUT_CHARS:
             print(
                 f"WARN embed_driver.input_truncated qname={_qname} "

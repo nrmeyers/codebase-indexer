@@ -30,11 +30,11 @@ def test_tei_embedder_satisfies_protocol() -> None:
 
 
 def test_tei_embedder_exposes_dim() -> None:
-    """dim is 768 — TEI serves e5-base-v2 by contract."""
+    """dim is 768 — TEI serves nomic-embed-text-v1.5 by contract."""
     tei = TEIEmbedder()
     assert tei.dim == EMBEDDING_DIM
     assert tei.name == "tei"
-    assert tei.model == "e5-base-v2"
+    assert tei.model == "nomic-ai/nomic-embed-text-v1.5"
 
 
 @pytest.mark.asyncio

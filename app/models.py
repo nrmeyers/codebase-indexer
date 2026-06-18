@@ -121,7 +121,7 @@ class EmbedderStatus(BaseModel):
             | ``openai``).
         model: Underlying model identifier the backend talks to.
         dim: Output vector dimensionality. MUST match the per-repo DuckDB
-            ``FLOAT[dim]`` schema. Default 768 (e5-base-v2).
+            ``FLOAT[dim]`` schema. Default 768 (nomic-embed-text-v1.5).
         configured: True when ``get_embedder()`` returned a backend; False
             when construction failed (e.g. ``EMBEDDER_BACKEND=openai`` with
             no API key set). ``error`` carries the message in that case.
