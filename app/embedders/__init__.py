@@ -2,17 +2,17 @@
 
 Five interchangeable backends sit behind a single ``EmbedderBackend``
 protocol so the indexer can run anywhere from a laptop (no AWS, no
-model download) to a GPU box (TEI) to Navistone's production AWS
+model download) to a GPU box (TEI) to the production AWS
 account (SageMaker):
 
     local         sentence-transformers in-process. Zero external deps.
                   Default for standalone installs. 768-dim
                   (nomic-ai/nomic-embed-text-v1.5 since the 768-POC chose
                   it over e5-base-v2: +3.9pp recall@10).
-    sagemaker     Navistone's AWS SageMaker Serverless Inference endpoint
+    sagemaker     the AWS SageMaker Serverless Inference endpoint
                   (jina-code-v2-serverless, us-east-1; was forge-e5-embed-v2,
                   swapped 2026-05-26 LE-129). 768-dim. Default for the
-                  Navistone production deploy.
+                  production deploy.
     tei           Hugging Face Text-Embeddings-Inference HTTP sidecar
                   (http://localhost:8080). 768-dim. For GPU-batched
                   embedding without AWS or local CPU load.

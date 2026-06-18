@@ -40,12 +40,12 @@ The selected backend is exposed via `GET /health`:
 |-------------|-----------------------------|-------|-------------------|---------|------------------------------------------------|
 | `local`     | `intfloat/e5-base-v2`       | 768   | $0 (CPU/GPU)      | no      | `uv sync --group local-embed`                  |
 | `tei`       | `intfloat/e5-base-v2`       | 768   | $0 (your GPU)     | local   | Run TEI sidecar at `:8080`                     |
-| `sagemaker` | `intfloat/e5-base-v2`       | 768   | ~$0.05 (Navistone)| AWS     | Provision SageMaker Serverless endpoint        |
+| `sagemaker` | `intfloat/e5-base-v2`       | 768   | ~$0.05 (observed)| AWS     | Provision SageMaker Serverless endpoint        |
 | `openai`    | `text-embedding-3-small`    | 1536  | $0.02             | OpenAI  | `uv sync --extra byo` + `OPENAI_API_KEY`       |
 | `openai`    | `text-embedding-3-large`    | 3072  | $0.13             | OpenAI  | `uv sync --extra byo` + `OPENAI_API_KEY`       |
 
 > Cost-per-1M-tokens for SageMaker depends on your endpoint's instance
-> type and traffic profile; the ~$0.05 figure is Navistone's observed
+> type and traffic profile; the ~$0.05 figure is the observed
 > spend on `ml.m5.large` Serverless Inference at production-ish load.
 
 ---
@@ -58,7 +58,7 @@ The selected backend is exposed via `GET /health`:
 * **`tei`** — you already run a GPU box and want maximum throughput
   without sending source code over the public internet. Drop-in 768-dim
   parity with the `local` and `sagemaker` backends.
-* **`sagemaker`** — Navistone production, or any team that wants a
+* **`sagemaker`** — production, or any team that wants a
   managed AWS endpoint with SigV4 auth, autoscaling, and CloudWatch
   metrics out of the box.
 * **`openai`** — fastest BYO path: paste an API key and go. No model

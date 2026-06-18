@@ -195,7 +195,7 @@ async def _run_queries(
     # Indexes are keyed by canonical slug ({org}__{repo}, derived from the git
     # remote), not the checkout directory name. Resolve each query's repo name
     # against the service's live repo list so e.g. "TheForge" maps to
-    # "navistone__TheForge".
+    # "nrmeyers__TheForge".
     slug_map: dict[str, str] = {}
     try:
         health = (await client.get(f"{base}/health", timeout=10.0)).json()

@@ -10,7 +10,7 @@ Why this exists:
     writes clones into ``.cgr/clones/{owner}__{repo}``), but breaks when
     the same repo is also indexed from a developer's local checkout —
     e.g. ``~/TheForge`` lands under slug ``TheForge`` while the
-    App-clone lands under ``navistone__TheForge``, and the two indexes
+    App-clone lands under ``nrmeyers__TheForge``, and the two indexes
     diverge silently.
 
 Resolution rules:
@@ -75,10 +75,10 @@ def parse_github_remote(url: str) -> Optional[Tuple[str, str]]:
         the caller falls back to the basename.
 
     Examples:
-        >>> parse_github_remote("git@github.com:navistone/TheForge.git")
-        ('navistone', 'TheForge')
-        >>> parse_github_remote("https://github.com/navistone/TheForge")
-        ('navistone', 'TheForge')
+        >>> parse_github_remote("git@github.com:nrmeyers/TheForge.git")
+        ('nrmeyers', 'TheForge')
+        >>> parse_github_remote("https://github.com/nrmeyers/TheForge")
+        ('nrmeyers', 'TheForge')
         >>> parse_github_remote("https://gitlab.com/foo/bar.git") is None
         True
     """

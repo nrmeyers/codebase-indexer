@@ -7,7 +7,7 @@
 [![Ruff](https://img.shields.io/badge/code%20style-ruff-d7ff64?logo=ruff)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-`code-indexer-service` is a FastAPI gateway and CLI that indexes source repositories into a [tree-sitter](https://tree-sitter.github.io/)–parsed symbol graph (LadybugDB, an embedded kuzu fork — no Docker) backed by a DuckDB vector store. It is powered by the [`code-graph-rag`](https://github.com/navistone/code-graph-rag) engine and supports 12 languages out of the box (Python, JavaScript, TypeScript, TSX, Rust, Go, Scala, Java, C++, C#, PHP, Lua).
+`code-indexer-service` is a FastAPI gateway and CLI that indexes source repositories into a [tree-sitter](https://tree-sitter.github.io/)–parsed symbol graph (LadybugDB, an embedded kuzu fork — no Docker) backed by a DuckDB vector store. It is powered by the [`code-graph-rag`](https://github.com/nrmeyers/code-graph-rag) engine and supports 12 languages out of the box (Python, JavaScript, TypeScript, TSX, Rust, Go, Scala, Java, C++, C#, PHP, Lua).
 
 Use it standalone from your shell, or embed it as a sidecar — the same HTTP surface drives both.
 
@@ -39,7 +39,7 @@ You can ask it things like:
 ## Quickstart
 
 ```bash
-pipx install git+https://github.com/navistone/code-indexer-service.git
+pipx install git+https://github.com/nrmeyers/codebase-indexer.git
 code-indexer setup                       # one-time interactive wizard
 code-indexer index ~/path/to/your/repo   # indexes in the background, polls to completion
 code-indexer search "where is the auth code"
@@ -60,7 +60,7 @@ code-indexer callers myproject.parser.process_file
 > # 1. Local dev (recommended for new contributors)
 > uv sync
 >
- # 2. Navistone production (AWS SageMaker Serverless Inference — E5)
+ # 2. production (AWS SageMaker Serverless Inference — E5)
 > uv sync && export AWS_PROFILE=... EMBEDDER_BACKEND=sagemaker \
 >            SAGEMAKER_ENDPOINT_NAME=<your-e5-sagemaker-endpoint>
 >
@@ -106,12 +106,12 @@ The CLI auto-starts the FastAPI service in the background on first use. To run t
 
 ## Ecosystem
 
-`code-indexer-service` is part of a three-repo orbit centered on [TheForge](https://github.com/navistone/TheForge):
+`code-indexer-service` is part of a three-repo orbit centered on [TheForge](https://github.com/nrmeyers/TheForge):
 
 | Service | Role | Repo | Default port |
 |---------|------|------|-------------|
-| **TheForge** | Governed delivery hub + AI orchestrator | [navistone/TheForge](https://github.com/navistone/TheForge) | 3001 (API), 3000 (UI) |
-| **code-indexer-service** | Repo graph + semantic search sidecar | [navistone/code-indexer-service](https://github.com/navistone/code-indexer-service) | 8003 |
+| **TheForge** | Governed delivery hub + AI orchestrator | [nrmeyers/TheForge](https://github.com/nrmeyers/TheForge) | 3001 (API), 3000 (UI) |
+| **code-indexer-service** | Repo graph + semantic search sidecar | [nrmeyers/codebase-indexer](https://github.com/nrmeyers/codebase-indexer) | 8003 |
 | **agentalloy** | Skill composition engine | [ZZachary-M/agentalloy](https://github.com/ZZachary-M/agentalloy) | 47950 |
 
 TheForge auto-starts this service via `scripts/start-indexer.sh` and proxies it under `/api/code-indexer/*`. You can also run it completely standalone — the CLI and HTTP surface work independently of TheForge.
@@ -126,7 +126,7 @@ TheForge auto-starts this service via `scripts/start-indexer.sh` and proxies it 
 
 ### Embedded in TheForge
 
-[TheForge](https://github.com/navistone/TheForge) auto-starts this service when you run `pnpm dev` (via `scripts/start-indexer.sh`) and proxies it under `/api/code-indexer/*`. Set `CODE_INDEXER_PATH` if the service lives somewhere other than `~/code-indexer-service`. The CLI is a parallel, optional surface — it does not change any HTTP contract.
+[TheForge](https://github.com/nrmeyers/TheForge) auto-starts this service when you run `pnpm dev` (via `scripts/start-indexer.sh`) and proxies it under `/api/code-indexer/*`. Set `CODE_INDEXER_PATH` if the service lives somewhere other than `~/code-indexer-service`. The CLI is a parallel, optional surface — it does not change any HTTP contract.
 
 ---
 
@@ -136,10 +136,10 @@ TheForge auto-starts this service via `scripts/start-indexer.sh` and proxies it 
 
 ```bash
 # Option 1 — pipx (recommended for users)
-pipx install git+https://github.com/navistone/code-indexer-service.git
+pipx install git+https://github.com/nrmeyers/codebase-indexer.git
 
 # Option 2 — from a clone (recommended for contributors)
-git clone https://github.com/navistone/code-indexer-service.git
+git clone https://github.com/nrmeyers/codebase-indexer.git
 cd code-indexer-service
 uv sync
 # Then prefix all commands with: uv run code-indexer ...
@@ -381,7 +381,7 @@ Copy [`.env.example`](.env.example) to `.env` and adjust paths for your machine.
 | Backend     | Default model              | Dim   | When to use                                | Tradeoffs                                                        |
 | ----------- | -------------------------- | ----- | ------------------------------------------ | ---------------------------------------------------------------- |
 | `local`     | `intfloat/e5-base-v2`      | 768   | Standalone / laptop / no AWS. **Default.** | ~440 MB model download on first run; CPU-bound; zero infra cost. |
-| `sagemaker` | `intfloat/e5-base-v2`      | 768   | Navistone production. (A 2026-05-26 jina swap was reverted — E5 retained, LE-144.) | GPU-backed batching; requires AWS creds; per-invocation cost.    |
+| `sagemaker` | `intfloat/e5-base-v2`      | 768   | production. (A 2026-05-26 jina swap was reverted — E5 retained, LE-144.) | GPU-backed batching; requires AWS creds; per-invocation cost.    |
 | `tei`       | `intfloat/e5-base-v2`      | 768   | Self-hosted GPU box.                       | Highest throughput; one extra container; no AWS coupling.        |
 | `openai`    | `text-embedding-3-small`   | 1536  | Bring your own — no AWS, no GPU.           | $0.02 / 1M tokens; needs `OPENAI_API_KEY`; **re-index required** (1536 ≠ 768). |
 
@@ -398,7 +398,7 @@ uv sync --extra byo              # installs openai>=1.0 for the openai backend
 ## Development
 
 ```bash
-git clone https://github.com/navistone/code-indexer-service.git
+git clone https://github.com/nrmeyers/codebase-indexer.git
 cd code-indexer-service
 uv sync                          # installs everything incl. the vendored engine + local embedder
 uv run uvicorn app.main:app --reload --port 8000
@@ -416,4 +416,4 @@ MIT. See [LICENSE](LICENSE) if present, otherwise this project is released under
 
 ## Contributing
 
-Issues and PRs welcome on [GitHub](https://github.com/navistone/code-indexer-service/issues). See [`AGENTS.md`](AGENTS.md) for the conventions agents follow when working in this repo.
+Issues and PRs welcome on [GitHub](https://github.com/nrmeyers/codebase-indexer/issues). See [`AGENTS.md`](AGENTS.md) for the conventions agents follow when working in this repo.

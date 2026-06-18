@@ -63,7 +63,7 @@ class RepoListItem(BaseModel):
     slug: str = Field(description="Repo slug — the key used by /repos/{slug}/stats")
     full_name: str | None = Field(
         default=None,
-        description="``owner/repo`` if the slug encodes one (e.g. 'navistone__TheForge'), else None.",
+        description="``owner/repo`` if the slug encodes one (e.g. 'nrmeyers__TheForge'), else None.",
     )
     default_branch: str | None = Field(
         default=None,
