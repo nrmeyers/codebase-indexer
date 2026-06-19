@@ -60,7 +60,7 @@ uv run pytest tests/ -v                              # Run tests (~60 files, 500
 uv run pytest tests/test_search.py::test_name -v     # Single test
 ```
 
-There is also a standalone CLI (`app/cli/`): `code-indexer setup|serve|start|stop|status|index|search|symbol|callers|callees|bundle|explore|remove`. CLI-launched daemon defaults to port 8003.
+There is also a standalone CLI (`app/cli/`): `code-indexer setup|preflight|doctor|verify|serve|start|stop|status|index|search|symbol|callers|callees|bundle|explore|remove`. Pass the global `--json` flag (before the subcommand) for machine-readable output (for harnesses/agents — see `integrations/claude/`). CLI-launched daemon defaults to port 8003. Config is user-scoped at `${XDG_CONFIG_HOME:-~/.config}/codebase-indexer/`; index data at `${XDG_DATA_HOME:-~/.local/share}/codebase-indexer/` (an existing `./.cgr` in the cwd is used instead, for in-place deployments).
 
 Auto-started by TheForge when `pnpm dev` runs (via `scripts/start-indexer.sh`).
 Set `CODE_INDEXER_PATH` env var if the service is not at `~/code-indexer-service`.
@@ -125,8 +125,8 @@ See `.env.example` and `app/config.py` (all config via `Settings`). Critical one
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `LADYBUG_DB_DIR` | `.cgr/repos` | Per-repo `{slug}.db` files (`LADYBUG_DB_PATH` is legacy fallback) |
-| `JOBS_DB_PATH` | `.cgr/jobs.sqlite` | Durable job store |
+| `LADYBUG_DB_DIR` | `<data-root>/repos` | Per-repo `{slug}.db` files. Data root = existing `./.cgr` else `${XDG_DATA_HOME:-~/.local/share}/codebase-indexer` (`CGR_DATA_DIR` overrides; `LADYBUG_DB_PATH` is a legacy fallback) |
+| `JOBS_DB_PATH` | `<data-root>/jobs.sqlite` | Durable job store |
 | `EMBEDDER_BACKEND` | `local` | `local`/`sagemaker`/`tei`/`openai`; prod = `sagemaker` |
 | `S3_INDEX_BUCKET` | `` (empty) | Set to an S3 bucket to enable sync; empty disables it |
 | `WATCH_ENABLED` | `false` | File-watcher master switch |

@@ -43,6 +43,30 @@ def slugify_repo(name: str) -> str:
     return s or "repo"
 
 
+def _default_data_root() -> Path:
+    """Resolve the base data directory for a fresh (non-overridden) install.
+
+    This supplies the *default* only; the explicit env vars
+    (``CGR_DATA_DIR`` / ``LADYBUG_DB_DIR`` / ``JOBS_DB_PATH``) still win via
+    pydantic-settings. Precedence for the default:
+
+    1. An existing ``./.cgr`` in the working directory — preserves in-place
+       "service-in-a-folder" deployments (e.g. TheForge ``cd``s into the
+       service checkout before launching uvicorn) and any already-built
+       index, so this change is backward-compatible without a migration.
+    2. Otherwise the XDG user data dir
+       ``${XDG_DATA_HOME:-~/.local/share}/codebase-indexer`` — so a
+       ``pipx`` / ``uv tool`` install run from any directory behaves like an
+       installed tool instead of scattering a ``.cgr`` into the caller's cwd.
+    """
+    legacy = Path.cwd() / ".cgr"
+    if legacy.exists():
+        return legacy
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "share"
+    return base / "codebase-indexer"
+
+
 class Settings(BaseSettings):
     """Runtime settings loaded from environment / ``.env``.
 
@@ -77,9 +101,29 @@ class Settings(BaseSettings):
     # declared so existing prod deploys that still export the env var don't
     # crash on ``extra="forbid"``-style strictness elsewhere in the stack; a
     # one-time warning fires when an overriding value is observed.
-    LADYBUG_DB_DIR: str = ".cgr/repos"
+    LADYBUG_DB_DIR: str = Field(
+        default_factory=lambda: str(_default_data_root() / "repos")
+    )
     LADYBUG_DB_PATH: str = _LADYBUG_DB_PATH_DEFAULT
     LADYBUG_BATCH_SIZE: int = 1000
+
+    @model_validator(mode="after")
+    def _derive_data_paths(self) -> "Settings":
+        """Re-root the datastore under an explicit ``CGR_DATA_DIR``.
+
+        When ``CGR_DATA_DIR`` is set (env) but ``LADYBUG_DB_DIR`` /
+        ``JOBS_DB_PATH`` are left at their defaults, point the latter under
+        the explicit data root so a single ``CGR_DATA_DIR`` knob moves the
+        whole datastore coherently. The container sets all three explicitly,
+        so this is a no-op there.
+        """
+        if "CGR_DATA_DIR" in self.model_fields_set:
+            root = Path(self.CGR_DATA_DIR)
+            if "LADYBUG_DB_DIR" not in self.model_fields_set:
+                self.LADYBUG_DB_DIR = str(root / "repos")
+            if "JOBS_DB_PATH" not in self.model_fields_set:
+                self.JOBS_DB_PATH = str(root / "jobs.sqlite")
+        return self
 
     @model_validator(mode="after")
     def _warn_legacy_ladybug_db_path(self) -> "Settings":
@@ -127,7 +171,9 @@ class Settings(BaseSettings):
     # --- Persistent job store (Phase 2) ---
     # SQLite file backing the persistent job store. Created on first startup.
     # Use ``:memory:`` in tests via environment override.
-    JOBS_DB_PATH: str = ".cgr/jobs.sqlite"
+    JOBS_DB_PATH: str = Field(
+        default_factory=lambda: str(_default_data_root() / "jobs.sqlite")
+    )
     # LE-143: heartbeat reconciliation of orphaned running jobs
     JOB_HEARTBEAT_INTERVAL_SECONDS: int = 60
     JOB_STALENESS_THRESHOLD_SECONDS: int = 300
@@ -154,8 +200,11 @@ class Settings(BaseSettings):
     # --- Prometheus metrics (Phase 4) ---
     METRICS_ENABLED: bool = True
     METRICS_PATH: str = "/metrics"
-    # Top-level data dir for disk-usage gauges (defaults to .cgr).
-    CGR_DATA_DIR: str = ".cgr"
+    # Top-level data root for the per-repo datastore + disk-usage gauges.
+    # Defaults to an existing ``./.cgr`` else the XDG user data dir (see
+    # ``_default_data_root``). ``LADYBUG_DB_DIR`` / ``JOBS_DB_PATH`` live
+    # underneath it and follow an explicit ``CGR_DATA_DIR`` override.
+    CGR_DATA_DIR: str = Field(default_factory=lambda: str(_default_data_root()))
 
     # --- Default repo to index when none is provided ---
     TARGET_REPO_PATH: str = "."

@@ -159,7 +159,6 @@ def _probe_repo(name: str) -> RepoHealth:
         # file for the remainder of the process lifetime and every
         # subsequent probe inherits the same error.
         conn = None
-        db = None
 
     if not readable:
         # Fall back to sidecar node_count (last known good) so the UI still

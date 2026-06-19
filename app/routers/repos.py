@@ -34,7 +34,6 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..models import (
     IndexRequest,
-    PartialIndexEvent,
     ReindexAccepted,
     ReindexRequest,
     RepoIndexStatsResponse,
@@ -361,7 +360,6 @@ def _node_count_by_label(repo_name: str, db_path: str) -> tuple[dict[str, int], 
         # Always release the DB handle so a probe failure doesn't pin the
         # file for the rest of the process lifetime.
         conn = None
-        db = None
     return counts, total_rels
 
 

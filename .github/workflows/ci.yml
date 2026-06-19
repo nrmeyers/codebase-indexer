@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev --frozen
+
+      - name: Lint
+        # Lint the maintained service code. The vendored engine under
+        # codebase_rag/ is excluded in [tool.ruff]; test fixtures are not
+        # gated here.
+        run: uv run ruff check app
+
+      - name: Test (fast CLI tests — mocked HTTP, no daemon required)
+        run: uv run pytest tests/cli -q
+
+  pipx-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install CLI via uv tool
+        run: uv tool install .
+
+      - name: Add uv tool bin dir to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Smoke-test --help from outside repo
+        run: |
+          set -e
+          cd /tmp
+          output=$(code-indexer --help)
+          echo "$output"
+          echo "$output" | grep -q "setup"
+          echo "$output" | grep -q "index"
+          echo "$output" | grep -q "search"
+
+      - name: Smoke-test setup --non-interactive (writes user-scoped config)
+        run: |
+          set -e
+          cd /tmp
+          code-indexer setup --non-interactive
+          cfg="${XDG_CONFIG_HOME:-$HOME/.config}/codebase-indexer/config.toml"
+          test -f "$cfg"
+          echo "config written at $cfg"
+
+      - name: Smoke-test preflight from outside repo (host readiness)
+        run: |
+          set -e
+          cd /tmp
+          code-indexer --json preflight

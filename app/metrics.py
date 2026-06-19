@@ -27,6 +27,8 @@ from threading import Lock
 
 from fastapi import FastAPI
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -453,7 +455,7 @@ async def start_background_collectors(*, lm_studio_health_fn=None, cgr_data_dir:
     """
     if not is_enabled():
         return
-    cgr_data_dir = cgr_data_dir or os.environ.get("CGR_DATA_DIR", ".cgr")
+    cgr_data_dir = cgr_data_dir or settings.CGR_DATA_DIR
     while True:
         try:
             if lm_studio_health_fn is not None:
