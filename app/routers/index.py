@@ -3024,7 +3024,6 @@ def repo_stats(repo: str) -> RepoStatsResponse:
         # the file for the rest of the process lifetime and every follow-up
         # probe inherits the same error.
         conn = None
-        db = None
 
     # ``last_indexed_at`` comes from the DuckDB ``repo_metadata`` table
     # (_get_last_indexed_at checks the in-memory cache first, then the
@@ -3148,7 +3147,7 @@ def _drop_embedding_cache_entries(repo: str) -> str:
     """
     try:
         import json
-        cache_path = Path(".cgr/.embedding_cache.json")
+        cache_path = Path(settings.CGR_DATA_DIR) / ".embedding_cache.json"
         if not cache_path.exists():
             return "not found"
 
@@ -3276,7 +3275,7 @@ def _delete_tantivy_index(repo: str) -> str:
         # Recursively delete the directory and all its contents.
         shutil.rmtree(tantivy_dir, ignore_errors=False)
         logger.info("Deleted tantivy index: %s", tantivy_dir)
-        return f"deleted directory"
+        return "deleted directory"
     except Exception as exc:
         msg = str(exc)
         logger.warning("_delete_tantivy_index(%s) failed: %s", repo, msg)
@@ -3297,7 +3296,7 @@ def _delete_clone_directory(repo: str) -> str:
     Returns status string: "deleted", "not found", or "error: <msg>".
     """
     try:
-        clones_dir = Path(".cgr/clones")
+        clones_dir = Path(settings.CGR_DATA_DIR) / "clones"
         if not clones_dir.exists():
             return "not found"
 

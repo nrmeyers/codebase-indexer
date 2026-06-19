@@ -128,3 +128,17 @@ dev = [
     # the Typer command surface without needing the daemon running.
     "respx>=0.21.1",
 ]
+
+[tool.ruff]
+# Lint only the service code we maintain. The vendored engine under
+# ``codebase_rag/`` is upstream code-graph-rag (see codebase_rag/VENDORED.md)
+# and is not our lint responsibility.
+target-version = "py312"
+line-length = 100
+exclude = ["codebase_rag", ".venv"]
+
+[tool.ruff.lint]
+# E501 (line length) and E402 (import not at top-of-file) are ignored by
+# design: several routers do deliberate in-body / post-flag heavy imports
+# (torch / transformers / tantivy) to keep cold-start import time low.
+ignore = ["E501", "E402"]

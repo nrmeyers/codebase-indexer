@@ -24,6 +24,7 @@ Single-context layout. `CONTEXT.md` lives at the repo root (lazy — produced by
 ## Top-level docs
 
 - `README.md` — service overview, local-dev setup
+- `INSTALL.md` — standalone install runbook (pipx / uv tool, skill, Docker)
 - `ROADMAP.md` — phased milestone tracker (v5.3 spec)
 - `docs/adr/` — architectural decision records
 - `.planning/` — team deployment artefacts (`TEAM_DEPLOYMENT_PLAN`, `FRONTEND_AGENT_BRIEF`, `DEVOPS_REQUEST`, `phase-plans/`)

@@ -40,16 +40,11 @@ from ..models import (
     LexicalSearchResponse,
     NodeTypeStat,
     NodeTypesResponse,
-    SemanticResult,
     SemanticSearchResponse,
     StructuralSearchResponse,
     SymbolResponse,
 )
 from ..services import retrieval as retrieval_service
-from ..services.symbol_cards import (
-    SYMBOL_CARD_MARKER as _SYMBOL_CARD_MARKER,
-    fold_card_qname as _fold_card_qname,
-)
 from ..services.tantivy_index import TantivyIndex
 
 # Re-exported so existing test imports (``from app.routers.search import

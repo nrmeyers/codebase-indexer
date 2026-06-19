@@ -45,6 +45,7 @@ def runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[CliRunne
     monkeypatch.setattr(cli_config, "DEFAULT_LOG_PATH", data_dir / "server.log")
     monkeypatch.setattr(cli_main, "DEFAULT_PID_PATH", data_dir / "server.pid")
     monkeypatch.setattr(cli_main, "DEFAULT_LOG_PATH", data_dir / "server.log")
+    monkeypatch.setattr(cli_main, "DEFAULT_DATA_DIR", data_dir)
     # Pretend the port is always open so _ensure_running short-circuits.
     monkeypatch.setattr(cli_main, "is_port_open", lambda *_a, **_kw: True)
     yield CliRunner()
@@ -65,6 +66,9 @@ def test_help_lists_all_subcommands_when_invoked_without_args(runner: CliRunner)
         "start",
         "stop",
         "status",
+        "preflight",
+        "doctor",
+        "verify",
         "index",
         "reindex",
         "list",
@@ -237,6 +241,83 @@ def test_status_emits_parseable_json_with_daemon_keys_when_json_flag_set(
     assert payload["status"] == "ok"
     assert payload["indexed_repos"] == ["forge"]
     assert "alive" in payload and "daemon_pid" in payload
+
+
+# ---------------------------------------------------------------------------
+# preflight / doctor / verify (install + runtime health)
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_passes_when_host_ready(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``preflight`` should pass when python/CLI/data-dir checks hold."""
+    monkeypatch.setattr(cli_main.shutil, "which", lambda _n: "/usr/bin/code-indexer")
+    result = runner.invoke(app, ["--json", "preflight"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["check"] == "preflight"
+    assert payload["all_passed"] is True
+
+
+def test_preflight_fails_when_cli_not_on_path(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing ``code-indexer`` on PATH is a fatal preflight failure."""
+    monkeypatch.setattr(cli_main.shutil, "which", lambda _n: None)
+    result = runner.invoke(app, ["--json", "preflight"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["all_passed"] is False
+
+
+@respx.mock(base_url=BASE_URL)
+def test_doctor_reports_healthy_when_service_up(
+    respx_mock: respx.MockRouter, runner: CliRunner
+) -> None:
+    """``doctor`` should report reachable+healthy and exit 0 on a good /health."""
+    respx_mock.get("/health").mock(
+        return_value=httpx.Response(
+            200,
+            json={"status": "ok", "indexed_repos": ["forge"], "embedder": {"available": True}},
+        )
+    )
+    result = runner.invoke(app, ["--json", "doctor"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["reachable"] is True
+    assert payload["healthy"] is True
+
+
+@respx.mock(base_url=BASE_URL)
+def test_doctor_exits_nonzero_when_unreachable(
+    respx_mock: respx.MockRouter, runner: CliRunner
+) -> None:
+    """``doctor`` should exit non-zero with a remediation when unreachable."""
+    respx_mock.get("/health").mock(side_effect=httpx.ConnectError("refused"))
+    result = runner.invoke(app, ["--json", "doctor"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["reachable"] is False
+    assert "remediation" in payload
+
+
+@respx.mock(base_url=BASE_URL)
+def test_verify_all_pass_when_installed_and_service_up(
+    respx_mock: respx.MockRouter, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``verify`` should pass all checks when CLI + service + embedder are ready."""
+    monkeypatch.setattr(cli_main.shutil, "which", lambda _n: "/usr/bin/code-indexer")
+    respx_mock.get("/health").mock(
+        return_value=httpx.Response(
+            200,
+            json={"status": "ok", "indexed_repos": [], "embedder": {"available": True}},
+        )
+    )
+    result = runner.invoke(app, ["--json", "verify"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["all_passed"] is True
 
 
 # ---------------------------------------------------------------------------

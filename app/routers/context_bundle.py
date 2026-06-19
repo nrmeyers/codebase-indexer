@@ -1104,10 +1104,6 @@ def _entrypoint_symbols(conn: object, limit: int = 15) -> list[str]:
 
 _SUMMARY_QNAME_MARKER = "::summary"
 
-from ..services.symbol_cards import (
-    SYMBOL_CARD_MARKER as _SYMBOL_CARD_MARKER,
-    fold_card_qname as _card_parent,
-)
 
 # Max lines of the span head included per summary snippet. Class spans can run
 # to hundreds of lines; the leading lines carry the signature, docstring, and

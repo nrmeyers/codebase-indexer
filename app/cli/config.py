@@ -1,8 +1,9 @@
 """User-level CLI configuration for the standalone ``code-indexer`` tool.
 
-Stores per-user defaults at ``~/.code-indexer/config.toml`` so subsequent
-invocations don't need flags. The on-disk schema is intentionally
-minimal:
+Stores per-user defaults at ``${XDG_CONFIG_HOME:-~/.config}/codebase-indexer/
+config.toml`` (a legacy ``~/.code-indexer/config.toml`` is still read when
+present) so subsequent invocations don't need flags. The on-disk schema is
+intentionally minimal:
 
 .. code-block:: toml
 
@@ -14,7 +15,7 @@ minimal:
     backend = "local"
 
     [paths]
-    data_dir = "/Users/jane/.code-indexer"
+    data_dir = "/home/jane/.local/share/codebase-indexer"
 
 Resolution precedence for the server base URL (highest first):
 
@@ -39,10 +40,29 @@ else:  # pragma: no cover - project pins >=3.12
 
 DEFAULT_BASE_URL = "http://localhost:8003"
 DEFAULT_PORT = 8003
-DEFAULT_DATA_DIR = Path.home() / ".code-indexer"
-DEFAULT_CONFIG_PATH = DEFAULT_DATA_DIR / "config.toml"
+
+
+def _xdg_config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def _xdg_data_home() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+
+
+# User-scoped layout (matches the agentalloy install convention): the TOML
+# config lives under ``XDG_CONFIG_HOME``; runtime artefacts (pid, log) live
+# under ``XDG_DATA_HOME``. A ``pipx`` / ``uv tool`` install therefore behaves
+# like an installed tool from any directory instead of dropping dotfiles into
+# the caller's cwd.
+DEFAULT_DATA_DIR = _xdg_data_home() / "codebase-indexer"
+DEFAULT_CONFIG_PATH = _xdg_config_home() / "codebase-indexer" / "config.toml"
 DEFAULT_PID_PATH = DEFAULT_DATA_DIR / "server.pid"
 DEFAULT_LOG_PATH = DEFAULT_DATA_DIR / "server.log"
+
+# Backward-compat: a pre-XDG install kept everything under ~/.code-indexer/.
+# ``load_config`` falls back to it when no XDG config exists yet.
+_LEGACY_CONFIG_PATH = Path.home() / ".code-indexer" / "config.toml"
 
 
 EmbedderBackend = Literal["local", "sagemaker", "tei"]
@@ -85,7 +105,14 @@ def load_config(
         function falls back to documented defaults when the TOML file does
         not exist.
     """
-    cfg_path = config_path or DEFAULT_CONFIG_PATH
+    if config_path is not None:
+        cfg_path = config_path
+    elif DEFAULT_CONFIG_PATH.is_file():
+        cfg_path = DEFAULT_CONFIG_PATH
+    elif _LEGACY_CONFIG_PATH.is_file():
+        cfg_path = _LEGACY_CONFIG_PATH
+    else:
+        cfg_path = DEFAULT_CONFIG_PATH
     data_dir = DEFAULT_DATA_DIR
     base_url = DEFAULT_BASE_URL
     port = DEFAULT_PORT

@@ -557,9 +557,6 @@ async def list_repos(
 # ---------------------------------------------------------------------------
 
 
-_CLONES_DIR = ".cgr/clones"
-
-
 def _clone_or_update(
     full_name: str,
     branch: str | None,
@@ -594,7 +591,7 @@ def _clone_or_update(
     if not owner or not name:
         raise HTTPException(status_code=422, detail=f"Invalid full_name: {full_name}")
 
-    dest = Path(_CLONES_DIR) / f"{owner}__{name}"
+    dest = Path(settings.CGR_DATA_DIR) / "clones" / f"{owner}__{name}"
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     # Audit log — classify the token and surface only the last 4 chars so the

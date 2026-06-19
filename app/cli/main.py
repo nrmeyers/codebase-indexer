@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -48,6 +49,7 @@ from rich.table import Table
 
 from .client import IndexerClient, ServiceUnavailable
 from .config import (
+    DEFAULT_DATA_DIR,
     DEFAULT_LOG_PATH,
     DEFAULT_PID_PATH,
     CliConfig,
@@ -316,6 +318,185 @@ def status(ctx: typer.Context) -> None:
         ", ".join(str(r) for r in repos) if repos else "(none)",
     )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# preflight / doctor / verify — install + runtime health (agentalloy parity)
+# ---------------------------------------------------------------------------
+
+
+def _dir_writable(path: Path) -> bool:
+    """Return True if ``path`` can be created and written to."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write-probe"
+        probe.touch()
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _render_checks(
+    ctx: typer.Context, title: str, checks: list[dict[str, object]]
+) -> None:
+    """Render ``{name, ok, remediation}`` checks; exit non-zero on any failure.
+
+    JSON mode emits ``{check, all_passed, checks}`` for harness consumption.
+    """
+    all_ok = all(bool(c["ok"]) for c in checks)
+    if _json_mode(ctx):
+        _emit_json({"check": title, "all_passed": all_ok, "checks": checks})
+    else:
+        table = Table(title=title)
+        table.add_column("", justify="center")
+        table.add_column("check")
+        for c in checks:
+            mark = "[green]OK[/green]" if c["ok"] else "[red]FAIL[/red]"
+            table.add_row(mark, str(c["name"]))
+        console.print(table)
+        for c in checks:
+            if not c["ok"] and c.get("remediation"):
+                console.print(f"[yellow]→ {c['remediation']}[/yellow]")
+    if not all_ok:
+        raise typer.Exit(1)
+
+
+@app.command()
+def preflight(ctx: typer.Context) -> None:
+    """Check host readiness for a standalone install (no daemon needed)."""
+    cfg = _get_config(ctx)
+    port = _port_from_url(cfg.base_url) or cfg.port
+    py = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    cli_path = shutil.which("code-indexer")
+    checks: list[dict[str, object]] = [
+        {
+            "name": f"Python >= 3.12 (found {py})",
+            "ok": sys.version_info >= (3, 12),
+            "remediation": "Install Python 3.12+ (https://docs.astral.sh/uv/).",
+        },
+        {
+            "name": f"code-indexer on PATH ({cli_path or 'not found'})",
+            "ok": cli_path is not None,
+            "remediation": "Install with `uv tool install .` (or pipx) and put "
+            "~/.local/bin on $PATH.",
+        },
+        {
+            "name": f"data dir writable ({DEFAULT_DATA_DIR})",
+            "ok": _dir_writable(DEFAULT_DATA_DIR),
+            "remediation": f"Ensure {DEFAULT_DATA_DIR} can be created and written.",
+        },
+        {
+            "name": (
+                f"port {port} free"
+                if not is_port_open("127.0.0.1", port)
+                else f"port {port} already serving (daemon likely up)"
+            ),
+            # Informational: a running daemon on the port is not a failure.
+            "ok": True,
+            "remediation": "",
+        },
+    ]
+    _render_checks(ctx, "preflight", checks)
+
+
+@app.command()
+def doctor(ctx: typer.Context) -> None:
+    """Runtime health check against the service, with remediation hints."""
+    cfg = _get_config(ctx)
+    try:
+        with _client(ctx, timeout=5.0) as client:
+            health = client.health()
+    except (ServiceUnavailable, httpx.HTTPError) as exc:
+        if _json_mode(ctx):
+            _emit_json(
+                {
+                    "reachable": False,
+                    "base_url": cfg.base_url,
+                    "error": str(exc),
+                    "remediation": "Start the daemon with `code-indexer start`.",
+                }
+            )
+        else:
+            err_console.print(f"[red]Service unreachable at {cfg.base_url}:[/red] {exc}")
+            console.print("[yellow]→ Start it with `code-indexer start`.[/yellow]")
+        raise typer.Exit(1) from exc
+
+    status_val = str(health.get("status", "?")) if isinstance(health, dict) else "?"
+    healthy = status_val in {"ok", "healthy", "degraded"}
+    if _json_mode(ctx):
+        payload: dict[str, object] = {
+            "reachable": True,
+            "base_url": cfg.base_url,
+            "healthy": healthy,
+        }
+        if isinstance(health, dict):
+            payload.update(health)
+        _emit_json(payload)
+    else:
+        embedder = health.get("embedder") if isinstance(health, dict) else None
+        repos = (health.get("indexed_repos") or []) if isinstance(health, dict) else []
+        table = Table(title=f"doctor @ {cfg.base_url}")
+        table.add_column("field")
+        table.add_column("value")
+        table.add_row("status", status_val)
+        table.add_row("embedder", str(embedder) if embedder else "(unknown)")
+        table.add_row(
+            "indexed repos",
+            ", ".join(str(r) for r in repos) if repos else "(none)",
+        )
+        console.print(table)
+        if not healthy:
+            console.print(
+                "[yellow]→ Service is not healthy; inspect the server log "
+                "(see `code-indexer status`).[/yellow]"
+            )
+    if not healthy:
+        raise typer.Exit(1)
+
+
+@app.command()
+def verify(ctx: typer.Context) -> None:
+    """Enumerated post-install checks: CLI, data dir, service, embedder."""
+    reachable = False
+    embedder_ok = False
+    try:
+        with _client(ctx, timeout=5.0) as client:
+            health = client.health()
+        if isinstance(health, dict):
+            reachable = str(health.get("status")) in {"ok", "healthy", "degraded"}
+            emb = health.get("embedder")
+            if isinstance(emb, dict):
+                embedder_ok = bool(emb.get("available", emb.get("ok", True)))
+            else:
+                embedder_ok = bool(emb)
+    except (ServiceUnavailable, httpx.HTTPError):
+        pass
+
+    cli_path = shutil.which("code-indexer")
+    checks: list[dict[str, object]] = [
+        {
+            "name": f"code-indexer on PATH ({cli_path or 'not found'})",
+            "ok": cli_path is not None,
+            "remediation": "uv tool install . (and add ~/.local/bin to $PATH)",
+        },
+        {
+            "name": f"data dir writable ({DEFAULT_DATA_DIR})",
+            "ok": _dir_writable(DEFAULT_DATA_DIR),
+            "remediation": f"ensure {DEFAULT_DATA_DIR} is writable",
+        },
+        {
+            "name": "service reachable (/health)",
+            "ok": reachable,
+            "remediation": "start the daemon with `code-indexer start`",
+        },
+        {
+            "name": "embedder ready",
+            "ok": embedder_ok,
+            "remediation": "check the embedder backend / model (see `code-indexer doctor`)",
+        },
+    ]
+    _render_checks(ctx, "verify", checks)
 
 
 # ---------------------------------------------------------------------------

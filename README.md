@@ -148,7 +148,7 @@ uv sync
 ### First run
 
 ```bash
-code-indexer setup        # writes ~/.code-indexer/config.toml
+code-indexer setup        # writes ~/.config/codebase-indexer/config.toml
 code-indexer index ~/proj # auto-starts daemon, polls until done
 code-indexer status       # shows daemon + indexed repos
 ```
@@ -157,11 +157,14 @@ code-indexer status       # shows daemon + indexed repos
 
 | Command                               | Description                                               |
 | ------------------------------------- | --------------------------------------------------------- |
-| `setup`                               | Interactive wizard. Writes `~/.code-indexer/config.toml`. |
+| `setup`                               | Interactive wizard. Writes `~/.config/codebase-indexer/config.toml`. |
 | `serve [--port 8003]`                 | Run the FastAPI service in the foreground.                |
 | `start`                               | Spawn the service in the background.                      |
 | `stop`                                | Stop the background daemon.                               |
 | `status`                              | Show daemon liveness + indexed repos.                     |
+| `preflight`                           | Host-readiness checks for a standalone install (no daemon).|
+| `doctor`                              | Runtime health check against the service + remediation.   |
+| `verify`                              | Enumerated post-install checks (CLI, data dir, service).  |
 | `index <path> [--watch] [--force]`    | Index a directory; polls until done.                      |
 | `reindex <slug>`                      | Force a clean re-index of an indexed repo.                |
 | `list`                                | List every indexed repo.                                  |
@@ -173,11 +176,11 @@ code-indexer status       # shows daemon + indexed repos
 | `explore`                             | Print the LadybugDB Explorer launch command + URL.        |
 | `remove <slug> [-y]`                  | Delete a repo's index (cascade).                          |
 
-Pass `--base-url` to any command to talk to a remote service; the CLI otherwise reads `[server].base_url` from the config.
+Pass `--base-url` to any command to talk to a remote service; the CLI otherwise reads `[server].base_url` from the config. Pass the global `--json` flag (before the subcommand, e.g. `code-indexer --json search ...`) for machine-readable stdout when driving the CLI from a harness or agent.
 
 ### Config file
 
-The setup wizard writes `~/.code-indexer/config.toml`:
+The setup wizard writes `~/.config/codebase-indexer/config.toml`:
 
 ```toml
 [server]
