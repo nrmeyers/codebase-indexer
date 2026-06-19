@@ -461,7 +461,7 @@ def index(
         if status_val == "done":
             console.print(
                 f"[green]Done[/green] nodes={result.get('node_count')} "
-                f"relationships={result.get('relationship_count', '?')}"
+                f"relationships={result.get('rel_count', '?')}"
             )
         else:
             raise _bail(

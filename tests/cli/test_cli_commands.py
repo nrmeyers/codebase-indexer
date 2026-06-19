@@ -313,7 +313,7 @@ def test_index_polls_until_done_when_job_completes(
                 "phase": "done",
                 "progress_pct": 100.0,
                 "node_count": 100,
-                "relationship_count": 50,
+                "rel_count": 50,
             },
         ),
     ]
@@ -322,6 +322,9 @@ def test_index_polls_until_done_when_job_completes(
     assert result.exit_code == 0, result.stdout
     assert "Job started" in result.stdout
     assert "Done" in result.stdout
+    # Job status reports the relationship count as ``rel_count`` (not
+    # ``relationship_count``) — guard the human render against that regression.
+    assert "relationships=50" in result.stdout
 
 
 @respx.mock(base_url=BASE_URL)
