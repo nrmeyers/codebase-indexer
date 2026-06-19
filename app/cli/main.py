@@ -62,17 +62,41 @@ app = typer.Typer(
     help=(
         "Standalone CLI for the Code Indexer Service. Manage the local "
         "FastAPI daemon, index repositories, and search code without "
-        "needing TheForge."
+        "needing TheForge. Pass the global --json flag before any "
+        "subcommand for machine-readable output (for harnesses/agents)."
     ),
     no_args_is_help=True,
     add_completion=False,
 )
 console = Console()
+# Diagnostics (auto-start notices, job-started lines) go here so that in
+# ``--json`` mode stdout carries *only* the JSON document a harness parses.
+err_console = Console(stderr=True)
 
 
 # ---------------------------------------------------------------------------
 # Shared context wiring
 # ---------------------------------------------------------------------------
+
+
+def _json_mode(ctx: typer.Context) -> bool:
+    """Return ``True`` when the global ``--json`` flag was supplied.
+
+    JSON mode is the contract for non-human callers (agents/harnesses):
+    each command writes exactly one JSON document to stdout and routes any
+    human-facing chatter to stderr.
+    """
+    return bool((ctx.obj or {}).get("json_output"))
+
+
+def _emit_json(data: object) -> None:
+    """Write a single JSON document to stdout for machine consumption.
+
+    Uses the builtin ``print`` rather than ``console.print`` so Rich never
+    soft-wraps long lines to the terminal width (which would corrupt the
+    JSON when stdout is a pipe).
+    """
+    print(json.dumps(data, indent=2, default=str))
 
 
 def _get_config(ctx: typer.Context) -> CliConfig:
@@ -113,11 +137,22 @@ def _root(
             help="Override the FastAPI service base URL.",
         ),
     ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit machine-readable JSON to stdout (human chatter goes to "
+                "stderr). Use when driving the CLI from a harness/agent."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Resolve global flags before dispatching to subcommands."""
     obj = ctx.ensure_object(dict)
     if base_url:
         obj["base_url_override"] = base_url
+    obj["json_output"] = json_output
 
 
 # ---------------------------------------------------------------------------
@@ -248,11 +283,14 @@ def stop() -> None:
 def status(ctx: typer.Context) -> None:
     """Show daemon liveness and the indexed-repos table."""
     cfg = _get_config(ctx)
+    json_mode = _json_mode(ctx)
     pid = read_pid(DEFAULT_PID_PATH)
-    if pid and pid_alive(pid):
-        console.print(f"[green]Daemon[/green] pid={pid}")
-    else:
-        console.print("[yellow]No managed daemon process recorded.[/yellow]")
+    alive = bool(pid and pid_alive(pid))
+    if not json_mode:
+        if alive:
+            console.print(f"[green]Daemon[/green] pid={pid}")
+        else:
+            console.print("[yellow]No managed daemon process recorded.[/yellow]")
 
     with _client(ctx, timeout=5.0) as client:
         try:
@@ -261,6 +299,13 @@ def status(ctx: typer.Context) -> None:
             raise _bail(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise _bail(f"Health check failed: {exc}") from exc
+
+    if json_mode:
+        payload: dict[str, object] = {"daemon_pid": pid, "alive": alive}
+        if isinstance(health, dict):
+            payload.update(health)
+        _emit_json(payload)
+        return
 
     repos = health.get("indexed_repos") or []
     table = Table(title=f"Code Indexer @ {cfg.base_url}")
@@ -283,7 +328,8 @@ def _ensure_running(ctx: typer.Context) -> None:
     cfg = _get_config(ctx)
     if is_port_open("127.0.0.1", _port_from_url(cfg.base_url) or cfg.port):
         return
-    console.print(
+    out = err_console if _json_mode(ctx) else console
+    out.print(
         f"[yellow]Code Indexer not reachable at {cfg.base_url}; "
         f"auto-starting...[/yellow]"
     )
@@ -293,7 +339,7 @@ def _ensure_running(ctx: typer.Context) -> None:
         )
     except RuntimeError as exc:
         raise _bail(str(exc)) from exc
-    console.print(f"[green]Auto-started[/green] pid={pid}")
+    out.print(f"[green]Auto-started[/green] pid={pid}")
 
 
 def _port_from_url(url: str) -> int | None:
@@ -341,6 +387,25 @@ def _poll_index(client: IndexerClient, job_id: str) -> dict[str, object]:
     return last
 
 
+def _poll_index_quiet(client: IndexerClient, job_id: str) -> dict[str, object]:
+    """Poll ``/index/{job_id}/status`` until terminal with no progress UI.
+
+    Used in ``--json`` mode so stdout stays free of Rich progress output —
+    only the final terminal status dict is emitted by the caller.
+    """
+    terminal = {"done", "failed", "interrupted", "cancelled"}
+    last: dict[str, object] = {}
+    while True:
+        try:
+            last = client.job_status(job_id)
+        except httpx.HTTPError:
+            time.sleep(1.0)
+            continue
+        if last.get("status") in terminal:
+            return last
+        time.sleep(0.5)
+
+
 @app.command()
 def index(
     ctx: typer.Context,
@@ -372,11 +437,27 @@ def index(
         job_id = str(accepted.get("job_id") or "")
         if not job_id:
             raise _bail(f"Service returned no job_id: {accepted!r}")
-        console.print(f"[green]Job started[/green] {job_id} → {repo_path}")
+        json_mode = _json_mode(ctx)
+        (err_console if json_mode else console).print(
+            f"[green]Job started[/green] {job_id} → {repo_path}"
+        )
         if not watch:
+            if json_mode:
+                _emit_json(
+                    {"job_id": job_id, "status": "accepted", "repo_path": str(repo_path)}
+                )
             return
-        result = _poll_index(client, job_id)
+        result = (
+            _poll_index_quiet(client, job_id)
+            if json_mode
+            else _poll_index(client, job_id)
+        )
         status_val = str(result.get("status"))
+        if json_mode:
+            _emit_json(result)
+            if status_val != "done":
+                raise typer.Exit(1)
+            return
         if status_val == "done":
             console.print(
                 f"[green]Done[/green] nodes={result.get('node_count')} "
@@ -419,7 +500,16 @@ def reindex(
                 f"{exc.response.text}"
             ) from exc
         job_id = str(accepted.get("job_id") or "")
-        console.print(f"[green]Re-index started[/green] {job_id} → {repo_path}")
+        json_mode = _json_mode(ctx)
+        (err_console if json_mode else console).print(
+            f"[green]Re-index started[/green] {job_id} → {repo_path}"
+        )
+        if json_mode:
+            result = _poll_index_quiet(client, job_id)
+            _emit_json(result)
+            if str(result.get("status")) != "done":
+                raise typer.Exit(1)
+            return
         _poll_index(client, job_id)
 
 
@@ -436,6 +526,9 @@ def list_repos_cmd(ctx: typer.Context) -> None:
             data = client.list_repos()
         except ServiceUnavailable as exc:
             raise _bail(str(exc)) from exc
+    if _json_mode(ctx):
+        _emit_json(data)
+        return
     repos = data.get("repos") if isinstance(data, dict) else None
     if not repos:
         console.print("[yellow]No repos indexed yet.[/yellow]")
@@ -473,6 +566,9 @@ def search(
             data = client.semantic_search(query, k=k, repo=repo)
         except ServiceUnavailable as exc:
             raise _bail(str(exc)) from exc
+    if _json_mode(ctx):
+        _emit_json(data)
+        return
     results = data.get("results", []) if isinstance(data, dict) else []
     if not results:
         console.print("[yellow]No results.[/yellow]")
@@ -512,7 +608,7 @@ def symbol(
             if exc.response.status_code == 404:
                 raise _bail(f"Symbol not found: {fqn}") from exc
             raise
-    console.print_json(data=data)
+    _emit_json(data)
 
 
 def _render_call_sites(title: str, data: dict[str, object]) -> None:
@@ -548,6 +644,9 @@ def callers(
             data = client.callers(fqn, repo=repo)
         except ServiceUnavailable as exc:
             raise _bail(str(exc)) from exc
+    if _json_mode(ctx):
+        _emit_json(data)
+        return
     _render_call_sites(f"callers of {fqn}", data)
 
 
@@ -563,6 +662,9 @@ def callees(
             data = client.callees(fqn, repo=repo)
         except ServiceUnavailable as exc:
             raise _bail(str(exc)) from exc
+    if _json_mode(ctx):
+        _emit_json(data)
+        return
     _render_call_sites(f"callees of {fqn}", data)
 
 
@@ -591,7 +693,7 @@ def bundle(
             data = client.context_bundle(str(repo_path), task, k=k, depth=depth)
         except ServiceUnavailable as exc:
             raise _bail(str(exc)) from exc
-    console.print(json.dumps(data, indent=2))
+    _emit_json(data)
 
 
 @app.command()
@@ -602,6 +704,9 @@ def explore(ctx: typer.Context) -> None:
             data = client.explorer_info()
         except ServiceUnavailable as exc:
             raise _bail(str(exc)) from exc
+    if _json_mode(ctx):
+        _emit_json(data)
+        return
     url = (
         data.get("url") if isinstance(data, dict) else None
     ) or data.get("explorer_url") if isinstance(data, dict) else None
@@ -635,6 +740,9 @@ def remove(
             if exc.response.status_code == 404:
                 raise _bail(f"Unknown repo slug: {slug}") from exc
             raise
+    if _json_mode(ctx):
+        _emit_json(data if isinstance(data, dict) else {"deleted": True, "slug": slug})
+        return
     console.print(f"[green]Deleted[/green] {slug}")
     if isinstance(data, dict) and data:
         console.print_json(data=data)
