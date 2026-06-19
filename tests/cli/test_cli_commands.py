@@ -7,6 +7,7 @@ rendering, exit codes) without spawning a real uvicorn process.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterator
 
@@ -133,7 +134,7 @@ def test_list_renders_repo_table_when_repos_are_indexed(
             json={
                 "repos": [
                     {
-                        "name": "forge",
+                        "slug": "forge",
                         "status": "fresh",
                         "repo_path": "/repos/forge",
                         "last_indexed_at": "2026-05-14T00:00:00Z",
@@ -177,6 +178,65 @@ def test_search_renders_results_when_semantic_search_returns_hits(
     assert result.exit_code == 0, result.stdout
     assert "app.auth.login" in result.stdout
     assert "0.910" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# --json machine-readable contract (global flag, must precede the subcommand)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock(base_url=BASE_URL)
+def test_search_emits_parseable_json_when_json_flag_set(
+    respx_mock: respx.MockRouter, runner: CliRunner
+) -> None:
+    """``--json search`` should write exactly one JSON document to stdout.
+
+    This is the harness contract: stdout is machine-parseable, no Rich table.
+    """
+    respx_mock.get("/search/semantic").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"score": 0.91, "symbol": "app.auth.login", "type": "function"}]},
+        )
+    )
+    result = runner.invoke(app, ["--json", "search", "auth", "-k", "5"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["results"][0]["symbol"] == "app.auth.login"
+    assert payload["results"][0]["score"] == 0.91
+
+
+@respx.mock(base_url=BASE_URL)
+def test_list_emits_parseable_json_when_json_flag_set(
+    respx_mock: respx.MockRouter, runner: CliRunner
+) -> None:
+    """``--json list`` should emit the raw /repos payload as JSON."""
+    respx_mock.get("/repos").mock(
+        return_value=httpx.Response(
+            200,
+            json={"repos": [{"slug": "forge", "status": "fresh", "repo_path": "/repos/forge"}]},
+        )
+    )
+    result = runner.invoke(app, ["--json", "list"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["repos"][0]["slug"] == "forge"
+
+
+@respx.mock(base_url=BASE_URL)
+def test_status_emits_parseable_json_with_daemon_keys_when_json_flag_set(
+    respx_mock: respx.MockRouter, runner: CliRunner
+) -> None:
+    """``--json status`` folds daemon liveness into the health JSON on stdout."""
+    respx_mock.get("/health").mock(
+        return_value=httpx.Response(200, json={"status": "ok", "indexed_repos": ["forge"]})
+    )
+    result = runner.invoke(app, ["--json", "status"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["indexed_repos"] == ["forge"]
+    assert "alive" in payload and "daemon_pid" in payload
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +313,7 @@ def test_index_polls_until_done_when_job_completes(
                 "phase": "done",
                 "progress_pct": 100.0,
                 "node_count": 100,
-                "relationship_count": 50,
+                "rel_count": 50,
             },
         ),
     ]
@@ -262,6 +322,9 @@ def test_index_polls_until_done_when_job_completes(
     assert result.exit_code == 0, result.stdout
     assert "Job started" in result.stdout
     assert "Done" in result.stdout
+    # Job status reports the relationship count as ``rel_count`` (not
+    # ``relationship_count``) — guard the human render against that regression.
+    assert "relationships=50" in result.stdout
 
 
 @respx.mock(base_url=BASE_URL)

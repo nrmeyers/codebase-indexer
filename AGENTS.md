@@ -17,9 +17,14 @@ Default canonical names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready
 
 Single-context layout. `CONTEXT.md` lives at the repo root (lazy — produced by `/grill-with-docs` when terms get resolved). ADRs live at `docs/adr/` and currently hold three deferred-decision records (HNSW, CodeRankLLM proper, cross-repo unified rank). See `docs/agents/domain.md`.
 
+### Harness integration
+
+`integrations/claude/` ships a Claude Code skill (`codebase-indexer`) that drives the indexer via `code-indexer --json …` — no MCP, ~0 up-front tokens. Install with `integrations/claude/install.sh` (symlinks the skill into `~/.claude/skills/`). Other harnesses get their own `integrations/<harness>/` directory.
+
 ## Top-level docs
 
 - `README.md` — service overview, local-dev setup
 - `ROADMAP.md` — phased milestone tracker (v5.3 spec)
 - `docs/adr/` — architectural decision records
 - `.planning/` — team deployment artefacts (`TEAM_DEPLOYMENT_PLAN`, `FRONTEND_AGENT_BRIEF`, `DEVOPS_REQUEST`, `phase-plans/`)
+- `integrations/` — harness integrations (Claude skill, …)
