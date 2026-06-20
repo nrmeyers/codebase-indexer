@@ -41,7 +41,7 @@ You can ask it things like:
 ```bash
 uv tool install git+https://github.com/nrmeyers/codebase-indexer.git   # or: pipx install …
 code-indexer setup                       # one-time interactive wizard
-code-indexer index ~/path/to/your/repo   # indexes in the background, polls to completion
+code-indexer index ~/path/to/your/repo   # indexes, polls to completion, and auto-wires the agent config
 code-indexer search "where is the auth code"
 code-indexer callers myproject.parser.process_file
 ```
@@ -161,7 +161,7 @@ the working dir is used instead, for in-place / TheForge deployments). See
 
 ```bash
 code-indexer setup        # writes ~/.config/codebase-indexer/config.toml
-code-indexer index ~/proj # auto-starts daemon, polls until done
+code-indexer index ~/proj # auto-starts daemon, polls, and auto-wires the agent config
 code-indexer status       # shows daemon + indexed repos
 ```
 
@@ -186,6 +186,8 @@ code-indexer status       # shows daemon + indexed repos
 | `callees <fqn> [--repo X]`            | Downstream callees of a symbol.                           |
 | `bundle "<task>" --repo <path>`       | Build a grounded context bundle for an LLM.               |
 | `explore`                             | Print the LadybugDB Explorer launch command + URL.        |
+| `wire [path] [--harness X]`           | Inject the usage block into the repo's agent config.      |
+| `unwire [path]`                       | Remove the codebase-indexer block from the agent config.  |
 | `remove <slug> [-y]`                  | Delete a repo's index (cascade).                          |
 
 Pass `--base-url` to any command to talk to a remote service; the CLI otherwise reads `[server].base_url` from the config. Pass the global `--json` flag (before the subcommand, e.g. `code-indexer --json search ...`) for machine-readable stdout when driving the CLI from a harness or agent.

@@ -60,7 +60,7 @@ uv run pytest tests/ -v                              # Run tests (~60 files, 500
 uv run pytest tests/test_search.py::test_name -v     # Single test
 ```
 
-There is also a standalone CLI (`app/cli/`): `code-indexer setup|preflight|doctor|verify|serve|start|stop|status|index|search|symbol|callers|callees|bundle|explore|remove`. Pass the global `--json` flag (before the subcommand) for machine-readable output (for harnesses/agents — see `integrations/claude/`). CLI-launched daemon defaults to port 8003. Config is user-scoped at `${XDG_CONFIG_HOME:-~/.config}/codebase-indexer/`; index data at `${XDG_DATA_HOME:-~/.local/share}/codebase-indexer/` (an existing `./.cgr` in the cwd is used instead, for in-place deployments).
+There is also a standalone CLI (`app/cli/`): `code-indexer setup|preflight|doctor|verify|serve|start|stop|status|index|search|symbol|callers|callees|bundle|explore|wire|unwire|remove`. Pass the global `--json` flag (before the subcommand) for machine-readable output (for harnesses/agents — see `integrations/claude/`). CLI-launched daemon defaults to port 8003. Config is user-scoped at `${XDG_CONFIG_HOME:-~/.config}/codebase-indexer/`; index data at `${XDG_DATA_HOME:-~/.local/share}/codebase-indexer/` (an existing `./.cgr` in the cwd is used instead, for in-place deployments). Indexing a repo also **auto-wires** its agent config (auto-detected: CLAUDE.md / AGENTS.md / GEMINI.md / .clinerules / .cursor) with a sentinel-bounded usage block so the harness uses the index with no extra step — `--no-wire` to skip, `code-indexer wire`/`unwire` to manage (see `app/cli/wiring.py`).
 
 Auto-started by TheForge when `pnpm dev` runs (via `scripts/start-indexer.sh`).
 Set `CODE_INDEXER_PATH` env var if the service is not at `~/code-indexer-service`.

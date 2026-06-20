@@ -84,15 +84,25 @@ The global `--json` flag routes all human-facing output to stderr and emits a si
 
 ---
 
-## Claude skill (optional)
+## Harness integration
 
-Wire the indexer into Claude Code so a Claude agent can drive it directly:
+`code-indexer index` **auto-wires** the repo it indexes: it injects a small,
+sentinel-bounded usage block into the repo's agent config — auto-detected from
+`CLAUDE.md` / `AGENTS.md` / `GEMINI.md` / `.clinerules` / `.cursor` (CLAUDE.md
+is created if none exists) — so the coding agent uses the index with no extra
+step. Manage it explicitly with `code-indexer wire [path] [--harness X]` and
+`code-indexer unwire [path]`, or pass `--no-wire` to `index` to skip it.
+`unwire` removes only the bytes between the markers, leaving your own content
+intact.
+
+For a global, cross-repo Claude **skill** instead (progressive-disclosure, not
+written per-repo), symlink it into `~/.claude/skills/`:
 
 ```bash
 bash integrations/claude/install.sh
 ```
 
-This symlinks the harness skill into `~/.claude/skills/`. See `integrations/claude/README.md` for the full skill API and usage notes.
+See `integrations/claude/README.md` for the skill API.
 
 ---
 

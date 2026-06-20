@@ -78,6 +78,8 @@ def test_help_lists_all_subcommands_when_invoked_without_args(runner: CliRunner)
         "callees",
         "bundle",
         "explore",
+        "wire",
+        "unwire",
         "remove",
     ):
         assert cmd in result.stdout
@@ -399,7 +401,8 @@ def test_index_polls_until_done_when_job_completes(
         ),
     ]
     respx_mock.get("/index/job-1/status").mock(side_effect=statuses)
-    result = runner.invoke(app, ["index", str(target)])
+    # --no-wire keeps this focused on the poll loop (auto-wire would call /repos).
+    result = runner.invoke(app, ["index", str(target), "--no-wire"])
     assert result.exit_code == 0, result.stdout
     assert "Job started" in result.stdout
     assert "Done" in result.stdout
@@ -417,6 +420,92 @@ def test_index_exits_nonzero_when_path_is_not_a_directory(
     result = runner.invoke(app, ["index", str(missing)])
     assert result.exit_code != 0
     assert "Not a directory" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# wire / unwire (harness integration)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock(base_url=BASE_URL)
+def test_index_auto_wires_harness_after_done(
+    respx_mock: respx.MockRouter, runner: CliRunner, tmp_path: Path
+) -> None:
+    """A successful ``index`` should auto-wire the repo's CLAUDE.md."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    respx_mock.post("/index").mock(
+        return_value=httpx.Response(202, json={"job_id": "job-1"})
+    )
+    respx_mock.get("/index/job-1/status").mock(
+        return_value=httpx.Response(
+            200,
+            json={"status": "done", "phase": "done", "progress_pct": 100.0,
+                  "node_count": 5, "rel_count": 2},
+        )
+    )
+    respx_mock.get("/repos").mock(
+        return_value=httpx.Response(
+            200,
+            json={"repos": [{"slug": "acme__repo", "repo_path": str(target.resolve())}]},
+        )
+    )
+    result = runner.invoke(app, ["index", str(target)])
+    assert result.exit_code == 0, result.stdout
+    body = (target / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "BEGIN codebase-indexer" in body
+    assert "acme__repo" in body
+
+
+@respx.mock(base_url=BASE_URL)
+def test_index_no_wire_flag_skips_wiring(
+    respx_mock: respx.MockRouter, runner: CliRunner, tmp_path: Path
+) -> None:
+    """``index --no-wire`` should not touch the repo's agent config."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    respx_mock.post("/index").mock(
+        return_value=httpx.Response(202, json={"job_id": "job-1"})
+    )
+    respx_mock.get("/index/job-1/status").mock(
+        return_value=httpx.Response(
+            200,
+            json={"status": "done", "phase": "done", "progress_pct": 100.0,
+                  "node_count": 5, "rel_count": 2},
+        )
+    )
+    result = runner.invoke(app, ["index", str(target), "--no-wire"])
+    assert result.exit_code == 0, result.stdout
+    assert not (target / "CLAUDE.md").exists()
+
+
+@respx.mock(base_url=BASE_URL)
+def test_wire_command_writes_block_for_indexed_repo(
+    respx_mock: respx.MockRouter, runner: CliRunner, tmp_path: Path
+) -> None:
+    """``wire <path>`` resolves the slug via /repos and writes the block."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    respx_mock.get("/repos").mock(
+        return_value=httpx.Response(
+            200, json={"repos": [{"slug": "x__y", "repo_path": str(target.resolve())}]}
+        )
+    )
+    result = runner.invoke(app, ["wire", str(target)])
+    assert result.exit_code == 0, result.stdout
+    assert "x__y" in (target / "CLAUDE.md").read_text(encoding="utf-8")
+
+
+def test_unwire_command_removes_block(runner: CliRunner, tmp_path: Path) -> None:
+    """``unwire <path>`` removes the block (no daemon needed)."""
+    from app.cli import wiring
+
+    target = tmp_path / "repo"
+    target.mkdir()
+    wiring.wire_repo(target, slug="x__y", base_url="u")
+    result = runner.invoke(app, ["unwire", str(target)])
+    assert result.exit_code == 0, result.stdout
+    assert "BEGIN codebase-indexer" not in (target / "CLAUDE.md").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
