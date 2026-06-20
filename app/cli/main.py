@@ -58,6 +58,7 @@ from .config import (
     write_config,
 )
 from .daemon import is_port_open, pid_alive, read_pid, spawn_server, stop_server
+from .wiring import unwire_repo, wire_repo
 
 app = typer.Typer(
     name="code-indexer",
@@ -587,6 +588,50 @@ def _poll_index_quiet(client: IndexerClient, job_id: str) -> dict[str, object]:
         time.sleep(0.5)
 
 
+def _slug_for_path(client: IndexerClient, repo_path: Path) -> str | None:
+    """Return the canonical slug for an indexed repo path, matched via /repos."""
+    try:
+        data = client.list_repos()
+    except (ServiceUnavailable, httpx.HTTPError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    target = str(Path(repo_path).resolve())
+    for entry in data.get("repos") or []:
+        if not isinstance(entry, dict):
+            continue
+        rp = entry.get("repo_path") or entry.get("path")
+        if rp and str(Path(rp).resolve()) == target:
+            return entry.get("slug") or entry.get("name")
+    return None
+
+
+def _auto_wire(
+    ctx: typer.Context, client: IndexerClient, repo_path: Path, harness: str | None
+) -> None:
+    """Best-effort: wire the repo's harness config after a successful index.
+
+    Wiring is a convenience, never a hard requirement — a missing slug or an
+    unwritable config file emits a warning and leaves the index intact.
+    """
+    out = err_console if _json_mode(ctx) else console
+    slug = _slug_for_path(client, repo_path)
+    if not slug:
+        out.print("[yellow]wire skipped: repo slug not found via /repos[/yellow]")
+        return
+    cfg = _get_config(ctx)
+    try:
+        res = wire_repo(
+            Path(repo_path), slug=slug, base_url=cfg.base_url, harness=harness
+        )
+    except (OSError, ValueError) as exc:
+        out.print(f"[yellow]wire skipped: {exc}[/yellow]")
+        return
+    out.print(
+        f"[green]Wired[/green] {res['harness']} → {res['target']} ({res['action']})"
+    )
+
+
 @app.command()
 def index(
     ctx: typer.Context,
@@ -599,6 +644,20 @@ def index(
         bool,
         typer.Option("--force", help="Force a clean re-index."),
     ] = False,
+    no_wire: Annotated[
+        bool,
+        typer.Option(
+            "--no-wire", help="Skip auto-wiring this repo's harness config."
+        ),
+    ] = False,
+    harness: Annotated[
+        str | None,
+        typer.Option(
+            "--harness",
+            help="Force the wire target (claude|agents|gemini|cline|cursor); "
+            "default: auto-detect.",
+        ),
+    ] = None,
 ) -> None:
     """Index a repository at the given path."""
     repo_path = path.expanduser().resolve()
@@ -634,6 +693,8 @@ def index(
             else _poll_index(client, job_id)
         )
         status_val = str(result.get("status"))
+        if status_val == "done" and not no_wire:
+            _auto_wire(ctx, client, repo_path, harness)
         if json_mode:
             _emit_json(result)
             if status_val != "done":
@@ -654,6 +715,18 @@ def index(
 def reindex(
     ctx: typer.Context,
     slug: Annotated[str, typer.Argument(help="Repo slug to re-index.")],
+    no_wire: Annotated[
+        bool,
+        typer.Option("--no-wire", help="Skip auto-wiring this repo's harness config."),
+    ] = False,
+    harness: Annotated[
+        str | None,
+        typer.Option(
+            "--harness",
+            help="Force the wire target (claude|agents|gemini|cline|cursor); "
+            "default: auto-detect.",
+        ),
+    ] = None,
 ) -> None:
     """Force a clean re-index of an already-indexed repo."""
     _ensure_running(ctx)
@@ -687,11 +760,85 @@ def reindex(
         )
         if json_mode:
             result = _poll_index_quiet(client, job_id)
+            if str(result.get("status")) == "done" and not no_wire:
+                _auto_wire(ctx, client, repo_path, harness)
             _emit_json(result)
             if str(result.get("status")) != "done":
                 raise typer.Exit(1)
             return
-        _poll_index(client, job_id)
+        result = _poll_index(client, job_id)
+        if str(result.get("status")) == "done" and not no_wire:
+            _auto_wire(ctx, client, repo_path, harness)
+
+
+# ---------------------------------------------------------------------------
+# wire / unwire — harness integration per repo
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def wire(
+    ctx: typer.Context,
+    path: Annotated[
+        Path, typer.Argument(help="Repo path to wire (default: cwd).")
+    ] = Path("."),
+    harness: Annotated[
+        str | None,
+        typer.Option(
+            "--harness",
+            help="Force the wire target (claude|agents|gemini|cline|cursor); "
+            "default: auto-detect.",
+        ),
+    ] = None,
+) -> None:
+    """Inject the codebase-indexer usage block into this repo's agent config."""
+    repo_path = path.expanduser().resolve()
+    if not repo_path.is_dir():
+        raise _bail(f"Not a directory: {repo_path}")
+    cfg = _get_config(ctx)
+    with _client(ctx, timeout=5.0) as client:
+        slug = _slug_for_path(client, repo_path)
+    if not slug:
+        raise _bail(
+            f"{repo_path} is not indexed yet — run `code-indexer index` first."
+        )
+    try:
+        res = wire_repo(repo_path, slug=slug, base_url=cfg.base_url, harness=harness)
+    except (OSError, ValueError) as exc:
+        raise _bail(str(exc)) from exc
+    if _json_mode(ctx):
+        _emit_json(res)
+        return
+    console.print(
+        f"[green]Wired[/green] {res['harness']} → {res['target']} ({res['action']})"
+    )
+
+
+@app.command()
+def unwire(
+    ctx: typer.Context,
+    path: Annotated[
+        Path, typer.Argument(help="Repo path to unwire (default: cwd).")
+    ] = Path("."),
+    harness: Annotated[
+        str | None,
+        typer.Option("--harness", help="Limit removal to one harness target."),
+    ] = None,
+) -> None:
+    """Remove the codebase-indexer block from this repo's agent config."""
+    repo_path = path.expanduser().resolve()
+    try:
+        res = unwire_repo(repo_path, harness=harness)
+    except (OSError, ValueError) as exc:
+        raise _bail(str(exc)) from exc
+    if _json_mode(ctx):
+        _emit_json(res)
+        return
+    if res["removed"]:
+        for target in res["removed"]:
+            console.print(f"[green]Unwired[/green] {target}")
+    else:
+        console.print("[yellow]No codebase-indexer block found.[/yellow]")
 
 
 # ---------------------------------------------------------------------------
