@@ -39,7 +39,7 @@ You can ask it things like:
 ## Quickstart
 
 ```bash
-pipx install git+https://github.com/nrmeyers/codebase-indexer.git
+uv tool install git+https://github.com/nrmeyers/codebase-indexer.git   # or: pipx install …
 code-indexer setup                       # one-time interactive wizard
 code-indexer index ~/path/to/your/repo   # indexes in the background, polls to completion
 code-indexer search "where is the auth code"
@@ -48,8 +48,10 @@ code-indexer callers myproject.parser.process_file
 
 > **STOP — semantic search needs an embedder backend.**
 >
-> The default `EMBEDDER_BACKEND=local` ships with the default install
-> (`uv sync` includes sentence-transformers). If the embedder is missing,
+> The default `EMBEDDER_BACKEND=local` ships with the default install — a
+> `uv tool install` / `pipx` install (or `uv sync` from a clone) already
+> bundles sentence-transformers, so it works out of the box. If the embedder
+> is missing,
 > the indexer will boot but every `/search/semantic` call returns 503 with
 > `in-process embedder not initialised`, and `GET /health` will show
 > `embedder.available: false` (look for the loud startup banner).
@@ -71,7 +73,7 @@ code-indexer callers myproject.parser.process_file
 > uv sync --extra byo && export EMBEDDER_BACKEND=openai OPENAI_API_KEY=sk-...
 > ```
 >
-> Verify after `uvicorn app.main:app` starts:
+> Verify after the daemon starts (`code-indexer start`, or `uvicorn app.main:app` from a clone):
 >
 > ```bash
 > curl -s http://localhost:8003/health | jq .embedder
@@ -135,15 +137,25 @@ TheForge auto-starts this service via `scripts/start-indexer.sh` and proxies it 
 ### Install
 
 ```bash
-# Option 1 — pipx (recommended for users)
-pipx install git+https://github.com/nrmeyers/codebase-indexer.git
+# Option 1 — install onto your PATH (recommended for users); works from any dir
+uv tool install git+https://github.com/nrmeyers/codebase-indexer.git
+# or: pipx install git+https://github.com/nrmeyers/codebase-indexer.git
 
 # Option 2 — from a clone (recommended for contributors)
 git clone https://github.com/nrmeyers/codebase-indexer.git
 cd codebase-indexer
 uv sync
-# Then prefix all commands with: uv run code-indexer ...
+uv tool install --editable .     # optional: `code-indexer` on PATH
+# (or just prefix commands with: uv run code-indexer ...)
 ```
+
+Installed via `uv tool` / `pipx`, the CLI is **user-scoped** and runs from any
+directory without scattering files into your cwd: config lives at
+`${XDG_CONFIG_HOME:-~/.config}/codebase-indexer/` and the index datastore at
+`${XDG_DATA_HOME:-~/.local/share}/codebase-indexer/` (an existing `./.cgr` in
+the working dir is used instead, for in-place / TheForge deployments). See
+[`INSTALL.md`](INSTALL.md) for the full runbook — standalone, Docker, the
+`preflight`/`verify`/`doctor` checks, and the Claude harness skill.
 
 ### First run
 
